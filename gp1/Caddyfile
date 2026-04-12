@@ -3,7 +3,7 @@ root ./public
 
 fastcgi / /var/run/php/php-fpm.sock php
 
-tls {$TLS_EMAIL}
+tls off
 
 rewrite {
     to {path} /index.php?{query}
