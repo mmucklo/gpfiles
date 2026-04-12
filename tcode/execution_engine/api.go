@@ -1,0 +1,1698 @@
+package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"io/ioutil"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"runtime"
+	"runtime/pprof"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/nats-io/nats.go"
+	"golang.org/x/time/rate"
+)
+
+var (
+	gitCommit = "dev"
+	buildTime = "unknown"
+	goVersion = runtime.Version()
+    limiters = make(map[string]*rate.Limiter)
+    limiterMu sync.Mutex
+)
+
+// ── account / positions cache (10s TTL) ─────────────────────────────────────
+var (
+	accountCache      interface{}
+	accountCacheMu    sync.Mutex
+	accountCachedAt   time.Time
+	accountCacheTTL   = 10 * time.Second
+
+	positionsCache    interface{}
+	positionsCacheMu  sync.Mutex
+	positionsCachedAt time.Time
+
+	// Simulation mode toggle: "paper" or "sim"
+	simMode   = "paper"
+	simModeMu sync.RWMutex
+
+	// Chain price cache for position mark-to-market
+	chainPriceCache   map[string]float64 // "CALL_365.00_2026-04-13" -> mid_price
+	chainPriceCacheTs time.Time
+	chainPriceCacheMu sync.Mutex
+)
+
+func fetchChainPrices() map[string]float64 {
+	chainPriceCacheMu.Lock()
+	defer chainPriceCacheMu.Unlock()
+
+	// Return cached if fresh (60s TTL)
+	if chainPriceCache != nil && time.Since(chainPriceCacheTs) < 60*time.Second {
+		return chainPriceCache
+	}
+
+	// Fetch from Python
+	cmd := exec.Command("./alpha_engine/venv/bin/python", "alpha_engine/ingestion/options_chain_api.py")
+	cmd.Dir = "/home/builder/src/gemini"
+	out, err := cmd.Output()
+	if err != nil {
+		fmt.Printf("[CHAIN] Price fetch failed: %v\n", err)
+		return chainPriceCache // Return stale cache
+	}
+
+	var data struct {
+		Calls []struct {
+			Strike float64 `json:"strike"`
+			Mid    float64 `json:"mid"`
+		} `json:"calls"`
+		Puts []struct {
+			Strike float64 `json:"strike"`
+			Mid    float64 `json:"mid"`
+		} `json:"puts"`
+		Expiry string `json:"expiry"`
+	}
+
+	if err := json.Unmarshal(out, &data); err != nil {
+		fmt.Printf("[CHAIN] Price parse failed: %v\n", err)
+		return chainPriceCache
+	}
+
+	prices := make(map[string]float64)
+	for _, c := range data.Calls {
+		key := fmt.Sprintf("CALL_%.2f_%s", c.Strike, data.Expiry)
+		prices[key] = c.Mid
+	}
+	for _, p := range data.Puts {
+		key := fmt.Sprintf("PUT_%.2f_%s", p.Strike, data.Expiry)
+		prices[key] = p.Mid
+	}
+
+	chainPriceCache = prices
+	chainPriceCacheTs = time.Now()
+	fmt.Printf("[CHAIN] Prices refreshed: %d entries for %s\n", len(prices), data.Expiry)
+	return prices
+}
+
+// ConfigStore holds the dynamic system configuration.
+// Protected by a Mutex for thread-safe updates from the UI.
+type ConfigStore struct {
+	IBKR struct {
+		Host     string `json:"host"`
+		Port     int    `json:"port"`
+		Username string `json:"username"`
+		Password string `json:"password"`
+	} `json:"ibkr"`
+	Telegram struct {
+		Token  string `json:"token"`
+		ChatID string `json:"chat_id"`
+	} `json:"telegram"`
+	TradingView struct {
+		SessionID string `json:"session_id"`
+	} `json:"trading_view"`
+	mu sync.RWMutex
+}
+
+var GlobalConfig = &ConfigStore{}
+
+// SignalStore maintains a ring buffer of signals.
+type SignalStore struct {
+	Latest []AlphaSignal
+	mu     sync.RWMutex
+	maxLen int
+}
+
+func NewSignalStore(maxLen int) *SignalStore {
+	return &SignalStore{Latest: make([]AlphaSignal, 0), maxLen: maxLen}
+}
+
+var GlobalSignals = NewSignalStore(500)    // all signals (heartbeat included) — 500 to survive heartbeat flood
+var GlobalConvictions = NewSignalStore(200) // non-IDLE conviction signals only
+
+func (s *SignalStore) AddSignal(sig AlphaSignal) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Latest = append([]AlphaSignal{sig}, s.Latest...)
+	if len(s.Latest) > s.maxLen {
+		s.Latest = s.Latest[:s.maxLen]
+	}
+}
+
+func AddSignal(sig AlphaSignal) {
+	GlobalSignals.AddSignal(sig)
+	GlobalMetrics.LogSignal(sig.StrategyCode)
+	if sig.StrategyCode != "IDLE_SCAN" {
+		GlobalConvictions.AddSignal(sig)
+	}
+}
+
+// ConfigHandler manages the REST API for credential updates.
+type ConfigHandler struct {
+	Executor  *IBKRExecutor
+	Guard     *LiveCapitalGuard
+	Portfolio *PaperPortfolio
+	NatsConn  *nats.Conn
+}
+
+func (h *ConfigHandler) ServeSignals(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Content-Type", "application/json")
+	
+	GlobalConvictions.mu.RLock()
+	defer GlobalConvictions.mu.RUnlock()
+	json.NewEncoder(w).Encode(GlobalConvictions.Latest)
+}
+
+func (h *ConfigHandler) ServeAllSignals(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Content-Type", "application/json")
+
+	GlobalSignals.mu.RLock()
+	defer GlobalSignals.mu.RUnlock()
+	json.NewEncoder(w).Encode(GlobalSignals.Latest)
+}
+
+// TradeLog represents a recorded trade for the UI.
+type TradeLog struct {
+	Time       time.Time `json:"time"`
+	Ticker     string    `json:"ticker"`
+	Action     string    `json:"action"`
+	Quantity   int       `json:"quantity"`
+	Price      float64   `json:"price"`
+	Cost       float64   `json:"cost"`       // New field: Total dollar cost
+	PnL        float64   `json:"pnl"`
+	NetProfit  float64   `json:"net_profit"` // Tax-adjusted
+}
+
+var GlobalTrades = &struct {
+	Recent []TradeLog `json:"recent"`
+	mu     sync.RWMutex
+}{Recent: make([]TradeLog, 0)}
+
+func AddTradeLog(log TradeLog) {
+	GlobalTrades.mu.Lock()
+	defer GlobalTrades.mu.Unlock()
+	GlobalTrades.Recent = append([]TradeLog{log}, GlobalTrades.Recent...)
+	if len(GlobalTrades.Recent) > 500 {
+		GlobalTrades.Recent = GlobalTrades.Recent[:500]
+	}
+}
+
+func (h *ConfigHandler) ServePortfolio(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Content-Type", "application/json")
+	
+	h.Portfolio.mu.RLock()
+	defer h.Portfolio.mu.RUnlock()
+	json.NewEncoder(w).Encode(h.Portfolio)
+}
+
+func (h *ConfigHandler) ServeTrades(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Content-Type", "application/json")
+	
+	GlobalTrades.mu.RLock()
+	defer GlobalTrades.mu.RUnlock()
+	json.NewEncoder(w).Encode(GlobalTrades.Recent)
+}
+
+// SimState holds the latest simulation progress.
+type SimState struct {
+	Iteration int     `json:"iteration"`
+	Pot       float64 `json:"pot"`
+	PnlPct    float64 `json:"pnl_pct"`
+	Status    string  `json:"status"`
+	Trades    int     `json:"trades"`
+	Wins      int     `json:"wins"`
+}
+
+var GlobalSimState = &struct {
+	State SimState `json:"state"`
+	mu    sync.RWMutex
+}{}
+
+func UpdateSimState(data []byte) {
+	var s SimState
+	if err := json.Unmarshal(data, &s); err == nil {
+		GlobalSimState.mu.Lock()
+		GlobalSimState.State = s
+		GlobalSimState.mu.Unlock()
+	}
+}
+
+func (h *ConfigHandler) ServeSimulation(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Content-Type", "application/json")
+	
+	GlobalSimState.mu.RLock()
+	defer GlobalSimState.mu.RUnlock()
+	json.NewEncoder(w).Encode(GlobalSimState.State)
+}
+
+func (h *ConfigHandler) ToggleSimulation(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	// Logic: Signal Gastown process via NATS or IPC.
+	// For this build, we'll use a NATS broadcast to toggle state.
+	nc, _ := nats.Connect("nats://127.0.0.1:4222")
+	defer nc.Close()
+	
+	action := r.URL.Query().Get("action") // "START" or "STOP"
+	fmt.Printf("UI Signal: Simulation %s requested.\n", action)
+	nc.Publish("tsla.alpha.sim.control", []byte(action))
+	
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status": "ok"}`))
+}
+
+func (h *ConfigHandler) ResetGuard(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	h.Guard.Reset()
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status": "ok"}`))
+}
+
+func (h *ConfigHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Enable CORS for the React frontend
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method == "OPTIONS" {
+		return
+	}
+
+	if r.Method == "GET" {
+		GlobalConfig.mu.RLock()
+		defer GlobalConfig.mu.RUnlock()
+		json.NewEncoder(w).Encode(GlobalConfig)
+		return
+	}
+
+	if r.Method == "POST" {
+		var newConfig struct {
+			IBKR struct {
+				Host     string `json:"host"`
+				Port     int    `json:"port"`
+				Username string `json:"username"`
+				Password string `json:"password"`
+			} `json:"ibkr"`
+			Telegram struct {
+				Token  string `json:"token"`
+				ChatID string `json:"chat_id"`
+			} `json:"telegram"`
+			TradingView struct {
+				SessionID string `json:"session_id"`
+			} `json:"trading_view"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&newConfig); err != nil {
+			http.Error(w, "Invalid Payload", http.StatusBadRequest)
+			return
+		}
+
+		GlobalConfig.mu.Lock()
+		GlobalConfig.IBKR = newConfig.IBKR
+		GlobalConfig.Telegram = newConfig.Telegram
+		GlobalConfig.TradingView = newConfig.TradingView
+		GlobalConfig.mu.Unlock()
+
+		// Logic: Hot-swap the Telegram bot token in the Live Guard
+		if newConfig.Telegram.Token != "" {
+			h.Guard.AlertBot.Token = newConfig.Telegram.Token
+			h.Guard.AlertBot.ChatID = newConfig.Telegram.ChatID
+		}
+
+		fmt.Println("System Config Updated via Alpha Control Center.")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status": "success"}`))
+	}
+}
+
+// ========= METRICS AND SYSTEM MONITORING =========
+
+type MetricsStore struct {
+	RequestCounts []int       `json:"request_counts"`
+	SignalCounts  []int       `json:"signal_counts"`
+	cpuUsage      float64
+	lastCpuSample time.Time
+	lastTotal     uint64
+	lastIdle      uint64
+	startTime     time.Time
+	TotalRequests uint64
+	TotalSignals    uint64
+	Latencies       []time.Duration
+	SignalBreakdown map[string]int
+	mu              sync.RWMutex
+}
+
+func NewMetricsStore() *MetricsStore {
+	m := &MetricsStore{
+		RequestCounts:   make([]int, 60),
+		SignalCounts:    make([]int, 10),
+		startTime:       time.Now(),
+		TotalRequests:   0,
+		TotalSignals:    0,
+		Latencies:       make([]time.Duration, 0, 2000),
+		SignalBreakdown: make(map[string]int),
+	}
+
+	// Ticker to advance the request-per-second buffer
+	go func() {
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			m.mu.Lock()
+			m.RequestCounts = append([]int{0}, m.RequestCounts[:59]...)
+			m.mu.Unlock()
+		}
+	}()
+
+	// Ticker to advance the signals-per-minute buffer
+	go func() {
+		ticker := time.NewTicker(1 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			m.mu.Lock()
+			m.SignalCounts = append([]int{0}, m.SignalCounts[:9]...)
+			m.mu.Unlock()
+		}
+	}()
+
+	// Ticker to update CPU usage
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			m.updateCpuUsage()
+		}
+	}()
+
+	return m
+}
+
+func (m *MetricsStore) LogRequest() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.TotalRequests++
+	if len(m.RequestCounts) > 0 {
+		m.RequestCounts[0]++
+	}
+}
+
+func (m *MetricsStore) LogSignal(strategyCode string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.TotalSignals++
+	if len(m.SignalCounts) > 0 {
+		m.SignalCounts[0]++
+	}
+	m.SignalBreakdown[strategyCode]++
+}
+
+func (m *MetricsStore) updateCpuUsage() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	content, err := ioutil.ReadFile("/proc/stat")
+	if err != nil {
+		return
+	}
+
+	lines := strings.Split(string(content), "\n")
+	if len(lines) == 0 {
+		return
+	}
+
+	fields := strings.Fields(lines[0])
+	if len(fields) < 5 || fields[0] != "cpu" {
+		return
+	}
+
+	var total, idle uint64
+	for i := 1; i < len(fields); i++ {
+		val, err := strconv.ParseUint(fields[i], 10, 64)
+		if err != nil {
+			return
+		}
+		if i == 4 { // idle time
+			idle = val
+		}
+		total += val
+	}
+
+	if m.lastTotal > 0 {
+		deltaTotal := total - m.lastTotal
+		deltaIdle := idle - m.lastIdle
+		if deltaTotal > 0 {
+			m.cpuUsage = (1.0 - float64(deltaIdle)/float64(deltaTotal)) * 100.0
+		}
+	}
+
+	m.lastTotal = total
+	m.lastIdle = idle
+	m.lastCpuSample = time.Now()
+}
+
+var GlobalMetrics = NewMetricsStore()
+
+func (h *ConfigHandler) ServeRequestMetrics(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	GlobalMetrics.mu.RLock()
+	defer GlobalMetrics.mu.RUnlock()
+	json.NewEncoder(w).Encode(GlobalMetrics.RequestCounts)
+}
+
+func (h *ConfigHandler) ServeSignalMetrics(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	GlobalMetrics.mu.RLock()
+	defer GlobalMetrics.mu.RUnlock()
+	json.NewEncoder(w).Encode(GlobalMetrics.SignalCounts)
+}
+
+func (h *ConfigHandler) ServeLogs(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+
+	file, err := os.Open("executor.log")
+	if err != nil {
+		http.Error(w, "Log file not found.", http.StatusInternalServerError)
+		return
+	}
+	defer file.Close()
+
+	var lines []string
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+	}
+
+	start := 0
+	if len(lines) > 200 {
+		start = len(lines) - 200
+	}
+
+	for _, line := range lines[start:] {
+		fmt.Fprintln(w, line)
+	}
+}
+
+type Vitals struct {
+	Uptime        float64 `json:"uptime_sec"`
+	Goroutines    int     `json:"goroutines"`
+	MemUsedMB     uint64  `json:"mem_mb"`
+	CpuPct        float64 `json:"cpu_pct"`
+	GcPauseMs     float64 `json:"gc_pause_ms"`
+	HeapAlloc     uint64  `json:"heap_alloc"`
+	HeapObjects   uint64  `json:"heap_objects"`
+	NextGC        uint64  `json:"next_gc"`
+	TotalRequests uint64  `json:"total_requests"`
+	TotalSignals  uint64  `json:"total_signals"`
+}
+
+func (h *ConfigHandler) ServeVitals(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+
+	GlobalMetrics.mu.RLock()
+	cpuUsage := GlobalMetrics.cpuUsage
+	startTime := GlobalMetrics.startTime
+	totalRequests := GlobalMetrics.TotalRequests
+	totalSignals := GlobalMetrics.TotalSignals
+	GlobalMetrics.mu.RUnlock()
+
+	vitals := Vitals{
+		Uptime:        time.Since(startTime).Seconds(),
+		Goroutines:    runtime.NumGoroutine(),
+		MemUsedMB:     memStats.Alloc / 1024 / 1024,
+		CpuPct:        cpuUsage,
+		GcPauseMs:     float64(memStats.PauseTotalNs) / float64(time.Millisecond),
+		HeapAlloc:     memStats.HeapAlloc / 1024 / 1024,
+		HeapObjects:   memStats.HeapObjects,
+		NextGC:        memStats.NextGC / 1024 / 1024,
+		TotalRequests: totalRequests,
+		TotalSignals:  totalSignals,
+	}
+
+	json.NewEncoder(w).Encode(vitals)
+}
+
+func (h *ConfigHandler) ServeLatencyMetrics(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	GlobalMetrics.mu.RLock()
+	latencies := make([]time.Duration, len(GlobalMetrics.Latencies))
+	copy(latencies, GlobalMetrics.Latencies)
+	GlobalMetrics.mu.RUnlock()
+
+	if len(latencies) == 0 {
+		json.NewEncoder(w).Encode(map[string]float64{"p50": 0, "p95": 0, "p99": 0})
+		return
+	}
+
+	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+
+	p50 := latencies[len(latencies)/2]
+	p95 := latencies[len(latencies)*95/100]
+	p99 := latencies[len(latencies)*99/100]
+
+	json.NewEncoder(w).Encode(map[string]float64{
+		"p50": float64(p50.Microseconds()) / 1000.0,
+		"p95": float64(p95.Microseconds()) / 1000.0,
+		"p99": float64(p99.Microseconds()) / 1000.0,
+	})
+}
+
+func (h *ConfigHandler) ServeSignalBreakdown(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	GlobalMetrics.mu.RLock()
+	defer GlobalMetrics.mu.RUnlock()
+	json.NewEncoder(w).Encode(GlobalMetrics.SignalBreakdown)
+}
+
+type NatsHealth struct {
+	Connected  bool   `json:"connected"`
+	ServerURL  string `json:"server_url"`
+	MsgsIn     uint64 `json:"msgs_in"`
+	MsgsOut    uint64 `json:"msgs_out"`
+	BytesIn    uint64 `json:"bytes_in"`
+	BytesOut   uint64 `json:"bytes_out"`
+	Reconnects uint64 `json:"reconnects"`
+}
+
+func (h *ConfigHandler) ServeNatsHealth(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if h.NatsConn == nil || !h.NatsConn.IsConnected() {
+		json.NewEncoder(w).Encode(NatsHealth{Connected: false})
+		return
+	}
+
+	stats := h.NatsConn.Stats()
+	health := NatsHealth{
+		Connected:  true,
+		ServerURL:  h.NatsConn.ConnectedUrl(),
+		MsgsIn:     stats.InMsgs,
+		MsgsOut:    stats.OutMsgs,
+		BytesIn:    stats.InBytes,
+		BytesOut:   stats.OutBytes,
+		Reconnects: stats.Reconnects,
+	}
+	json.NewEncoder(w).Encode(health)
+}
+
+type BuildInfo struct {
+	GitCommit string `json:"git_commit"`
+	BuildTime string `json:"build_time"`
+	GoVersion string `json:"go_version"`
+}
+
+func (h *ConfigHandler) ServeBuildInfo(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	info := BuildInfo{
+		GitCommit: gitCommit,
+		BuildTime: buildTime,
+		GoVersion: goVersion,
+	}
+	json.NewEncoder(w).Encode(info)
+}
+
+func runFillDetail(args ...string) ([]byte, error) {
+	cmd := exec.Command("./alpha_engine/venv/bin/python", append([]string{"alpha_engine/data/fill_detail.py"}, args...)...)
+	cmd.Dir = "/home/builder/src/gemini"
+	cmd.Env = os.Environ()
+	return cmd.Output()
+}
+
+func (h *ConfigHandler) ServeClosedTrades(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	out, err := runFillDetail("list")
+	if err != nil {
+		json.NewEncoder(w).Encode([]interface{}{})
+		return
+	}
+	w.Write(out)
+}
+
+func (h *ConfigHandler) ServeFillDetail(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		json.NewEncoder(w).Encode(map[string]string{"error": "id required"})
+		return
+	}
+	out, err := runFillDetail("detail", id)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	w.Write(out)
+}
+
+func (h *ConfigHandler) ServeGoroutineProfile(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	pprof.Lookup("goroutine").WriteTo(w, 1)
+}
+
+type BrokerStatus struct {
+	Mode      string `json:"mode"`
+	Broker    string `json:"broker"`
+	Confirmed bool   `json:"confirmed"`
+}
+
+type SystemState struct {
+	KillSwitch           bool    `json:"kill_switch"`
+	SignalsBlockedReason string  `json:"signals_blocked_reason"`
+	DailyPnL             float64 `json:"daily_pnl"`
+	MaxDailyLoss         float64 `json:"max_daily_loss"`
+	Mode                 string  `json:"mode"`
+	ConvictionCount      int     `json:"conviction_count"`
+}
+
+// isMarketOpen returns true if current ET time is within regular trading hours (Mon-Fri 9:30-16:00)
+func isMarketOpen() bool {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		return false
+	}
+	now := time.Now().In(loc)
+	wd := now.Weekday()
+	if wd == time.Saturday || wd == time.Sunday {
+		return false
+	}
+	open := time.Date(now.Year(), now.Month(), now.Day(), 9, 30, 0, 0, loc)
+	close := time.Date(now.Year(), now.Month(), now.Day(), 16, 0, 0, 0, loc)
+	return now.After(open) && now.Before(close)
+}
+
+func (h *ConfigHandler) ServeSystemState(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	killSwitch := h.Guard != nil && h.Guard.KillSwitch
+
+	GlobalConvictions.mu.RLock()
+	convCount := len(GlobalConvictions.Latest)
+	GlobalConvictions.mu.RUnlock()
+
+	reason := ""
+	switch {
+	case killSwitch:
+		reason = "kill_switch"
+	case !isMarketOpen():
+		reason = "market_closed"
+	case convCount == 0:
+		reason = "no_signals"
+	}
+
+	dailyPnL := 0.0
+	maxDailyLoss := 0.0
+	if h.Guard != nil {
+		dailyPnL = h.Guard.CurrentDailyPnL
+		maxDailyLoss = h.Guard.MaxDailyLoss
+	}
+
+	simModeMu.RLock()
+	currentMode := simMode
+	simModeMu.RUnlock()
+
+	json.NewEncoder(w).Encode(SystemState{
+		KillSwitch:           killSwitch,
+		SignalsBlockedReason: reason,
+		DailyPnL:             dailyPnL,
+		MaxDailyLoss:         maxDailyLoss,
+		Mode:                 currentMode,
+		ConvictionCount:      convCount,
+	})
+}
+
+func (h *ConfigHandler) ServeBrokerStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	simModeMu.RLock()
+	currentMode := simMode
+	simModeMu.RUnlock()
+	status := BrokerStatus{
+		Mode:      currentMode,
+		Broker:    "IBKR",
+		Confirmed: true,
+	}
+	json.NewEncoder(w).Encode(status)
+}
+
+func (h *ConfigHandler) ServeStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	status := map[string]interface{}{
+		"server":    "ok",
+		"version":   gitCommit,
+		"timestamp": time.Now(),
+	}
+	json.NewEncoder(w).Encode(status)
+}
+
+func RateLimiterMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ip, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		limiterMu.Lock()
+		limiter, exists := limiters[ip]
+		if !exists {
+			limiter = rate.NewLimiter(30, 100)
+			limiters[ip] = limiter
+		}
+		limiterMu.Unlock()
+
+		if !limiter.Allow() {
+			w.Header().Set("Retry-After", "2")
+			http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// ========= GASTOWN DASHBOARD =========
+
+type AgentDetail struct {
+	Hook        string `json:"hook"`
+	Heartbeat   string `json:"heartbeat"`
+	MailCount   int    `json:"mail_count"`
+	LastActive  string `json:"last_active"`
+}
+
+type GitInfo struct {
+	Branch     string `json:"branch"`
+	LastCommit string `json:"last_commit"`
+}
+
+type GastownFullStatus struct {
+	Status       interface{}              `json:"status"`
+	Log          []string                 `json:"log"`
+	Ready        interface{}              `json:"ready"`
+	AgentsDetail map[string]AgentDetail   `json:"agents_detail"`
+	Patrols      interface{}              `json:"patrols"`
+	TmuxSessions []string                 `json:"tmux_sessions"`
+	Escalation   interface{}              `json:"escalation"`
+	GitInfo      GitInfo                  `json:"git_info"`
+	RefreshedAt  string                   `json:"refreshed_at"`
+}
+
+func runGTCommand(args ...string) ([]byte, error) {
+	cmd := exec.Command("/home/builder/go/bin/gt", args...)
+	cmd.Dir = "/home/builder/gt"
+	// Ensure dolt and bd are findable — systemd service may not have full user PATH
+	enrichedPath := "/home/builder/go/bin:/home/builder/.local/bin:" + os.Getenv("PATH")
+	cmd.Env = append(os.Environ(), "HOME=/home/builder", "PATH="+enrichedPath)
+	return cmd.Output()
+}
+
+func readJSONFile(path string) interface{} {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return map[string]interface{}{"error": err.Error()}
+	}
+	var result interface{}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return map[string]interface{}{"raw": string(data), "error": err.Error()}
+	}
+	return result
+}
+
+func (h *ConfigHandler) ServeGastownStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	homeDir := "/home/builder"
+	gtDir := homeDir + "/gt"
+
+	result := GastownFullStatus{
+		AgentsDetail: make(map[string]AgentDetail),
+		RefreshedAt:  time.Now().Format(time.RFC3339),
+	}
+
+	// gt status --json
+	if out, err := runGTCommand("status", "--json"); err == nil {
+		var s interface{}
+		if json.Unmarshal(out, &s) == nil {
+			result.Status = s
+		}
+	} else {
+		result.Status = map[string]interface{}{"error": err.Error()}
+	}
+
+	// gt log (last 50 lines)
+	if out, err := runGTCommand("log"); err == nil {
+		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+		filtered := []string{}
+		for _, l := range lines {
+			t := strings.TrimSpace(l)
+			if t != "" && !strings.HasPrefix(t, "WARNING:") && !strings.HasPrefix(t, "Use 'make") && !strings.HasPrefix(t, "Run from:") && !strings.HasPrefix(t, "Warning:") && !strings.HasPrefix(t, "○ No log") {
+				filtered = append(filtered, t)
+			}
+		}
+		if len(filtered) > 50 {
+			filtered = filtered[len(filtered)-50:]
+		}
+		result.Log = filtered
+	} else {
+		result.Log = []string{}
+	}
+
+	// gt ready --json
+	if out, err := runGTCommand("ready", "--json"); err == nil {
+		var s interface{}
+		if json.Unmarshal(out, &s) == nil {
+			result.Ready = s
+		}
+	} else {
+		result.Ready = map[string]interface{}{"error": err.Error()}
+	}
+
+	// Read patrol config from daemon.json
+	result.Patrols = readJSONFile(gtDir + "/mayor/daemon.json")
+
+	// Read escalation config
+	result.Escalation = readJSONFile(gtDir + "/settings/escalation.json")
+
+	// Per-agent filesystem details
+	agents := []string{"mayor", "deacon"}
+	for _, agent := range agents {
+		detail := AgentDetail{}
+		agentDir := gtDir + "/" + agent
+
+		// Hook file
+		hookPath := agentDir + "/hook"
+		if data, err := os.ReadFile(hookPath); err == nil {
+			detail.Hook = strings.TrimSpace(string(data))
+		}
+
+		// Heartbeat file — prefer tmux session activity for alt-session agents
+		hbPath := agentDir + "/heartbeat"
+		if info, err := os.Stat(hbPath); err == nil {
+			detail.Heartbeat = info.ModTime().Format(time.RFC3339)
+			detail.LastActive = info.ModTime().Format(time.RFC3339)
+		} else if dirInfo, err := os.Stat(agentDir); err == nil {
+			detail.LastActive = dirInfo.ModTime().Format(time.RFC3339)
+		}
+
+		result.AgentsDetail[agent] = detail
+	}
+
+	// tmux session activity times: map session name → Unix timestamp
+	tmuxActivity := map[string]int64{}
+	actCmd := exec.Command("tmux", "-L", "default", "list-sessions", "-F", "#{session_name} #{session_activity}")
+	actCmd.Env = os.Environ()
+	if out, err := actCmd.Output(); err == nil {
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			parts := strings.Fields(line)
+			if len(parts) == 2 {
+				var ts int64
+				if _, err := fmt.Sscanf(parts[1], "%d", &ts); err == nil {
+					tmuxActivity[parts[0]] = ts
+				}
+			}
+		}
+	}
+	// Override last_active for agents running in alt-sessions
+	altSessionMap := map[string]string{"mayor": "tsla-claude", "deacon": "tsla-linux"}
+	for agent, sess := range altSessionMap {
+		if ts, ok := tmuxActivity[sess]; ok && ts > 0 {
+			d := result.AgentsDetail[agent]
+			d.LastActive = time.Unix(ts, 0).Format(time.RFC3339)
+			result.AgentsDetail[agent] = d
+		}
+	}
+
+	// tmux sessions
+	cmd := exec.Command("tmux", "-L", "default", "list-sessions", "-F", "#{session_name}")
+	cmd.Env = os.Environ()
+	if out, err := cmd.Output(); err == nil {
+		sessions := strings.Split(strings.TrimSpace(string(out)), "\n")
+		result.TmuxSessions = sessions
+	}
+
+	// Enrich: override agent running status based on actual tmux sessions.
+	// gt names sessions "hq-mayor"/"hq-deacon" but we run as "tsla-claude"/"tsla-linux".
+	sessionSet := map[string]bool{}
+	for _, s := range result.TmuxSessions {
+		sessionSet[s] = true
+	}
+	// Map known alt-session names to agents.
+	// tsla-claude is the actual mayor session. tsla-linux is Gemini CLI (not deacon).
+	agentAltSessions := map[string][]string{
+		"mayor":  {"tsla-claude", "hq-mayor"},
+		"deacon": {"hq-deacon"},
+	}
+	if statusMap, ok := result.Status.(map[string]interface{}); ok {
+		if agentList, ok := statusMap["agents"].([]interface{}); ok {
+			for i, a := range agentList {
+				if agentMap, ok := a.(map[string]interface{}); ok {
+					name, _ := agentMap["name"].(string)
+					if alts, has := agentAltSessions[name]; has {
+						for _, alt := range alts {
+							if sessionSet[alt] {
+								agentMap["running"] = true
+								agentMap["session"] = alt
+								agentList[i] = agentMap
+								break
+							}
+						}
+					}
+				}
+			}
+			statusMap["agents"] = agentList
+			result.Status = statusMap
+		}
+	}
+
+	// Enrich: if gt log is empty, capture live output from the active tmux sessions.
+	if len(result.Log) == 0 {
+		prioritySessions := []string{"tsla-claude", "tsla-linux"}
+		for _, sess := range prioritySessions {
+			if !sessionSet[sess] {
+				continue
+			}
+			captureCmd := exec.Command("tmux", "-L", "default", "capture-pane", "-t", sess, "-p", "-S", "-80")
+			captureCmd.Env = os.Environ()
+			if out, err := captureCmd.Output(); err == nil {
+				prefix := "[" + sess + "] "
+				for _, l := range strings.Split(string(out), "\n") {
+					t := strings.TrimSpace(l)
+					if t != "" && len(t) > 4 {
+						result.Log = append(result.Log, prefix+t)
+					}
+				}
+			}
+			if len(result.Log) > 0 {
+				break
+			}
+		}
+		if len(result.Log) > 60 {
+			result.Log = result.Log[len(result.Log)-60:]
+		}
+	}
+
+	// Git info from gt dir
+	gitInfo := GitInfo{}
+	if out, err := exec.Command("git", "-C", gtDir, "log", "-1", "--pretty=%H|%s").Output(); err == nil {
+		parts := strings.SplitN(strings.TrimSpace(string(out)), "|", 2)
+		if len(parts) == 2 {
+			gitInfo.LastCommit = parts[0][:min(7, len(parts[0]))] + " " + parts[1]
+		}
+	}
+	if out, err := exec.Command("git", "-C", gtDir, "rev-parse", "--abbrev-ref", "HEAD").Output(); err == nil {
+		gitInfo.Branch = strings.TrimSpace(string(out))
+	}
+	result.GitInfo = gitInfo
+
+	json.NewEncoder(w).Encode(result)
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// ─── History types ────────────────────────────────────────────────────────────
+
+type GitCommit struct {
+	Hash    string `json:"hash"`
+	Date    string `json:"date"`
+	Message string `json:"message"`
+}
+
+type BeadIssue struct {
+	ID       string `json:"id"`
+	Title    string `json:"title"`
+	Status   string `json:"status"`
+	Priority int    `json:"priority"`
+}
+
+type GastownHistory struct {
+	RepoLog      []GitCommit `json:"repo_log"`
+	WorkspaceLog []GitCommit `json:"workspace_log"`
+	Beads        []BeadIssue `json:"beads"`
+	SessionTail  []string    `json:"session_tail"`
+	RefreshedAt  string      `json:"refreshed_at"`
+}
+
+func parseGitLog(dir string, n int) []GitCommit {
+	out, err := exec.Command("git", "-C", dir, "log", fmt.Sprintf("--format=%%H|%%ai|%%s"), fmt.Sprintf("-%d", n)).Output()
+	if err != nil {
+		return []GitCommit{}
+	}
+	commits := []GitCommit{}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "|", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		hash := parts[0]
+		if len(hash) > 7 {
+			hash = hash[:7]
+		}
+		commits = append(commits, GitCommit{
+			Hash:    hash,
+			Date:    strings.TrimSpace(parts[1]),
+			Message: strings.TrimSpace(parts[2]),
+		})
+	}
+	return commits
+}
+
+func parseBdIssues() []BeadIssue {
+	enrichedPath := "/home/builder/go/bin:/home/builder/.local/bin:" + os.Getenv("PATH")
+	cmd := exec.Command("/home/builder/.local/bin/bd", "list", "--all", "--flat")
+	cmd.Dir = "/home/builder/src/gemini"
+	cmd.Env = append(os.Environ(), "HOME=/home/builder", "PATH="+enrichedPath)
+	out, err := cmd.Output()
+	if err != nil {
+		return []BeadIssue{}
+	}
+	issues := []BeadIssue{}
+	statusMap := map[string]string{
+		"✓": "closed",
+		"○": "open",
+		"◐": "in_progress",
+		"●": "blocked",
+		"❄": "deferred",
+	}
+	priorityMap := map[string]int{
+		"P0": 0, "P1": 1, "P2": 2, "P3": 3, "P4": 4,
+	}
+	for _, raw := range strings.Split(string(out), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "-") || strings.HasPrefix(line, "Total") || strings.HasPrefix(line, "Status") {
+			continue
+		}
+		// Format: <statusIcon> <id> [P<n>] [<type>] - <title>
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
+		icon := fields[0]
+		id := fields[1]
+		status := statusMap[icon]
+		if status == "" {
+			status = "unknown"
+		}
+		priority := 2
+		titleStart := 2
+		// scan for [Pn] and skip [type]
+		for i := 2; i < len(fields); i++ {
+			f := fields[i]
+			if strings.HasPrefix(f, "[P") && strings.HasSuffix(f, "]") {
+				key := strings.Trim(f, "[]")
+				if p, ok := priorityMap[key]; ok {
+					priority = p
+				}
+				titleStart = i + 1
+			} else if strings.HasPrefix(f, "[") && strings.HasSuffix(f, "]") {
+				titleStart = i + 1
+			} else if f == "-" {
+				titleStart = i + 1
+				break
+			}
+		}
+		title := strings.Join(fields[titleStart:], " ")
+		if title == "" {
+			title = id
+		}
+		issues = append(issues, BeadIssue{
+			ID:       id,
+			Title:    title,
+			Status:   status,
+			Priority: priority,
+		})
+	}
+	return issues
+}
+
+func (h *ConfigHandler) ServeGastownHistory(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	hist := GastownHistory{
+		RefreshedAt:  time.Now().Format(time.RFC3339),
+		RepoLog:      parseGitLog("/home/builder/src/gemini", 30),
+		WorkspaceLog: parseGitLog("/home/builder/gt", 20),
+		Beads:        parseBdIssues(),
+		SessionTail:  []string{},
+	}
+
+	// tmux session tail for tsla-claude (last 200 lines)
+	captureCmd := exec.Command("tmux", "-L", "default", "capture-pane", "-t", "tsla-claude", "-p", "-S", "-200")
+	captureCmd.Env = os.Environ()
+	if out, err := captureCmd.Output(); err == nil {
+		for _, line := range strings.Split(string(out), "\n") {
+			t := strings.TrimRight(line, " \t")
+			if t != "" {
+				hist.SessionTail = append(hist.SessionTail, t)
+			}
+		}
+	}
+
+	json.NewEncoder(w).Encode(hist)
+}
+
+func (h *ConfigHandler) ServeGastownLog(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	lines := []string{}
+
+	isPlaceholder := func(t string) bool {
+		return strings.HasPrefix(t, "WARNING:") ||
+			strings.HasPrefix(t, "Use 'make") ||
+			strings.HasPrefix(t, "Run from:") ||
+			strings.HasPrefix(t, "Warning:") ||
+			strings.HasPrefix(t, "○ No log") ||
+			strings.Contains(t, "No log file yet") ||
+			strings.Contains(t, "No activity log entries yet")
+	}
+
+	// Try gt log first
+	if out, err := runGTCommand("log"); err == nil {
+		raw := strings.Split(strings.TrimSpace(string(out)), "\n")
+		for _, l := range raw {
+			t := strings.TrimSpace(l)
+			if t != "" && !isPlaceholder(t) {
+				lines = append(lines, t)
+			}
+		}
+	}
+
+	// Also try reading activity log files directly
+	logPaths := []string{
+		"/home/builder/gt/activity.log",
+		"/home/builder/gt/.beads/activity.log",
+	}
+	for _, p := range logPaths {
+		if data, err := os.ReadFile(p); err == nil {
+			raw := strings.Split(strings.TrimSpace(string(data)), "\n")
+			for _, l := range raw {
+				t := strings.TrimSpace(l)
+				if t != "" && !isPlaceholder(t) {
+					lines = append(lines, t)
+				}
+			}
+			if len(lines) > 0 {
+				break
+			}
+		}
+	}
+
+	// Fallback: capture live tmux session output
+	if len(lines) == 0 {
+		for _, sess := range []string{"tsla-claude", "tsla-linux"} {
+			captureCmd := exec.Command("tmux", "-L", "default", "capture-pane", "-t", sess, "-p", "-S", "-80")
+			captureCmd.Env = os.Environ()
+			if out, err := captureCmd.Output(); err == nil {
+				prefix := "[" + sess + "] "
+				for _, l := range strings.Split(string(out), "\n") {
+					t := strings.TrimSpace(l)
+					if t != "" && len(t) > 4 {
+						lines = append(lines, prefix+t)
+					}
+				}
+			}
+			if len(lines) > 0 {
+				break
+			}
+		}
+	}
+
+	if len(lines) > 200 {
+		lines = lines[len(lines)-200:]
+	}
+
+	json.NewEncoder(w).Encode(lines)
+}
+
+// ── /api/data/audit ───────────────────────────────────────────────────────────
+
+// dataAuditCache holds the last result from the Python validation script.
+var (
+	dataAuditMu      sync.Mutex
+	dataAuditResult  map[string]interface{}
+	dataAuditFetched time.Time
+	dataAuditTTL     = 60 * time.Second
+)
+
+// runDataAudit executes the Python audit aggregator and returns parsed JSON.
+// ingestion.audit runs IBKR → TV → yfinance fallback chain and returns combined status.
+func runDataAudit() (map[string]interface{}, error) {
+	// Run from alpha_engine/ so `ingestion` package is on sys.path
+	cmd := exec.Command("./venv/bin/python", "-m", "ingestion.audit", "TSLA")
+	cmd.Dir = "./alpha_engine"
+	cmd.Env = os.Environ()
+
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("audit subprocess: %w", err)
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(out, &result); err != nil {
+		return nil, fmt.Errorf("audit JSON parse: %w (raw: %s)", err, string(out))
+	}
+	return result, nil
+}
+
+// DataAuditResponse is the full /api/data/audit payload.
+type DataAuditResponse struct {
+	SpotValidation    map[string]interface{} `json:"spot_validation"`
+	OptionsChainSrc   string                 `json:"options_chain_source"`
+	LastChainFetch    string                 `json:"last_chain_fetch"`
+	ChainAgeSec       float64                `json:"chain_age_sec"`
+	TVFeedOK          bool                   `json:"tv_feed_ok"`
+	YFFeedOK          bool                   `json:"yf_feed_ok"`
+	IBKRConnected     bool                   `json:"ibkr_connected"`
+	IBKRSpot          float64                `json:"ibkr_spot"`
+	PrimarySource     string                 `json:"primary_source"`
+}
+
+func (h *ConfigHandler) ServeDataAudit(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	forceRefresh := r.URL.Query().Get("refresh") == "true"
+
+	dataAuditMu.Lock()
+	age := time.Since(dataAuditFetched)
+	cached := dataAuditResult
+	dataAuditMu.Unlock()
+
+	var spotVal map[string]interface{}
+	if !forceRefresh && cached != nil && age < dataAuditTTL {
+		spotVal = cached
+	} else {
+		var err error
+		spotVal, err = runDataAudit()
+		if err != nil {
+			// Return a degraded response rather than 500
+			spotVal = map[string]interface{}{
+				"tv":              nil,
+				"yf":              nil,
+				"divergence_pct":  0.0,
+				"ok":              false,
+				"warning":         err.Error(),
+				"timestamp":       time.Now().UTC().Format(time.RFC3339),
+			}
+		}
+		dataAuditMu.Lock()
+		dataAuditResult = spotVal
+		dataAuditFetched = time.Now()
+		dataAuditMu.Unlock()
+	}
+
+	tvOK := spotVal["tv"] != nil
+	yfOK := spotVal["yf"] != nil
+	ibkrConnected, _ := spotVal["ibkr_connected"].(bool)
+	ibkrSpot, _ := spotVal["ibkr_spot"].(float64)
+	primarySource, _ := spotVal["primary_source"].(string)
+	if primarySource == "" {
+		primarySource = "yfinance"
+	}
+
+	// Build spot_validation sub-object (TV/YF fields only)
+	spotValidation := map[string]interface{}{
+		"tv":             spotVal["tv"],
+		"yf":             spotVal["yf"],
+		"divergence_pct": spotVal["divergence_pct"],
+		"ok":             spotVal["ok"],
+		"warning":        spotVal["warning"],
+		"timestamp":      spotVal["timestamp"],
+	}
+
+	// Determine chain source based on primary data source
+	chainSrc := primarySource
+	if chainSrc == "" {
+		chainSrc = "yfinance"
+	}
+
+	resp := DataAuditResponse{
+		SpotValidation:  spotValidation,
+		OptionsChainSrc: chainSrc,
+		LastChainFetch:  dataAuditFetched.UTC().Format(time.RFC3339),
+		ChainAgeSec:     time.Since(dataAuditFetched).Seconds(),
+		TVFeedOK:        tvOK,
+		YFFeedOK:        yfOK,
+		IBKRConnected:   ibkrConnected,
+		IBKRSpot:        ibkrSpot,
+		PrimarySource:   primarySource,
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
+// ── account helpers ───────────────────────────────────────────────────────────
+
+func runIBKRAccount(mode string, args ...string) (interface{}, error) {
+	cmdArgs := append([]string{"-m", "ingestion.ibkr_account", mode}, args...)
+	cmd := exec.Command("./venv/bin/python", cmdArgs...)
+	cmd.Dir = "./alpha_engine"
+	cmd.Env = os.Environ()
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("ibkr_account[%s]: %w", mode, err)
+	}
+	var result interface{}
+	if err := json.Unmarshal(out, &result); err != nil {
+		return nil, fmt.Errorf("ibkr_account JSON[%s]: %w", mode, err)
+	}
+	return result, nil
+}
+
+func (h *ConfigHandler) ServeAccount(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	accountCacheMu.Lock()
+	if accountCache != nil && time.Since(accountCachedAt) < accountCacheTTL {
+		cached := accountCache
+		accountCacheMu.Unlock()
+		json.NewEncoder(w).Encode(cached)
+		return
+	}
+	accountCacheMu.Unlock()
+
+	result, err := runIBKRAccount("account")
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":            err.Error(),
+			"net_liquidation":  0,
+			"cash_balance":     0,
+			"buying_power":     0,
+			"unrealized_pnl":   0,
+			"realized_pnl":     0,
+			"equity_with_loan": 0,
+		})
+		return
+	}
+
+	accountCacheMu.Lock()
+	accountCache = result
+	accountCachedAt = time.Now()
+	accountCacheMu.Unlock()
+
+	json.NewEncoder(w).Encode(result)
+}
+
+func (h *ConfigHandler) ServePositions(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	positionsCacheMu.Lock()
+	if positionsCache != nil && time.Since(positionsCachedAt) < accountCacheTTL {
+		cached := positionsCache
+		positionsCacheMu.Unlock()
+		json.NewEncoder(w).Encode(cached)
+		return
+	}
+	positionsCacheMu.Unlock()
+
+	result, err := runIBKRAccount("positions")
+	if err != nil {
+		w.Write([]byte("[]"))
+		return
+	}
+	// Ensure we only cache valid list results (not error dicts from Python)
+	if _, isMap := result.(map[string]interface{}); isMap {
+		w.Write([]byte("[]"))
+		return
+	}
+
+	positionsCacheMu.Lock()
+	positionsCache = result
+	positionsCachedAt = time.Now()
+	positionsCacheMu.Unlock()
+
+	json.NewEncoder(w).Encode(result)
+}
+
+func (h *ConfigHandler) ServeFills(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	hours := r.URL.Query().Get("hours")
+	if hours == "" {
+		hours = "24"
+	}
+	result, err := runIBKRAccount("fills", hours)
+	if err != nil {
+		w.Write([]byte("[]"))
+		return
+	}
+	json.NewEncoder(w).Encode(result)
+}
+
+func (h *ConfigHandler) ServeSimReset(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	// Reset sim: zero out paper portfolio balances
+	h.Portfolio.Cash = 25000.0
+	h.Portfolio.NAV = 25000.0
+	h.Portfolio.Positions = make(map[string]Position)
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "mode": "sim"})
+}
+
+func (h *ConfigHandler) ServeSimToggle(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	simModeMu.Lock()
+	if simMode == "paper" {
+		simMode = "sim"
+	} else {
+		simMode = "paper"
+	}
+	current := simMode
+	simModeMu.Unlock()
+
+	json.NewEncoder(w).Encode(map[string]string{"mode": current})
+}
+
+// ── scorecard / loss tagging ──────────────────────────────────────────────────
+
+var (
+	scorecardCache   interface{}
+	scorecardCacheMu sync.Mutex
+	scorecardCachedAt time.Time
+	scorecardCacheTTL = 60 * time.Second
+)
+
+func runScorecard(mode string, args ...string) (interface{}, error) {
+	cmdArgs := append([]string{"alpha_engine/data/scorecard.py", mode}, args...)
+	cmd := exec.Command("./alpha_engine/venv/bin/python", cmdArgs...)
+	cmd.Dir = "/home/builder/src/gemini"
+	cmd.Env = os.Environ()
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("scorecard[%s]: %w", mode, err)
+	}
+	var result interface{}
+	if err := json.Unmarshal(out, &result); err != nil {
+		return nil, fmt.Errorf("scorecard JSON[%s]: %w (raw: %s)", mode, err, string(out))
+	}
+	return result, nil
+}
+
+func (h *ConfigHandler) ServeScorecard(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	scorecardCacheMu.Lock()
+	if scorecardCache != nil && time.Since(scorecardCachedAt) < scorecardCacheTTL {
+		cached := scorecardCache
+		scorecardCacheMu.Unlock()
+		json.NewEncoder(w).Encode(cached)
+		return
+	}
+	scorecardCacheMu.Unlock()
+
+	result, err := runScorecard("scorecard")
+	if err != nil {
+		w.Write([]byte("[]"))
+		return
+	}
+
+	scorecardCacheMu.Lock()
+	scorecardCache = result
+	scorecardCachedAt = time.Now()
+	scorecardCacheMu.Unlock()
+
+	json.NewEncoder(w).Encode(result)
+}
+
+func (h *ConfigHandler) ServeLossSummary(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	result, err := runScorecard("losses")
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"total_losses": 0, "total_loss_amount": 0.0,
+			"avg_loss": 0.0, "loss_tags": map[string]int{},
+		})
+		return
+	}
+	json.NewEncoder(w).Encode(result)
+}
+
+func (h *ConfigHandler) ServeTagTrade(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	if r.Method == "OPTIONS" {
+		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		return
+	}
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var body struct {
+		ID    string `json:"id"`
+		Tag   string `json:"tag"`
+		Notes string `json:"notes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid JSON"})
+		return
+	}
+	if body.ID == "" || body.Tag == "" {
+		json.NewEncoder(w).Encode(map[string]string{"error": "id and tag required"})
+		return
+	}
+
+	_, err := runScorecard("tag", body.ID, body.Tag, body.Notes)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	// Invalidate scorecard cache on tag change
+	scorecardCacheMu.Lock()
+	scorecardCache = nil
+	scorecardCacheMu.Unlock()
+
+	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+}
+
+// ── Intel endpoint ─────────────────────────────────────────────────────────
+
+var (
+	intelCache   interface{}
+	intelCacheMu sync.Mutex
+	intelCachedAt time.Time
+	intelCacheTTL = 300 * time.Second
+)
+
+func (h *ConfigHandler) ServeIntel(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	intelCacheMu.Lock()
+	if intelCache != nil && time.Since(intelCachedAt) < intelCacheTTL {
+		json.NewEncoder(w).Encode(intelCache)
+		intelCacheMu.Unlock()
+		return
+	}
+	intelCacheMu.Unlock()
+
+	cmd := exec.Command(
+		"./alpha_engine/venv/bin/python",
+		"-c",
+		"import sys; sys.path.insert(0, 'alpha_engine'); from ingestion.intel import get_intel; import json; print(json.dumps(get_intel()))",
+	)
+	cmd.Dir = "/home/builder/src/gemini"
+	cmd.Env = os.Environ()
+	out, err := cmd.Output()
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	var result interface{}
+	if err := json.Unmarshal(out, &result); err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	intelCacheMu.Lock()
+	intelCache = result
+	intelCachedAt = time.Now()
+	intelCacheMu.Unlock()
+
+	json.NewEncoder(w).Encode(result)
+}
+
+func (h *ConfigHandler) ServeOptionsChain(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Content-Type", "application/json")
+
+	expiry := r.URL.Query().Get("expiry")
+	args := []string{"alpha_engine/ingestion/options_chain_api.py"}
+	if expiry != "" {
+		args = append(args, "--expiry", expiry)
+	}
+
+	cmd := exec.Command("./alpha_engine/venv/bin/python", args...)
+	cmd.Dir = "/home/builder/src/gemini"
+	out, err := cmd.Output()
+	if err != nil {
+		http.Error(w, `{"error":"options chain fetch failed"}`, 500)
+		return
+	}
+	w.Write(out)
+}
+
+func (h *ConfigHandler) ServeLosingTrades(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	result, err := runScorecard("losing_trades")
+	if err != nil {
+		w.Write([]byte("[]"))
+		return
+	}
+	json.NewEncoder(w).Encode(result)
+}
+
+func RequestLoggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		defer func() {
+			duration := time.Since(start)
+			GlobalMetrics.mu.Lock()
+			GlobalMetrics.Latencies = append(GlobalMetrics.Latencies, duration)
+			if len(GlobalMetrics.Latencies) > 2000 { // Keep last 2000 samples by trimming
+				GlobalMetrics.Latencies = GlobalMetrics.Latencies[len(GlobalMetrics.Latencies)-1000:]
+			}
+			GlobalMetrics.mu.Unlock()
+		}()
+
+		GlobalMetrics.LogRequest()
+		next.ServeHTTP(w, r)
+	})
+}

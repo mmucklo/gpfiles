@@ -1,0 +1,47 @@
+# Python
+alpha_engine/venv/
+alpha_engine/__pycache__/
+alpha_engine/**/__pycache__/
+alpha_engine/**/*.pyc
+*.pyc
+__pycache__/
+
+# Node / frontend
+alpha_control_center/node_modules/
+alpha_control_center/dist/
+alpha_control_center/package-lock.json
+node_modules/
+
+# Go
+execution_engine/execution_engine
+execution_engine/go.sum
+alpha_executor
+
+# Database
+*.db
+*.db-journal
+*.db-wal
+
+# Logs
+*.log
+*.out
+
+# Environment
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Beads
+.beads/
+
+# Misc
+*.deb
+*.tar.gz
+tmux

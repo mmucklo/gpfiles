@@ -1,0 +1,75 @@
+version: '3.8'
+
+services:
+  # Central Nervous System: High-speed message bus
+  nats:
+    image: nats:2.10
+    ports:
+      - "4222:4222"
+      - "8222:8222" # HTTP monitor port
+
+  # Intelligence Engine (Python ML)
+  intelligence:
+    build:
+      context: .
+      dockerfile: Dockerfile.python
+    depends_on:
+      - nats
+    environment:
+      - NATS_URL=nats://nats:4222
+    restart: always
+
+  # Execution Engine (Go/C Hybrid)
+  execution:
+    build:
+      context: .
+      dockerfile: Dockerfile.go
+    depends_on:
+      - nats
+      - timescaledb
+    environment:
+      - NATS_URL=nats://nats:4222
+      - DB_URL=postgres://alpha_admin:alpha_pass@timescaledb:5432/alpha_db?sslmode=disable
+      - IBKR_USERNAME=alpha_trader
+      - IBKR_PASSWORD=bulletproof_pass
+      - TELEGRAM_TOKEN=STUB_TOKEN
+      - TELEGRAM_CHAT_ID=STUB_ID
+    ports:
+      - "2112:2112" # Prometheus metrics port
+    restart: always
+
+  # Observability Layer: Prometheus Metrics
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+
+  # Visualization Layer: Grafana Dashboard
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=alpha_pass
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/etc/grafana/dashboards
+    depends_on:
+      - prometheus
+
+  # Persistence Layer: TimescaleDB (Time-series Optimized Postgres)
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    environment:
+      - POSTGRES_DB=alpha_db
+      - POSTGRES_USER=alpha_admin
+      - POSTGRES_PASSWORD=alpha_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - alpha_data:/var/lib/postgresql/data
+
+volumes:
+  alpha_data:

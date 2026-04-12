@@ -1,0 +1,16 @@
+# Intel Mac (x86_64) pinned requirements
+# torch is capped at 2.2.2 on Intel macOS — no newer builds exist.
+# numpy must be pinned to <2 for compatibility with torch 2.2.2.
+# transformers will warn "PyTorch >= 2.4 required" — this is expected;
+# tokenizers/config/data utilities still work, GPU-backed inference does not.
+pytest
+numpy<2
+pandas
+nats-py
+transformers
+torch==2.2.2
+beautifulsoup4
+pytest-asyncio
+prometheus_client
+yfinance
+requests

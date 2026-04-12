@@ -1,0 +1,13 @@
+pytest
+numpy
+pandas
+nats-py
+transformers
+torch
+beautifulsoup4
+pytest-asyncio
+prometheus_client
+yfinance
+requests
+ib_insync
+nats-py
