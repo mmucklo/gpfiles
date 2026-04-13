@@ -305,6 +305,99 @@ class OptionsChainCache:
                 return r.implied_volatility
         return 0.0
 
+    # ── delta-based strike selection ─────────────────────────────────────────
+
+    @staticmethod
+    def _bs_call_delta(S: float, K: float, T: float, r: float, sigma: float) -> float:
+        """Black-Scholes call delta = N(d1). Returns value in (0, 1)."""
+        import math
+        if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+            return 0.5  # ATM fallback
+        d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+        return 0.5 * math.erfc(-d1 / math.sqrt(2))
+
+    def snap_strike_by_delta(
+        self,
+        spot: float,
+        option_type: str,
+        target_delta: float,
+        expiry: Optional[str] = None,
+        max_delta_error: float = 0.05,
+    ) -> tuple[float, float, str]:
+        """
+        Find the chain strike whose Black-Scholes delta is closest to target_delta.
+
+        For calls, delta in (0, 1).  For puts, pass the absolute value (e.g. 0.25
+        means 25-delta put); this method handles the sign internally.
+
+        Returns (strike, implied_volatility, expiry_date).
+        Returns (-1.0, 0.0, expiry) if no strike is within max_delta_error — caller
+        must reject the signal.
+        Falls back to snap_strike (moneyness-based) if the chain is entirely missing.
+        """
+        from datetime import date as _date_cls
+
+        if expiry is None:
+            expiry = self.nearest_expiry_with_liquidity(min_dte=1)
+
+        if not expiry:
+            moneyness = 1.0 + (target_delta - 0.5) * 0.2
+            return self.snap_strike(spot, option_type, moneyness)
+
+        rows = self.get_chain(expiry)
+        candidates = [
+            r for r in rows
+            if r.option_type == option_type and r.open_interest >= self.MIN_OI
+        ]
+        if not candidates:
+            moneyness = 1.0 + (target_delta - 0.5) * 0.2
+            return self.snap_strike(spot, option_type, moneyness, expiry=expiry)
+
+        try:
+            exp_date = _date_cls.fromisoformat(expiry)
+            dte = (_date_cls.today() - exp_date).days  # negative = future
+            dte = (exp_date - _date_cls.today()).days
+        except ValueError:
+            dte = 7
+        T = max(dte / 365.0, 0.001)
+        r_rate = 0.05  # risk-free rate approximation
+
+        best: Optional[OptionRow] = None
+        best_err = float("inf")
+
+        for row in candidates:
+            iv = row.implied_volatility
+            if iv <= 0:
+                continue
+            call_delta = self._bs_call_delta(spot, row.strike, T, r_rate, iv)
+            delta = call_delta if option_type == "CALL" else (1.0 - call_delta)
+            err = abs(delta - target_delta)
+            if err < best_err:
+                best_err = err
+                best = row
+
+        if best is None or best_err > max_delta_error:
+            if best is None:
+                logger.warning(
+                    "snap_strike_by_delta: no IV available for %s %s — using moneyness fallback",
+                    option_type, expiry,
+                )
+                moneyness = 1.0 + (target_delta - 0.5) * 0.2
+                return self.snap_strike(spot, option_type, moneyness, expiry=expiry)
+            else:
+                logger.warning(
+                    "snap_strike_by_delta: closest delta err=%.3f exceeds max_delta_error=%.2f "
+                    "for %s %s target_delta=%.2f — signal rejected",
+                    best_err, max_delta_error, option_type, expiry, target_delta,
+                )
+                return -1.0, 0.0, expiry  # sentinel: caller must reject signal
+
+        logger.info(
+            "snap_strike_by_delta: %s strike=%.1f target_delta=%.2f err=%.3f IV=%.1f%%",
+            option_type, best.strike, target_delta, best_err, best.implied_volatility * 100,
+        )
+        return best.strike, best.implied_volatility, expiry
+
 
 # ── multi-source spot price with fallback chain ───────────────────────────────
 
