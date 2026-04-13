@@ -4,7 +4,7 @@ Ensures all generated strikes exist in the real options chain at standard increm
 """
 import pytest
 import sys
-sys.path.insert(0, "/home/builder/src/gemini/alpha_engine")
+sys.path.insert(0, "/home/builder/src/gpfiles/tcode/alpha_engine")
 
 from ingestion.options_chain import round_to_chain_increment, OptionsChainCache, OptionRow
 

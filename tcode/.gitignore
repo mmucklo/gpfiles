@@ -45,3 +45,14 @@ Thumbs.db
 *.deb
 *.tar.gz
 tmux
+
+# Playwright / UX test artifacts
+test-results/
+playwright-report/
+alpha_control_center/test-results/
+alpha_control_center/playwright-report/
+
+# Screenshots (save to /tmp/ux_screenshots/ outside the repo)
+screenshots/
+alpha_control_center/screenshots/
+/tmp/ux_screenshots/

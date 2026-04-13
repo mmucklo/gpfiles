@@ -1,73 +1,69 @@
-# React + TypeScript + Vite
+# TSLA Alpha Control Center — Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React + TypeScript + Vite dashboard for autonomous TSLA options trading.
 
-Currently, two official plugins are available:
+## UX Audit Features (2026-04-11)
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+### 1. Discoverability
+- Every interactive element has an `aria-label`.
+- **Help Panel** — click the `?` (HelpCircle) icon in the header to open "What's on this screen?" listing every panel with one-line descriptions and interactive hints.
+- Hidden actions are advertised via visible tooltips and `data-tooltip` attributes.
 
-## React Compiler
+### 2. Tooltip Correctness
+- The `Tooltip` component uses `fixed` positioning with above/below flip based on `getBoundingClientRect()` — no clipping at viewport edges.
+- All tooltips carry `data-tooltip` attributes for Playwright test discovery.
+- Playwright test: `tests/ux_tooltip_visibility.spec.ts` — iterates every `[data-tooltip]` element and asserts `getBoundingClientRect()` is fully inside the viewport after hover.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+### 3. Fluidity
+- `SkeletonLoader` components (`SkeletonCard`, `SkeletonTable`, `SkeletonLine`) displayed for Intel and Scorecard panels while data loads.
+- Skeleton CSS uses a smooth shimmer animation — no layout shift.
+- Playwright test: `tests/ux_performance.spec.ts` — records Long Tasks API entries during a 30-second interactive session, asserts no frame >100ms (max 3 heavy tasks allowed for initial network fetches).
+- All polled intervals are debounced via `useCallback` + `useRef`.
 
-## Expanding the ESLint configuration
+### 4. Drill-Downs
+- **NAV** — clicking the NET LIQ pill opens a full breakdown: cash + position market values + unrealized + realized P&L, with source API path and timestamp.
+- **Signals** — clicking any signal card opens the `SignalModal` with full provenance: timestamp, model ID, confidence source, spot sources (TV/YF), options chain, data feed audit.
+- **Positions** — clicking any position card opens `PositionModal`: qty, avg cost, current price, market value, unrealized P&L, strike, expiry, Greeks (delta, IV), catalyst.
+- **Trades** — clicking any trade row opens `FillDrilldownModal`: entry/exit price, qty, cost basis, signal provenance, options snapshot at entry.
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+### 5. Fraud-Protection "Integrity Status" Panel
+Three independent indicators visible in the header at all times:
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+| Indicator | Green | Amber | Red |
+|-----------|-------|-------|-----|
+| **PRICE** | <0.2% divergence between TV and YF | 0.2–0.5% | >0.5% — trading halted |
+| **CHAIN** | Options chain <2min stale | 2–5min stale during market hours | >5min stale during market hours |
+| **EXEC**  | Broker connected, mode ok | Disconnected in paper mode | Live mode, broker not confirmed |
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+- Click any indicator to open a detailed breakdown with exact values, source, computation rule, and timestamp.
+- When any indicator is RED, a prominent alert banner appears in the dashboard and the "NEW TRADE" button is disabled and `aria-disabled="true"`.
+- Playwright test: `tests/ux_integrity_gate.spec.ts` — mocks audit API to force RED, asserts new-trade button is disabled.
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+### 6. Pre-Commit Bake-In
+- `scripts/ux_gate.sh` — runs all Playwright UX tests
+- Wired into `scripts/e2e_smoke.sh` (appended at end)
+- Wired into `scripts/backtest_gate.sh` (runs after Sharpe/drawdown checks)
+- Git pre-push hook at `.git/hooks/pre-push` — blocks push if UX gate fails
+
+## Running Tests
+
+```bash
+# From alpha_control_center/
+PLAYWRIGHT_BASE_URL=http://localhost:2112 \
+  ./node_modules/.bin/playwright test --config=playwright.config.ts
+
+# Or via the gate script (from repo root):
+./scripts/ux_gate.sh --base-url http://localhost:2112
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+## Dev
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm run dev      # start Vite dev server (port 5173)
+npm run build    # production build → dist/
+npm run lint     # ESLint
 ```
+
+## Architecture
+
+See `../README.md` and the Notion project hub for full architecture docs.

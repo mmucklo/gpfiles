@@ -1,0 +1,131 @@
+/* ============================================================
+   HelpPanel — "What's on this screen?" overlay
+   ============================================================ */
+
+.help-panel-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.72);
+  z-index: 10001;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 40px 16px;
+  overflow-y: auto;
+}
+
+.help-panel {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 12px;
+  width: 680px;
+  max-width: 96vw;
+  box-shadow: 0 32px 80px rgba(0,0,0,0.7);
+  max-height: 85vh;
+  overflow-y: auto;
+}
+
+.help-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  border-bottom: 1px solid #30363d;
+  position: sticky;
+  top: 0;
+  background: #161b22;
+  z-index: 1;
+  font-family: 'Courier New', monospace;
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: #58a6ff;
+  letter-spacing: 0.08em;
+}
+.help-panel-header button {
+  background: none;
+  border: none;
+  color: #8b949e;
+  cursor: pointer;
+  font-size: 1.4rem;
+  line-height: 1;
+  padding: 0 4px;
+}
+.help-panel-header button:hover { color: #c9d1d9; }
+
+.help-panel-intro {
+  margin: 14px 20px;
+  font-size: 0.82rem;
+  color: #8b949e;
+  line-height: 1.6;
+}
+
+.help-panel-list {
+  padding: 0 16px 16px;
+}
+
+.help-panel-item {
+  padding: 14px 14px;
+  border-radius: 8px;
+  border: 1px solid #21262d;
+  margin-bottom: 10px;
+  background: #0d1117;
+}
+.help-panel-item:last-child { margin-bottom: 0; }
+
+.help-panel-item-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.help-panel-icon {
+  font-size: 1.2rem;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.help-panel-item-name {
+  font-weight: 700;
+  font-size: 0.85rem;
+  color: #c9d1d9;
+  letter-spacing: -0.01em;
+}
+
+.help-panel-item-location {
+  font-size: 0.68rem;
+  color: #484f58;
+  font-family: 'Courier New', monospace;
+  margin-top: 2px;
+}
+
+.help-panel-item-desc {
+  font-size: 0.8rem;
+  color: #8b949e;
+  line-height: 1.55;
+  margin: 0 0 6px;
+}
+
+.help-panel-item-interactive {
+  font-size: 0.76rem;
+  color: #8b949e;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.help-interactive-label {
+  color: #58a6ff;
+  font-weight: 600;
+  font-size: 0.72rem;
+  margin-right: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.help-panel-footer {
+  border-top: 1px solid #21262d;
+  padding: 12px 20px;
+  font-size: 0.72rem;
+  color: #484f58;
+  font-style: italic;
+}

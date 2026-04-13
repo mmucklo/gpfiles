@@ -110,17 +110,119 @@
     50% { opacity: 0.5; transform: scale(0.85); }
 }
 
-/* ---- ZONE 2: 3-COLUMN MAIN GRID ---- */
+/* ---- ZONE 2: 4-COLUMN MAIN GRID ---- */
 .dashboard-grid {
     display: grid;
-    grid-template-columns: 2fr 1.5fr 1.5fr;
+    grid-template-columns: 2fr 1.2fr 1.4fr 1.4fr;
     gap: 1rem;
     padding: 1rem 1.5rem;
     align-items: start;
 }
 
+@media (max-width: 1100px) {
+    .dashboard-grid { grid-template-columns: 1fr 1fr; }
+}
+
 @media (max-width: 768px) {
     .dashboard-grid { grid-template-columns: 1fr; }
+}
+
+/* ---- PENDING ORDERS PANEL ---- */
+.pending-order-row {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    background: rgba(139,92,246,0.06);
+    border: 1px solid rgba(139,92,246,0.2);
+    cursor: pointer;
+    transition: background 0.15s;
+    margin-bottom: 6px;
+}
+.pending-order-row:hover {
+    background: rgba(139,92,246,0.14);
+}
+.pending-order-top {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: #c9d1d9;
+    font-family: monospace;
+}
+.pending-order-id {
+    color: #8b949e;
+    font-size: 0.7rem;
+}
+.pending-status-badge {
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    background: rgba(230,162,0,0.15);
+    color: #e6a200;
+    border: 1px solid rgba(230,162,0,0.3);
+}
+.pending-order-detail {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    font-size: 0.7rem;
+    color: #8b949e;
+}
+.pending-order-detail span {
+    white-space: nowrap;
+}
+.pending-fill-window {
+    font-size: 0.65rem;
+    color: #58a6ff;
+    margin-top: 2px;
+}
+.cancelled-accordion {
+    margin-top: 8px;
+    border-top: 1px solid #21262d;
+    padding-top: 8px;
+}
+.cancelled-accordion-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+    padding: 4px 0;
+    font-size: 0.7rem;
+    color: #8b949e;
+    user-select: none;
+}
+.cancelled-accordion-header:hover { color: #c9d1d9; }
+.cancelled-order-row {
+    padding: 4px 8px;
+    font-size: 0.7rem;
+    color: #6e7681;
+    border-left: 2px solid #21262d;
+    margin: 2px 0;
+    font-family: monospace;
+}
+.pending-order-modal-body .fill-row span:last-child {
+    font-family: monospace;
+    font-size: 0.78rem;
+    color: #c9d1d9;
+}
+.raw-order-block {
+    background: #0d1117;
+    border: 1px solid #21262d;
+    border-radius: 4px;
+    padding: 8px;
+    font-family: monospace;
+    font-size: 0.68rem;
+    color: #8b949e;
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 180px;
+    overflow-y: auto;
+    margin-top: 4px;
 }
 
 .dash-col {
@@ -1155,3 +1257,168 @@
 /* Analyze button in trade row */
 .analyze-btn { font-size: 9px; padding: 2px 5px; background: rgba(248,81,73,0.12); color: #f85149; border: 1px solid rgba(248,81,73,0.3); border-radius: 3px; cursor: pointer; margin-left: 4px; flex-shrink: 0; }
 .analyze-btn:hover { background: rgba(248,81,73,0.22); }
+
+/* ── Generic Modal Overlay + Card (FillDrilldown, LossDetail, NavDrill) ─── */
+.modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.82);
+    z-index: 9000;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding-top: 60px;
+    overflow-y: auto;
+    backdrop-filter: blur(2px);
+}
+.modal-card {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 10px;
+    width: 560px;
+    max-width: 96vw;
+    box-shadow: 0 24px 60px rgba(0,0,0,0.7);
+    overflow: hidden;
+}
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 14px 18px;
+    border-bottom: 1px solid #30363d;
+    background: #0d1117;
+}
+.modal-title {
+    font-size: 0.82rem;
+    font-weight: 700;
+    color: #c9d1d9;
+    font-family: 'Courier New', monospace;
+    letter-spacing: 0.02em;
+}
+.modal-close {
+    background: none;
+    border: none;
+    color: #8b949e;
+    cursor: pointer;
+    font-size: 1.1rem;
+    line-height: 1;
+    padding: 0 4px;
+    border-radius: 4px;
+    transition: background 0.15s;
+}
+.modal-close:hover { background: #21262d; color: #c9d1d9; }
+
+/* IBKR error banner */
+.ibkr-error-banner {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    background: #3d1a1a;
+    border: 1px solid #f85149;
+    border-radius: 6px;
+    padding: 6px 12px;
+    margin-bottom: 6px;
+    font-size: 0.78rem;
+    color: #ffa198;
+}
+.ibkr-error-icon { font-size: 0.9rem; flex-shrink: 0; }
+.ibkr-error-msg { flex: 1; font-family: 'Courier New', monospace; }
+.ibkr-retry-btn {
+    background: #21262d;
+    border: 1px solid #30363d;
+    border-radius: 4px;
+    color: #c9d1d9;
+    cursor: pointer;
+    font-size: 0.72rem;
+    padding: 2px 10px;
+    flex-shrink: 0;
+    transition: background 0.15s;
+}
+.ibkr-retry-btn:hover { background: #30363d; }
+
+/* ── Signal Economics Row (signal card) ──────────────────────────────────────── */
+.signal-economics-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1rem;
+    padding: 0.4rem 0 0.25rem;
+    border-top: 1px solid #21262d;
+    margin-top: 0.35rem;
+    font-size: 0.68rem;
+    font-family: 'Courier New', monospace;
+}
+.econ-pill {
+    display: flex;
+    gap: 0.3rem;
+    align-items: center;
+    cursor: help;
+    white-space: nowrap;
+}
+.econ-pill-key {
+    color: #484f58;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 0.62rem;
+}
+.econ-pill-val {
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+.econ-pill-val.green  { color: #3fb950; }
+.econ-pill-val.red    { color: #f85149; }
+.econ-pill-val.amber  { color: #d29922; }
+.econ-pill-val.neutral { color: #79c0ff; }
+.econ-pill-val.na     { color: #484f58; font-style: italic; }
+
+/* ── Trade Economics Section (signal modal) ──────────────────────────────────── */
+.trade-economics-section {
+    border-top: 1px solid #21262d;
+    padding: 0.6rem 0.6rem 0.4rem;
+}
+.trade-economics-title {
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #58a6ff;
+    margin-bottom: 0.5rem;
+}
+.econ-block {
+    margin-bottom: 0.5rem;
+}
+.econ-block-label {
+    font-size: 0.65rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #8b949e;
+    margin-bottom: 0.3rem;
+    padding-bottom: 0.2rem;
+    border-bottom: 1px solid #21262d;
+}
+.econ-ledger-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.75rem;
+    padding: 0.2rem 0;
+    font-family: 'Courier New', monospace;
+}
+.econ-ledger-row span:first-child { color: #8b949e; padding-right: 0.5rem; }
+.econ-ledger-row span:last-child  { font-weight: 600; color: #e6edf3; font-variant-numeric: tabular-nums; }
+.econ-ledger-row.green span:last-child { color: #3fb950; }
+.econ-ledger-row.red span:last-child   { color: #f85149; }
+.econ-ledger-row.bold span { font-weight: 700; color: #c9d1d9; }
+.econ-na-notice {
+    font-size: 0.72rem;
+    color: #484f58;
+    font-style: italic;
+    padding: 0.5rem 0;
+}
+.econ-source-note {
+    font-size: 0.65rem;
+    color: #484f58;
+    margin-top: 0.4rem;
+    padding-top: 0.4rem;
+    border-top: 1px solid #21262d;
+    line-height: 1.5;
+}

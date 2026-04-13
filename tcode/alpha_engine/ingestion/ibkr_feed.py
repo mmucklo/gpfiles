@@ -27,9 +27,9 @@ class IBKRFeed:
 
     def __init__(self):
         load_dotenv()
-        self.host = "127.0.0.1"
-        self.port = int(os.getenv("IBKR_PORT", "7497"))
-        self.client_id = 1
+        self.host = os.getenv("IBKR_HOST", "127.0.0.1")
+        self.port = int(os.getenv("IBKR_PORT", "4002"))  # IB Gateway paper default
+        self.client_id = int(os.getenv("IBKR_PUBLISHER_CLIENT_ID", "2"))  # engine uses 1
         self._connected = False
         self._lock = threading.Lock()
         self._spot_cache: Optional[tuple] = None   # (timestamp, dict)
@@ -48,9 +48,10 @@ class IBKRFeed:
         """Attempt to connect to IB Gateway/TWS. Returns True on success."""
         try:
             ib = self._get_ib()
+            logger.info(f"[IBKR] Connecting host={self.host} port={self.port} clientId={self.client_id}")
             ib.connect(self.host, self.port, clientId=self.client_id, timeout=self.REQUEST_TIMEOUT)
             self._connected = True
-            logger.info(f"IBKR connected at {self.host}:{self.port} (paper trading)")
+            logger.info(f"[IBKR] Connected host={self.host} port={self.port} clientId={self.client_id}")
             return True
         except Exception as e:
             logger.warning(f"IBKR connect failed ({self.host}:{self.port}): {e}")

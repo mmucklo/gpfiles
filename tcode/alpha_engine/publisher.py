@@ -8,6 +8,8 @@ import json
 import nats
 import random
 import time
+from ib_insync import util as ib_util
+ib_util.patchAsyncio()  # allow ib.connect() from within a running event loop
 from datetime import date as _date
 from prometheus_client import start_http_server, Counter, Gauge, Histogram
 from consensus import ModelSignal, SignalDirection, ModelType, compute_expiry
@@ -47,6 +49,84 @@ def check_data_gates(spot_sources: dict) -> tuple[bool, str]:
 SIGNAL_SENT_COUNT = Counter('alpha_signal_sent_total', 'Total signals published to NATS')
 SIGNAL_CONFIDENCE_GAUGE = Gauge('alpha_intelligence_confidence', 'Confidence score of the latest published signal')
 INFERENCE_LATENCY = Histogram('alpha_inference_latency_seconds', 'Inference latency for intelligence models')
+
+# Commission viability gate — signals rejected because IBKR commissions would
+# eliminate or invert the expected profit at the stated take-profit price.
+SIGNAL_REJECTED_COMMISSION = Counter(
+    'signals_rejected_commission_total',
+    'Signals suppressed because round-trip IBKR commissions make net profit at TP non-positive',
+)
+
+# IBKR Pro options commission schedule (USD).
+IBKR_OPTION_FEE_PER_CONTRACT: float = 0.65   # per contract, per leg
+IBKR_OPTION_MIN_PER_LEG: float = 1.00         # minimum charge per order/leg
+_SINGLE_LEG_ROUND_TRIP: int = 2               # open + close = 2 legs
+_SPREAD_ROUND_TRIP: int = 4                    # 2 legs per side × open + close = 4 legs
+
+# In-process counter for writing to the metrics file (Prometheus Counter values
+# cannot be read back from the counter object itself in all versions).
+_rejected_commission_total: int = 0
+_PUBLISHER_METRICS_PATH = "/tmp/publisher_metrics.json"
+
+
+def compute_round_trip_commission(qty: int, is_spread: bool = False) -> float:
+    """Return estimated IBKR round-trip commission for an options trade.
+
+    Args:
+        qty: Number of contracts.
+        is_spread: True for two-legged spread orders (doubles the leg count).
+
+    Returns:
+        Estimated total commission in USD for a full round trip (open + close).
+    """
+    legs = _SPREAD_ROUND_TRIP if is_spread else _SINGLE_LEG_ROUND_TRIP
+    per_leg = max(IBKR_OPTION_FEE_PER_CONTRACT * qty, IBKR_OPTION_MIN_PER_LEG)
+    return per_leg * legs
+
+
+def signal_is_commission_viable(
+    limit_price: float,
+    take_profit_price: float,
+    stop_loss_price: float,  # noqa: ARG001 — reserved for EV check (Phase 3)
+    qty: int,
+    is_spread: bool = False,
+) -> tuple[bool, str]:
+    """Return (viable, reason_string) for a signal.
+
+    A signal is viable only when the net profit at the take-profit price remains
+    positive after deducting full round-trip IBKR commissions.
+
+    Handles both debit and credit trades:
+    - Debit (BUY): profit = (TP - limit) * 100 * qty  (TP > limit)
+    - Credit (SELL/spread): profit = (limit - TP) * 100 * qty  (TP < limit)
+
+    In both cases gross_profit = abs(TP - limit) * 100 * qty.
+
+    The EV check (weighting profit/loss by confidence) is a Phase 3 TODO; for
+    now we gate solely on net_profit_at_tp > 0.
+    """
+    gross_profit_at_tp = abs(take_profit_price - limit_price) * 100 * qty
+    commission = compute_round_trip_commission(qty, is_spread=is_spread)
+    net_profit_at_tp = gross_profit_at_tp - commission
+    if net_profit_at_tp <= 0:
+        return False, (
+            f"commission-negative at TP: gross={gross_profit_at_tp:.2f}, "
+            f"commission={commission:.2f}, net={net_profit_at_tp:.2f}"
+        )
+    return True, ""
+
+
+def _write_publisher_metrics() -> None:
+    """Persist the in-process rejected-signal counter to a JSON file so the
+    Go API can serve it to the dashboard without scraping Python's Prometheus."""
+    try:
+        with open(_PUBLISHER_METRICS_PATH, "w") as fh:
+            json.dump({
+                "signals_rejected_commission_total": _rejected_commission_total,
+                "ts": time.time(),
+            }, fh)
+    except OSError:
+        pass  # non-fatal — metrics file is best-effort
 
 class SignalPublisher:
     """
@@ -187,7 +267,7 @@ async def broadcast_loop():
         _ibkr = get_ibkr_feed()
         _ibkr_ok = _ibkr.connect()
         if _ibkr_ok:
-            print("[IBKR] Connected to IB Gateway (paper trading, port 7497)")
+            print("[IBKR] Connected to IB Gateway (paper trading, port 4002)")
         else:
             print("[IBKR] IB Gateway not available — falling back to TV/YF feeds")
     except Exception as _ibkr_exc:
@@ -345,16 +425,16 @@ async def broadcast_loop():
 
                 if news_sent > 0.6 and regime == "RISK_ON":
                     direction = SignalDirection.BEARISH  # Bet against euphoria
-                    confidence = random.uniform(0.60, 0.75)
+                    confidence = 0.55 + min(0.35, (abs(news_sent) - 0.6) * 1.75)
                 elif news_sent < -0.6 and regime == "RISK_OFF":
                     direction = SignalDirection.BULLISH  # Bet on panic reversal
-                    confidence = random.uniform(0.60, 0.75)
+                    confidence = 0.55 + min(0.35, (abs(news_sent) - 0.6) * 1.75)
                 else:
                     continue
 
                 action = "BUY"
                 is_spread = False
-                otm_pct = random.uniform(0.08, 0.12)
+                otm_pct = 0.10
                 opt_type = "CALL" if direction == SignalDirection.BULLISH else "PUT"
                 moneyness = 1.0 + otm_pct if opt_type == "CALL" else 1.0 - otm_pct
                 rationale = f"CONTRARIAN: {otm_pct*100:.0f}% OTM — mean reversion on extreme sentiment ({news_sent:.2f})"
@@ -523,6 +603,24 @@ async def broadcast_loop():
                 confidence_rationale=f"SNIPER ALERT: {rationale}",
                 implied_volatility=float(chain_iv),
             )
+
+            # Commission viability gate — suppress signals where IBKR fees
+            # would eliminate the profit at the stated take-profit price.
+            if scan_sig.quantity > 0 and scan_sig.take_profit_price > 0:
+                global _rejected_commission_total
+                viable, reason = signal_is_commission_viable(
+                    scan_sig.target_limit_price,
+                    scan_sig.take_profit_price,
+                    scan_sig.stop_loss_price,
+                    scan_sig.quantity,
+                    is_spread=scan_sig.is_spread,
+                )
+                if not viable:
+                    print(f"[REJECT] commission-negative signal ({model.name} {opt_type} ${strike:.0f}): {reason}")
+                    SIGNAL_REJECTED_COMMISSION.inc()
+                    _rejected_commission_total += 1
+                    _write_publisher_metrics()
+                    continue
 
             try:
                 await publisher.publish_signal(scan_sig, spot_sources=spot_sources)

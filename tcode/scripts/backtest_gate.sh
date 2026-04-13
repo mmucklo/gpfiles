@@ -48,5 +48,18 @@ if [ "$FAIL" -eq 1 ]; then
   echo "BACKTEST GATE: FAILED — deploy blocked"
   exit 1
 fi
+
 echo "BACKTEST GATE: PASSED"
+
+# Run UX gate before final exit
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "$SCRIPT_DIR/ux_gate.sh" ]; then
+  echo ""
+  echo "--- Running UX Gate ---"
+  "$SCRIPT_DIR/ux_gate.sh" || {
+    echo "UX GATE: FAILED — deploy blocked"
+    exit 1
+  }
+fi
+
 exit 0

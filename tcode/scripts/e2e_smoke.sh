@@ -469,3 +469,14 @@ echo "════════════════════════�
 echo ""
 
 [ "$FAIL" -eq 0 ] && exit 0 || exit 1
+
+# ─── UX Gate (Playwright, non-blocking if app unreachable) ────────────────────
+# Runs after all API checks. If Playwright tests fail, the e2e smoke fails.
+if [ -f "$REPO_ROOT/scripts/ux_gate.sh" ]; then
+    echo ""
+    echo "--- UX Gate (Playwright) ---"
+    "$REPO_ROOT/scripts/ux_gate.sh" --base-url "$BASE" || {
+        printf "  \033[31mFAIL\033[0m UX Gate failed\n"
+        ((FAIL++))
+    }
+fi

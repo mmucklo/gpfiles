@@ -61,7 +61,7 @@ func fetchChainPrices() map[string]float64 {
 
 	// Fetch from Python
 	cmd := exec.Command("./alpha_engine/venv/bin/python", "alpha_engine/ingestion/options_chain_api.py")
-	cmd.Dir = "/home/builder/src/gemini"
+	cmd.Dir = "/home/builder/src/gpfiles/tcode"
 	out, err := cmd.Output()
 	if err != nil {
 		fmt.Printf("[CHAIN] Price fetch failed: %v\n", err)
@@ -205,13 +205,157 @@ func AddTradeLog(log TradeLog) {
 	}
 }
 
+// portfolioResponse is the shape returned by /api/portfolio.  It mirrors
+// PaperPortfolio but adds a Source field so callers always know which backend
+// is authoritative.
+type portfolioResponse struct {
+	NAV               float64             `json:"nav"`
+	Cash              float64             `json:"cash"`
+	RealizedPnL       float64             `json:"realized_pnl"`
+	MaintenanceMargin float64             `json:"maintenance_margin"`
+	Positions         map[string]Position `json:"positions"`
+	// Source is the active ExecutionMode: "IBKR_PAPER", "IBKR_LIVE", or "SIMULATION".
+	// /api/account returns the same Source value so both endpoints agree on which
+	// backend is authoritative.
+	Source string `json:"source"`
+}
+
+// ibkrPositionsToMap converts a raw []interface{} returned by
+// runIBKRAccount("positions") into the map[string]Position format that
+// portfolioResponse requires.  Fields that are missing or unparseable are
+// zero-valued rather than causing a panic.
+func ibkrPositionsToMap(raw interface{}) map[string]Position {
+	result := make(map[string]Position)
+	list, ok := raw.([]interface{})
+	if !ok {
+		return result
+	}
+	for _, item := range list {
+		m, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		getString := func(k string) string {
+			v, _ := m[k].(string)
+			return v
+		}
+		getFloat := func(k string) float64 {
+			switch v := m[k].(type) {
+			case float64:
+				return v
+			case int:
+				return float64(v)
+			}
+			return 0
+		}
+		getInt := func(k string) int {
+			switch v := m[k].(type) {
+			case float64:
+				return int(v)
+			case int:
+				return v
+			}
+			return 0
+		}
+		ticker     := getString("ticker")
+		optType    := getString("option_type")
+		expiry     := getString("expiration")
+		strike     := getFloat("strike")
+		qty        := getInt("qty")
+		avgCost    := getFloat("avg_cost")
+		curPrice   := getFloat("current_price")
+		unrealPnL  := getFloat("unrealized_pnl")
+
+		sig := fmt.Sprintf("%s_%s_%s_%.2f", ticker, optType, expiry, strike)
+		result[sig] = Position{
+			Ticker:        ticker,
+			OptionType:    optType,
+			Strike:        strike,
+			Expiry:        expiry,
+			EntryPrice:    avgCost,
+			CurrentPrice:  curPrice,
+			Quantity:      qty,
+			UnrealizedPnL: unrealPnL,
+		}
+	}
+	return result
+}
+
 func (h *ConfigHandler) ServePortfolio(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Content-Type", "application/json")
-	
-	h.Portfolio.mu.RLock()
-	defer h.Portfolio.mu.RUnlock()
-	json.NewEncoder(w).Encode(h.Portfolio)
+
+	// ── SIMULATION mode: serve internal PaperPortfolio ────────────────────────
+	if ActiveExecutionMode == ModeSimulation {
+		h.Portfolio.mu.RLock()
+		resp := portfolioResponse{
+			NAV:               h.Portfolio.NAV,
+			Cash:              h.Portfolio.Cash,
+			RealizedPnL:       h.Portfolio.RealizedPnL,
+			MaintenanceMargin: h.Portfolio.MaintenanceMargin,
+			Positions:         h.Portfolio.Positions,
+			Source:            string(ModeSimulation),
+		}
+		h.Portfolio.mu.RUnlock()
+		json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	// ── IBKR modes: NAV/cash from account cache; positions from IBKR subprocess ─
+	resp := portfolioResponse{
+		Source:    string(ActiveExecutionMode),
+		Positions: make(map[string]Position),
+	}
+
+	// NAV / cash from cached account summary.
+	accountCacheMu.Lock()
+	cached := accountCache
+	accountCacheMu.Unlock()
+	if cached != nil {
+		if m, ok := cached.(map[string]interface{}); ok {
+			if nav, ok := m["net_liquidation"].(float64); ok && nav > 0 {
+				resp.NAV = nav
+			}
+			if cash, ok := m["cash_balance"].(float64); ok && cash > 0 {
+				resp.Cash = cash
+			}
+			if realized, ok := m["realized_pnl"].(float64); ok {
+				resp.RealizedPnL = realized
+			}
+		}
+	}
+
+	// Positions from IBKR subprocess.  Use positionsCache when fresh.
+	positionsCacheMu.Lock()
+	if positionsCache != nil && time.Since(positionsCachedAt) < accountCacheTTL {
+		rawPos := positionsCache
+		positionsCacheMu.Unlock()
+		resp.Positions = ibkrPositionsToMap(rawPos)
+	} else {
+		positionsCacheMu.Unlock()
+		rawPos, err := runIBKRAccount("positions")
+		if err != nil {
+			// Subprocess failed — return explicit error; never silently fall back.
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":    err.Error(),
+				"source":   string(ActiveExecutionMode),
+				"nav":      resp.NAV,
+				"cash":     resp.Cash,
+				"positions": map[string]Position{},
+			})
+			return
+		}
+		// Only cache valid list results (not error dicts from Python).
+		if _, isMap := rawPos.(map[string]interface{}); !isMap {
+			positionsCacheMu.Lock()
+			positionsCache = rawPos
+			positionsCachedAt = time.Now()
+			positionsCacheMu.Unlock()
+			resp.Positions = ibkrPositionsToMap(rawPos)
+		}
+	}
+
+	json.NewEncoder(w).Encode(resp)
 }
 
 func (h *ConfigHandler) ServeTrades(w http.ResponseWriter, r *http.Request) {
@@ -476,6 +620,24 @@ func (h *ConfigHandler) ServeSignalMetrics(w http.ResponseWriter, r *http.Reques
 	json.NewEncoder(w).Encode(GlobalMetrics.SignalCounts)
 }
 
+// ServePublisherMetrics reads the publisher.py metrics file written after each
+// commission-rejected signal and returns a JSON object.  The file is written by
+// publisher.py to /tmp/publisher_metrics.json.
+func (h *ConfigHandler) ServePublisherMetrics(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	data, err := os.ReadFile("/tmp/publisher_metrics.json")
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"signals_rejected_commission_total": 0,
+			"ts": nil,
+		})
+		return
+	}
+	w.Write(data)
+}
+
 func (h *ConfigHandler) ServeLogs(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 
@@ -625,7 +787,7 @@ func (h *ConfigHandler) ServeBuildInfo(w http.ResponseWriter, r *http.Request) {
 
 func runFillDetail(args ...string) ([]byte, error) {
 	cmd := exec.Command("./alpha_engine/venv/bin/python", append([]string{"alpha_engine/data/fill_detail.py"}, args...)...)
-	cmd.Dir = "/home/builder/src/gemini"
+	cmd.Dir = "/home/builder/src/gpfiles/tcode"
 	cmd.Env = os.Environ()
 	return cmd.Output()
 }
@@ -663,9 +825,11 @@ func (h *ConfigHandler) ServeGoroutineProfile(w http.ResponseWriter, r *http.Req
 }
 
 type BrokerStatus struct {
-	Mode      string `json:"mode"`
+	Mode      string `json:"mode"`       // ExecutionMode value: IBKR_PAPER | IBKR_LIVE | SIMULATION
 	Broker    string `json:"broker"`
 	Confirmed bool   `json:"confirmed"`
+	Connected bool   `json:"connected"`
+	OrderPath string `json:"order_path"` // "IBKR_PAPER (real)" | "SIMULATION (internal)"
 }
 
 type SystemState struct {
@@ -720,29 +884,37 @@ func (h *ConfigHandler) ServeSystemState(w http.ResponseWriter, r *http.Request)
 		maxDailyLoss = h.Guard.MaxDailyLoss
 	}
 
-	simModeMu.RLock()
-	currentMode := simMode
-	simModeMu.RUnlock()
-
 	json.NewEncoder(w).Encode(SystemState{
 		KillSwitch:           killSwitch,
 		SignalsBlockedReason: reason,
 		DailyPnL:             dailyPnL,
 		MaxDailyLoss:         maxDailyLoss,
-		Mode:                 currentMode,
+		Mode:                 string(ActiveExecutionMode),
 		ConvictionCount:      convCount,
 	})
 }
 
 func (h *ConfigHandler) ServeBrokerStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	simModeMu.RLock()
-	currentMode := simMode
-	simModeMu.RUnlock()
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	// Connectivity is verified per-order via the ibkr_order.py subprocess.
+	// No persistent broker connection is held by the Go engine.
+	connected := true
+	orderPath := "IBKR_PAPER (real)"
+	switch ActiveExecutionMode {
+	case ModeSimulation:
+		orderPath = "SIMULATION (internal)"
+	case ModeIBKRLive:
+		orderPath = "IBKR_LIVE (real) — EXPERIMENTAL"
+	}
+
 	status := BrokerStatus{
-		Mode:      currentMode,
+		Mode:      string(ActiveExecutionMode),
 		Broker:    "IBKR",
-		Confirmed: true,
+		Confirmed: connected,
+		Connected: connected,
+		OrderPath: orderPath,
 	}
 	json.NewEncoder(w).Encode(status)
 }
@@ -1081,7 +1253,7 @@ func parseGitLog(dir string, n int) []GitCommit {
 func parseBdIssues() []BeadIssue {
 	enrichedPath := "/home/builder/go/bin:/home/builder/.local/bin:" + os.Getenv("PATH")
 	cmd := exec.Command("/home/builder/.local/bin/bd", "list", "--all", "--flat")
-	cmd.Dir = "/home/builder/src/gemini"
+	cmd.Dir = "/home/builder/src/gpfiles/tcode"
 	cmd.Env = append(os.Environ(), "HOME=/home/builder", "PATH="+enrichedPath)
 	out, err := cmd.Output()
 	if err != nil {
@@ -1152,7 +1324,7 @@ func (h *ConfigHandler) ServeGastownHistory(w http.ResponseWriter, r *http.Reque
 
 	hist := GastownHistory{
 		RefreshedAt:  time.Now().Format(time.RFC3339),
-		RepoLog:      parseGitLog("/home/builder/src/gemini", 30),
+		RepoLog:      parseGitLog("/home/builder/src/gpfiles/tcode", 30),
 		WorkspaceLog: parseGitLog("/home/builder/gt", 20),
 		Beads:        parseBdIssues(),
 		SessionTail:  []string{},
@@ -1283,6 +1455,7 @@ type DataAuditResponse struct {
 	OptionsChainSrc   string                 `json:"options_chain_source"`
 	LastChainFetch    string                 `json:"last_chain_fetch"`
 	ChainAgeSec       float64                `json:"chain_age_sec"`
+	ChainEntryCount   int                    `json:"chain_entry_count"`
 	TVFeedOK          bool                   `json:"tv_feed_ok"`
 	YFFeedOK          bool                   `json:"yf_feed_ok"`
 	IBKRConnected     bool                   `json:"ibkr_connected"`
@@ -1349,11 +1522,16 @@ func (h *ConfigHandler) ServeDataAudit(w http.ResponseWriter, r *http.Request) {
 		chainSrc = "yfinance"
 	}
 
+	chainPriceCacheMu.Lock()
+	chainEntryCount := len(chainPriceCache)
+	chainPriceCacheMu.Unlock()
+
 	resp := DataAuditResponse{
 		SpotValidation:  spotValidation,
 		OptionsChainSrc: chainSrc,
 		LastChainFetch:  dataAuditFetched.UTC().Format(time.RFC3339),
 		ChainAgeSec:     time.Since(dataAuditFetched).Seconds(),
+		ChainEntryCount: chainEntryCount,
 		TVFeedOK:        tvOK,
 		YFFeedOK:        yfOK,
 		IBKRConnected:   ibkrConnected,
@@ -1385,10 +1563,25 @@ func (h *ConfigHandler) ServeAccount(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
+	// SIMULATION mode: no broker is connected — return a clear error rather than
+	// silently serving stale or empty IBKR data.
+	if ActiveExecutionMode == ModeSimulation {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":  "SIMULATION mode — no broker connected",
+			"mode":   string(ModeSimulation),
+			"source": string(ModeSimulation),
+		})
+		return
+	}
+
 	accountCacheMu.Lock()
 	if accountCache != nil && time.Since(accountCachedAt) < accountCacheTTL {
 		cached := accountCache
 		accountCacheMu.Unlock()
+		// Inject source field into cached result
+		if m, ok := cached.(map[string]interface{}); ok {
+			m["source"] = string(ActiveExecutionMode)
+		}
 		json.NewEncoder(w).Encode(cached)
 		return
 	}
@@ -1398,6 +1591,7 @@ func (h *ConfigHandler) ServeAccount(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"error":            err.Error(),
+			"source":           string(ActiveExecutionMode),
 			"net_liquidation":  0,
 			"cash_balance":     0,
 			"buying_power":     0,
@@ -1406,6 +1600,11 @@ func (h *ConfigHandler) ServeAccount(w http.ResponseWriter, r *http.Request) {
 			"equity_with_loan": 0,
 		})
 		return
+	}
+
+	// Inject source field before caching and returning.
+	if m, ok := result.(map[string]interface{}); ok {
+		m["source"] = string(ActiveExecutionMode)
 	}
 
 	accountCacheMu.Lock()
@@ -1464,6 +1663,61 @@ func (h *ConfigHandler) ServeFills(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(result)
 }
 
+// pendingActiveStatuses is the set of IBKR order statuses shown in the "active"
+// section of /api/orders/pending.
+var pendingActiveStatuses = map[string]bool{
+	"PreSubmitted":  true,
+	"Submitted":     true,
+	"PendingSubmit": true,
+}
+
+// ServeOrdersPending shells out to ibkr_order open_orders and returns two lists:
+//   - active: PreSubmitted / Submitted / PendingSubmit orders
+//   - cancelled: Cancelled orders (shown in the collapsed accordion)
+//
+// In SIMULATION mode it returns empty lists immediately.
+func (h *ConfigHandler) ServeOrdersPending(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	if ActiveExecutionMode == ModeSimulation {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"active":    []OrderResult{},
+			"cancelled": []OrderResult{},
+			"source":    string(ModeSimulation),
+		})
+		return
+	}
+
+	orders, err := OpenIBKROrders()
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":     err.Error(),
+			"active":    []OrderResult{},
+			"cancelled": []OrderResult{},
+			"source":    string(ActiveExecutionMode),
+		})
+		return
+	}
+
+	active    := []OrderResult{}
+	cancelled := []OrderResult{}
+	for _, o := range orders {
+		switch {
+		case pendingActiveStatuses[o.Status]:
+			active = append(active, o)
+		case o.Status == "Cancelled":
+			cancelled = append(cancelled, o)
+		}
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"active":    active,
+		"cancelled": cancelled,
+		"source":    string(ActiveExecutionMode),
+	})
+}
+
 func (h *ConfigHandler) ServeSimReset(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -1506,7 +1760,7 @@ var (
 func runScorecard(mode string, args ...string) (interface{}, error) {
 	cmdArgs := append([]string{"alpha_engine/data/scorecard.py", mode}, args...)
 	cmd := exec.Command("./alpha_engine/venv/bin/python", cmdArgs...)
-	cmd.Dir = "/home/builder/src/gemini"
+	cmd.Dir = "/home/builder/src/gpfiles/tcode"
 	cmd.Env = os.Environ()
 	out, err := cmd.Output()
 	if err != nil {
@@ -1628,7 +1882,7 @@ func (h *ConfigHandler) ServeIntel(w http.ResponseWriter, r *http.Request) {
 		"-c",
 		"import sys; sys.path.insert(0, 'alpha_engine'); from ingestion.intel import get_intel; import json; print(json.dumps(get_intel()))",
 	)
-	cmd.Dir = "/home/builder/src/gemini"
+	cmd.Dir = "/home/builder/src/gpfiles/tcode"
 	cmd.Env = os.Environ()
 	out, err := cmd.Output()
 	if err != nil {
@@ -1659,7 +1913,7 @@ func (h *ConfigHandler) ServeOptionsChain(w http.ResponseWriter, r *http.Request
 	}
 
 	cmd := exec.Command("./alpha_engine/venv/bin/python", args...)
-	cmd.Dir = "/home/builder/src/gemini"
+	cmd.Dir = "/home/builder/src/gpfiles/tcode"
 	out, err := cmd.Output()
 	if err != nil {
 		http.Error(w, `{"error":"options chain fetch failed"}`, 500)

@@ -3,6 +3,8 @@ import './Dashboard.css';
 import Tooltip from '../components/Tooltip';
 import TradingViewWidget from '../components/TradingViewWidget';
 import SystemMonitor from '../components/SystemMonitor';
+import { SkeletonCard, SkeletonTable } from '../components/SkeletonLoader';
+import { computeEconomics, formatRR, rrColorClass } from '../lib/signal_economics';
 
 // ============================================================
 //  Types
@@ -31,12 +33,112 @@ interface Signal {
     spot_sources?: { tv?: number; yf?: number; divergence_pct?: number };
     confidence_rationale?: string;
     ticker?: string;
+    ibkr_order_id?: number;
+    exec_status?: string;    // "submitted" | "failed" | "sim_filled" | "rejected"
+    exec_error?: string;
 }
 
 interface BrokerStatus {
     mode: string;    // 'live' | 'paper' | 'simulation'
     connected: boolean;
 }
+
+// ============================================================
+//  NAV Drill-Down Modal
+// ============================================================
+interface NavDrillProps {
+    portfolio: Portfolio;
+    account: AccountSummary | null;
+    simMode: string;
+    onClose: () => void;
+}
+
+const NavDrillModal = ({ portfolio, account, simMode, onClose }: NavDrillProps) => {
+    const isPaper = simMode === 'paper';
+    const nav = isPaper ? (account?.net_liquidation ?? portfolio.nav) : portfolio.nav;
+    const cash = isPaper ? (account?.cash_balance ?? portfolio.cash) : portfolio.cash;
+    const unrealized = isPaper ? (account?.unrealized_pnl ?? portfolio.unrealized_pnl) : portfolio.unrealized_pnl;
+    const realized = isPaper ? (account?.realized_pnl ?? portfolio.realized_pnl) : portfolio.realized_pnl;
+    const posValues = Object.values(portfolio.positions ?? {}).map(p => ({
+        key: `${p.ticker}_${p.option_type}_${p.strike}`,
+        ticker: p.ticker,
+        marketValue: (p.current_price ?? 0) * (p.quantity ?? 0) * 100,
+        unrealizedPnl: p.unrealized_pnl ?? 0,
+    }));
+    const sumPosMV = posValues.reduce((s, p) => s + p.marketValue, 0);
+    const navSource = isPaper ? 'IBKR /api/account net_liquidation' : 'Sim portfolio /api/portfolio nav';
+    const ts = account?.ts ?? new Date().toISOString();
+
+    return (
+        <div className="modal-overlay" onClick={onClose} role="dialog" aria-modal="true" aria-label="NAV Drill-Down">
+            <div className="modal-card nav-drill" onClick={e => e.stopPropagation()}>
+                <div className="modal-header">
+                    <span className="modal-title">📊 NAV DRILL-DOWN</span>
+                    <button className="modal-close" onClick={onClose} aria-label="Close NAV drill-down">✕</button>
+                </div>
+                <div className="fill-drill-body">
+                    <div className="fill-pnl-banner win">
+                        <span className="fill-pnl-label">NET LIQUIDATION</span>
+                        <span className="fill-pnl-value">{formatUSD(nav)}</span>
+                    </div>
+                    <div className="fill-section">
+                        <div className="fill-section-title">Composition</div>
+                        <div className="fill-grid">
+                            <div className="fill-row">
+                                <span>Cash</span>
+                                <span data-tooltip="Cash balance from broker account">{formatUSD(cash)}</span>
+                            </div>
+                            <div className="fill-row">
+                                <span>Open Position Market Values</span>
+                                <span data-tooltip="Sum of current_price × qty × 100 for all positions">{formatUSD(sumPosMV)}</span>
+                            </div>
+                            <div className="fill-row">
+                                <span>Unrealized P&L</span>
+                                <span style={{ color: (unrealized ?? 0) >= 0 ? '#3fb950' : '#f85149' }}
+                                      data-tooltip="Mark-to-market gain/loss on open positions">
+                                    {(unrealized ?? 0) >= 0 ? '+' : ''}{formatUSD(unrealized ?? 0)}
+                                </span>
+                            </div>
+                            <div className="fill-row">
+                                <span>Realized P&L (session)</span>
+                                <span style={{ color: (realized ?? 0) >= 0 ? '#3fb950' : '#f85149' }}
+                                      data-tooltip="Locked-in P&L from closed trades this session">
+                                    {(realized ?? 0) >= 0 ? '+' : ''}{formatUSD(realized ?? 0)}
+                                </span>
+                            </div>
+                            <div className="fill-row" style={{ borderTop: '1px solid #30363d', fontWeight: 700, paddingTop: '6px' }}>
+                                <span>= NAV</span>
+                                <span style={{ color: '#79c0ff' }}>{formatUSD(nav)}</span>
+                            </div>
+                        </div>
+                    </div>
+                    {posValues.length > 0 && (
+                        <div className="fill-section">
+                            <div className="fill-section-title">Position Market Values</div>
+                            <div className="fill-grid">
+                                {posValues.map(p => (
+                                    <div key={p.key} className="fill-row">
+                                        <span style={{ fontFamily: 'monospace', fontSize: '11px' }}>{p.ticker}</span>
+                                        <span data-tooltip="current_price × qty × 100">{formatUSD(p.marketValue)}</span>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+                    <div className="fill-section">
+                        <div className="fill-section-title">Data Provenance</div>
+                        <div className="fill-grid">
+                            <div className="fill-row"><span>Source</span><span style={{ fontSize: '11px' }}>{navSource}</span></div>
+                            <div className="fill-row"><span>Mode</span><span>{simMode.toUpperCase()}</span></div>
+                            <div className="fill-row"><span>Last Updated</span><span>{ts ? new Date(ts).toLocaleTimeString() : '—'}</span></div>
+                            <div className="fill-row"><span>Computation</span><span style={{ fontSize: '10px' }}>cash + Σ(position_market_values) + realized_pnl</span></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
 
 interface SpotValidation {
     tv: number | null;
@@ -450,11 +552,11 @@ const SignalModal = ({ signal, onClose }: { signal: Signal; onClose: () => void 
             <div className="signal-modal" onClick={e => e.stopPropagation()}>
                 <div className="signal-modal-header">
                     <Tooltip text={contractExplanation(signal)}>
-                        <span className="signal-modal-title">
+                        <span className="signal-modal-title" data-tooltip={contractExplanation(signal)}>
                             {signal.is_spread ? contractName(signal) : `${signal.action} ${contractName(signal)}`}
                         </span>
                     </Tooltip>
-                    <button className="btn-modal-close" onClick={onClose}>×</button>
+                    <button className="btn-modal-close" onClick={onClose} aria-label="Close signal detail modal">×</button>
                 </div>
 
                 {/* ── Core fields ─────────────────────────────────── */}
@@ -567,6 +669,35 @@ const SignalModal = ({ signal, onClose }: { signal: Signal; onClose: () => void 
                             </span>
                         </div>
                     )}
+                    {signal.exec_status && (
+                        <div className="modal-row full-width">
+                            <span className="modal-key">Order Status</span>
+                            <span className="modal-val" style={{
+                                fontFamily: 'monospace',
+                                fontWeight: 700,
+                                color: signal.exec_status === 'failed' || signal.exec_status === 'rejected'
+                                    ? '#f85149'
+                                    : signal.exec_status === 'submitted'
+                                    ? '#3fb950'
+                                    : '#79c0ff',
+                            }}>
+                                {signal.exec_status.toUpperCase()}
+                                {signal.exec_error && (
+                                    <span style={{ fontWeight: 400, marginLeft: '8px', color: '#f85149', fontSize: '11px' }}>
+                                        — {signal.exec_error}
+                                    </span>
+                                )}
+                            </span>
+                        </div>
+                    )}
+                    {signal.ibkr_order_id != null && signal.ibkr_order_id > 0 && (
+                        <div className="modal-row">
+                            <span className="modal-key">IBKR Order ID</span>
+                            <span className="modal-val" style={{ fontFamily: 'monospace', color: '#3fb950', fontWeight: 700 }}>
+                                #{signal.ibkr_order_id}
+                            </span>
+                        </div>
+                    )}
                     {signal.underlying_price != null && signal.underlying_price > 0 && (
                         <div className="modal-row">
                             <span className="modal-key">Spot Price</span>
@@ -585,6 +716,158 @@ const SignalModal = ({ signal, onClose }: { signal: Signal; onClose: () => void 
                 <div style={{ padding: '0.5rem 0.6rem', fontSize: '12px', color: '#8b949e', borderTop: '1px solid #21262d', lineHeight: '1.5' }}>
                     {contractExplanation(signal)}
                 </div>
+
+                {/* ── Trade Economics section ──────────────────────── */}
+                {(() => {
+                    const eco = computeEconomics(signal);
+                    const ts = new Date(signal.timestamp * 1000).toLocaleString();
+                    if (eco.is_na) {
+                        return (
+                            <div className="trade-economics-section">
+                                <div className="trade-economics-title">💰 TRADE ECONOMICS</div>
+                                <div className="econ-na-notice"
+                                     data-tooltip={eco.na_reason}>
+                                    Max profit: N/A ({eco.na_reason})
+                                </div>
+                            </div>
+                        );
+                    }
+                    const fmtUSD = (n: number) => n.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 });
+                    const fmtPct = (n: number) => `${(n * 100).toFixed(1)}%`;
+                    const rrCls = rrColorClass(eco.risk_reward_ratio);
+                    return (
+                        <div className="trade-economics-section">
+                            <div className="trade-economics-title">💰 TRADE ECONOMICS</div>
+
+                            {/* Entry block */}
+                            <div className="econ-block">
+                                <div className="econ-block-label">Entry</div>
+                                <div className="econ-ledger-row">
+                                    <span
+                                        data-tooltip={`Premium: ${fmtUSD(signal.target_limit_price)} × ${signal.quantity} contracts × 100 multiplier`}>
+                                        Premium
+                                    </span>
+                                    <span data-tooltip={`${fmtUSD(signal.target_limit_price)} × ${signal.quantity} × 100`}>
+                                        {fmtUSD(signal.target_limit_price * 100 * signal.quantity)}
+                                    </span>
+                                </div>
+                                <div className="econ-ledger-row">
+                                    <span
+                                        data-tooltip={`IBKR Pro: max($${(0.65).toFixed(2)} × ${signal.quantity} contracts, $1.00 min) per leg`}>
+                                        Open commission
+                                    </span>
+                                    <span data-tooltip={`max($0.65 × ${signal.quantity}, $1.00) = ${fmtUSD(eco.commission_open)}`}>
+                                        {fmtUSD(eco.commission_open)}
+                                    </span>
+                                </div>
+                                {eco.cost_basis > 0 && (
+                                    <div className="econ-ledger-row bold">
+                                        <span data-tooltip="Premium + open commission = total cash at risk">Cost basis</span>
+                                        <span>{fmtUSD(eco.cost_basis)}</span>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* At Take Profit */}
+                            <div className="econ-block">
+                                <div className="econ-block-label">At Take Profit ({fmtUSD(signal.take_profit_price)})</div>
+                                <div className="econ-ledger-row green">
+                                    <span
+                                        data-tooltip={`(${fmtUSD(signal.take_profit_price)} - ${fmtUSD(signal.target_limit_price)}) × ${signal.quantity} × 100`}>
+                                        Gross profit
+                                    </span>
+                                    <span>{fmtUSD(eco.gross_profit_at_tp)}</span>
+                                </div>
+                                <div className="econ-ledger-row">
+                                    <span
+                                        data-tooltip={`Round-trip commission: open (${fmtUSD(eco.commission_open)}) + close (${fmtUSD(eco.commission_close)})`}>
+                                        Round-trip commission
+                                    </span>
+                                    <span>{fmtUSD(eco.round_trip_commission)}</span>
+                                </div>
+                                <div className="econ-ledger-row green bold">
+                                    <span data-tooltip="Gross profit minus round-trip commissions">Net profit</span>
+                                    <span data-testid="econ-max-profit">{fmtUSD(eco.max_profit_at_tp)}</span>
+                                </div>
+                                {eco.cost_basis > 0 && (
+                                    <div className="econ-ledger-row">
+                                        <span data-tooltip="Net profit ÷ cost basis">Return on cost basis</span>
+                                        <span>{fmtPct(eco.return_on_cost_basis_tp)}</span>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* At Stop Loss */}
+                            <div className="econ-block">
+                                <div className="econ-block-label">At Stop Loss ({fmtUSD(signal.stop_loss_price)})</div>
+                                <div className="econ-ledger-row red">
+                                    <span
+                                        data-tooltip={`(${fmtUSD(signal.target_limit_price)} - ${fmtUSD(signal.stop_loss_price)}) × ${signal.quantity} × 100`}>
+                                        Gross loss
+                                    </span>
+                                    <span>−{fmtUSD(eco.gross_loss_at_sl)}</span>
+                                </div>
+                                <div className="econ-ledger-row">
+                                    <span data-tooltip="Commission paid on both legs">Round-trip commission</span>
+                                    <span>{fmtUSD(eco.round_trip_commission)}</span>
+                                </div>
+                                <div className="econ-ledger-row red bold">
+                                    <span data-tooltip="Gross loss plus round-trip commissions">Net loss</span>
+                                    <span data-testid="econ-max-loss">−{fmtUSD(eco.max_loss_at_sl)}</span>
+                                </div>
+                                {eco.cost_basis > 0 && (
+                                    <div className="econ-ledger-row">
+                                        <span data-tooltip="Net loss ÷ cost basis">Return on cost basis</span>
+                                        <span style={{ color: '#f85149' }}>{fmtPct(eco.return_on_cost_basis_sl)}</span>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Summary */}
+                            <div className="econ-block">
+                                <div className="econ-block-label">Summary</div>
+                                <div className="econ-ledger-row">
+                                    <span
+                                        data-tooltip={`entry + round_trip_commission / qty / 100 = ${fmtUSD(signal.target_limit_price)} + ${fmtUSD(eco.round_trip_commission)} / ${signal.quantity} / 100`}>
+                                        Breakeven
+                                    </span>
+                                    <span data-testid="econ-breakeven" className="neutral" style={{ color: '#79c0ff' }}>
+                                        {fmtUSD(eco.breakeven)}
+                                    </span>
+                                </div>
+                                <div className="econ-ledger-row">
+                                    <span
+                                        data-tooltip={`net_profit / net_loss = ${fmtUSD(eco.max_profit_at_tp)} / ${fmtUSD(eco.max_loss_at_sl)} — per $1 risked, ${fmtUSD(eco.risk_reward_ratio)} expected at TP`}>
+                                        Risk : Reward
+                                    </span>
+                                    <span data-testid="econ-rr"
+                                          style={{ color: rrCls === 'green' ? '#3fb950' : rrCls === 'amber' ? '#d29922' : '#f85149' }}>
+                                        {formatRR(eco.risk_reward_ratio)}
+                                    </span>
+                                </div>
+                                {eco.theoretical_max_profit === 'unlimited' ? (
+                                    <div className="econ-ledger-row">
+                                        <span data-tooltip="Long call: profit unlimited as underlying rises">Theoretical max</span>
+                                        <span style={{ color: '#3fb950' }}>∞ unlimited</span>
+                                    </div>
+                                ) : eco.theoretical_max_profit > 0 && (
+                                    <div className="econ-ledger-row">
+                                        <span data-tooltip="Long put: bounded by underlying going to zero">Theoretical max</span>
+                                        <span style={{ color: '#3fb950' }}>{fmtUSD(eco.theoretical_max_profit as number)}</span>
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="econ-source-note">
+                                <span data-tooltip="IBKR Pro tiered: $0.65/contract, $1.00 minimum per leg, 2 legs for long options">
+                                    Source: IBKR Pro · $0.65/contract · $1 min/leg · {signal.is_spread ? '4' : '2'} legs round-trip
+                                </span>
+                                <br />
+                                <span style={{ color: '#30363d' }}>Signal timestamp: {ts}</span>
+                            </div>
+                        </div>
+                    );
+                })()}
 
                 {/* ── Data Provenance section ──────────────────────── */}
                 <div className="modal-provenance">
@@ -645,11 +928,11 @@ const SignalModal = ({ signal, onClose }: { signal: Signal; onClose: () => void 
 
                     {/* Options Chain + Spot Audit buttons */}
                     <div className="prov-chain-row" style={{ display: 'flex', gap: '8px' }}>
-                        <button className="btn-view-chain" onClick={() => fetchChain()} disabled={chainLoading}>
-                            {chainLoading ? 'Fetching…' : '⟳ Options Chain'}
+                        <button className="btn-view-chain" onClick={() => fetchChain()} disabled={chainLoading} aria-busy={chainLoading}>
+                            ⟳ Options Chain
                         </button>
-                        <button className="btn-view-chain" onClick={() => fetchAudit(true)} disabled={auditLoading}>
-                            {auditLoading ? 'Fetching…' : '⟳ Spot Audit'}
+                        <button className="btn-view-chain" onClick={() => fetchAudit(true)} disabled={auditLoading} aria-busy={auditLoading}>
+                            ⟳ Spot Audit
                         </button>
                     </div>
 
@@ -775,7 +1058,12 @@ const BrokerStatusPill = ({ brokerStatus }: { brokerStatus: BrokerStatus | null 
     const label = isLive ? '⚠ LIVE TRADING' : isPaper ? 'PAPER TRADING' : 'SIM MODE';
     const cls = isLive ? 'broker-live' : isPaper ? 'broker-paper' : 'broker-sim';
     return (
-        <div className={`broker-status-banner ${cls}`}>
+        <div
+            className={`broker-status-banner ${cls}`}
+            role="alert"
+            aria-label={`Trading mode: ${label}`}
+            data-tooltip={isLive ? 'LIVE mode — real orders are being executed against your live IBKR account.' : isPaper ? 'Paper mode — orders execute against IBKR paper account (no real money).' : 'Simulation mode — no real orders, local model only.'}
+        >
             <span className="broker-pill">{label}</span>
             {isLive && (
                 <span className="broker-banner-note">
@@ -873,6 +1161,9 @@ const DataProvenancePanel = ({ audit }: { audit: DataAudit | null }) => {
 const PortfolioBar = ({
     portfolio,
     account,
+    accountError,
+    accountLoading: _accountLoading,
+    onRetryAccount,
     simMode,
     onSimToggle,
     onSimReset,
@@ -881,6 +1172,9 @@ const PortfolioBar = ({
 }: {
     portfolio: Portfolio;
     account: AccountSummary | null;
+    accountError: string | null;
+    accountLoading: boolean;
+    onRetryAccount: () => void;
     simMode: string;
     onSimToggle: () => void;
     onSimReset: () => void;
@@ -888,6 +1182,8 @@ const PortfolioBar = ({
     lastFetchMs: number;
 }) => {
     const [marketStatus, setMarketStatus] = useState(getMarketStatus());
+    const [navDrillOpen, setNavDrillOpen] = useState(false);
+
     useEffect(() => {
         const id = setInterval(() => setMarketStatus(getMarketStatus()), 10000);
         return () => clearInterval(id);
@@ -908,77 +1204,145 @@ const PortfolioBar = ({
     const isLiveAccount = !!account && !account.error;
 
     return (
-        <div className="portfolio-bar">
-            {/* Mode toggle pill */}
-            <Tooltip text="Toggle between Paper Trading (live IBKR paper account) and Simulation (local model)">
-                <div
-                    className={`port-pill mode-toggle ${simMode === 'paper' ? 'paper' : 'sim'}`}
-                    onClick={onSimToggle}
-                    style={{ cursor: 'pointer' }}
-                >
-                    <span className="port-pill-label">MODE</span>
-                    <span className="port-pill-value">{simMode.toUpperCase()}</span>
-                </div>
-            </Tooltip>
-
-            <Tooltip text={isLiveAccount ? 'Net Liquidation Value from live IBKR paper account' : 'Simulated NAV'}>
-                <div className="port-pill">
-                    <span className="port-pill-label">
-                        NET LIQ {isLiveAccount && <span className="ibkr-live-dot" />}
-                        <span className="port-pill-source">{isPaper ? '(IBKR)' : '(SIM)'}</span>
-                    </span>
-                    <span className="port-pill-value neutral">{netliq !== null ? formatUSD(netliq) : '...'}</span>
-                </div>
-            </Tooltip>
-            <Tooltip text="Available cash balance">
-                <div className="port-pill">
-                    <span className="port-pill-label">CASH <span className="port-pill-source">{isPaper ? '(IBKR)' : '(SIM)'}</span></span>
-                    <span className="port-pill-value">{cash !== null ? formatUSD(cash) : '...'}</span>
-                </div>
-            </Tooltip>
-            <Tooltip text="Buying power (4× cash for margin accounts)">
-                <div className="port-pill">
-                    <span className="port-pill-label">BUY PWR</span>
-                    <span className="port-pill-value">{formatUSD(bp)}</span>
-                </div>
-            </Tooltip>
-            <Tooltip text="Unrealized P&L: current mark-to-market on open positions">
-                <div className="port-pill">
-                    <span className="port-pill-label">UNREALIZED</span>
-                    <span className={`port-pill-value ${unreal !== null && unreal >= 0 ? 'pos' : 'neg'}`}>
-                        {unreal !== null ? (unreal !== 0 ? (unreal > 0 ? '+' : '') + formatUSD(unreal) : '$0.00') : '...'}
-                    </span>
-                </div>
-            </Tooltip>
-            <Tooltip text="Realized P&L: locked-in profit/loss from closed trades">
-                <div className="port-pill">
-                    <span className="port-pill-label">REALIZED <span className="port-pill-source">{isPaper ? '(IBKR)' : '(SIM)'}</span></span>
-                    <span className={`port-pill-value ${real !== null && real >= 0 ? 'pos' : 'neg'}`}>
-                        {real !== null ? formatUSD(real) : '...'}
-                    </span>
-                </div>
-            </Tooltip>
-
-            {simMode === 'sim' && (
-                <Tooltip text="Reset simulation balances to $25k">
-                    <button className="sim-reset-btn" onClick={onSimReset}>
-                        RESET SIM
-                    </button>
-                </Tooltip>
+        <>
+            {navDrillOpen && (
+                <NavDrillModal
+                    portfolio={portfolio}
+                    account={account}
+                    simMode={simMode}
+                    onClose={() => setNavDrillOpen(false)}
+                />
             )}
-
-            <div className="market-clock">
-                <div className={`market-status-badge ${marketStatus.cls}`}>
-                    {marketStatus.label}
+            {accountError && isPaper && (
+                <div className="ibkr-error-banner" role="alert" aria-live="polite">
+                    <span className="ibkr-error-icon">⚠</span>
+                    <span className="ibkr-error-msg">{accountError}</span>
+                    <button
+                        className="ibkr-retry-btn"
+                        onClick={onRetryAccount}
+                        aria-label="Retry IBKR connection"
+                        title="Retry connecting to IB Gateway"
+                    >
+                        Retry
+                    </button>
                 </div>
-                <Tooltip text={`Data last refreshed ${Math.floor(staleSec)}s ago. Over 10s is considered stale — prices may not reflect current market.`}>
-                    <div className="live-indicator">
-                        <div className={`live-dot ${isFetching ? 'active' : isStale ? 'stale' : 'active'}`} />
-                        <span>{isFetching ? 'Fetching…' : isStale ? 'Stale' : 'Live'}</span>
+            )}
+            <div className="portfolio-bar" role="region" aria-label="Portfolio summary">
+                {/* Mode toggle pill */}
+                <Tooltip text="Toggle between Paper Trading (live IBKR paper account) and Simulation (local model)">
+                    <div
+                        className={`port-pill mode-toggle ${simMode === 'paper' ? 'paper' : 'sim'}`}
+                        onClick={onSimToggle}
+                        style={{ cursor: 'pointer' }}
+                        role="button"
+                        tabIndex={0}
+                        aria-label={`Trading mode: ${simMode}. Click to toggle.`}
+                        data-tooltip="Toggle between Paper Trading (live IBKR paper account) and Simulation (local model)"
+                        onKeyDown={e => e.key === 'Enter' && onSimToggle()}
+                    >
+                        <span className="port-pill-label">MODE</span>
+                        <span className="port-pill-value">{simMode.toUpperCase()}</span>
                     </div>
                 </Tooltip>
+
+                <Tooltip text={isLiveAccount ? 'Net Liquidation Value from live IBKR paper account. Click for full NAV breakdown.' : 'Simulated NAV. Click for breakdown.'}>
+                    <div
+                        className="port-pill clickable"
+                        onClick={() => setNavDrillOpen(true)}
+                        role="button"
+                        tabIndex={0}
+                        aria-label={`Net Liquidation Value: ${netliq !== null ? formatUSD(netliq) : 'loading'}. Click for breakdown.`}
+                        data-tooltip={isLiveAccount ? 'Net Liquidation Value from live IBKR paper account. Click for full NAV breakdown.' : 'Simulated NAV. Click for breakdown.'}
+                        onKeyDown={e => e.key === 'Enter' && setNavDrillOpen(true)}
+                        style={{ cursor: 'pointer' }}
+                    >
+                        <span className="port-pill-label">
+                            NET LIQ {isLiveAccount && <span className="ibkr-live-dot" />}
+                            <span className="port-pill-source">{isPaper ? '(IBKR)' : '(SIM)'}</span>
+                        </span>
+                        <span className="port-pill-value neutral">{netliq !== null ? formatUSD(netliq) : '—'}</span>
+                    </div>
+                </Tooltip>
+                <Tooltip text="Available cash balance — spendable funds excluding open position values">
+                    <div
+                        className="port-pill"
+                        data-tooltip="Available cash balance — spendable funds excluding open position values"
+                        aria-label={`Cash balance: ${cash !== null ? formatUSD(cash) : 'loading'}`}
+                    >
+                        <span className="port-pill-label">CASH <span className="port-pill-source">{isPaper ? '(IBKR)' : '(SIM)'}</span></span>
+                        <span className="port-pill-value">{cash !== null ? formatUSD(cash) : '—'}</span>
+                    </div>
+                </Tooltip>
+                <Tooltip text="Buying power (4× cash for margin accounts)">
+                    <div
+                        className="port-pill"
+                        data-tooltip="Buying power (4× cash for margin accounts)"
+                        aria-label={`Buying power: ${formatUSD(bp)}`}
+                    >
+                        <span className="port-pill-label">BUY PWR</span>
+                        <span className="port-pill-value">{formatUSD(bp)}</span>
+                    </div>
+                </Tooltip>
+                <Tooltip text="Unrealized P&L: current mark-to-market on open positions">
+                    <div
+                        className="port-pill"
+                        data-tooltip="Unrealized P&L: current mark-to-market on open positions"
+                        aria-label={`Unrealized P&L: ${unreal !== null ? formatUSD(unreal) : 'loading'}`}
+                    >
+                        <span className="port-pill-label">UNREALIZED</span>
+                        <span className={`port-pill-value ${unreal !== null && unreal >= 0 ? 'pos' : 'neg'}`}>
+                            {unreal !== null ? (unreal !== 0 ? (unreal > 0 ? '+' : '') + formatUSD(unreal) : '$0.00') : '—'}
+                        </span>
+                    </div>
+                </Tooltip>
+                <Tooltip text="Realized P&L: locked-in profit/loss from closed trades">
+                    <div
+                        className="port-pill"
+                        data-tooltip="Realized P&L: locked-in profit/loss from closed trades"
+                        aria-label={`Realized P&L: ${real !== null ? formatUSD(real) : 'loading'}`}
+                    >
+                        <span className="port-pill-label">REALIZED <span className="port-pill-source">{isPaper ? '(IBKR)' : '(SIM)'}</span></span>
+                        <span className={`port-pill-value ${real !== null && real >= 0 ? 'pos' : 'neg'}`}>
+                            {real !== null ? formatUSD(real) : '—'}
+                        </span>
+                    </div>
+                </Tooltip>
+
+                {simMode === 'sim' && (
+                    <Tooltip text="Reset simulation balances to $25k">
+                        <button
+                            className="sim-reset-btn"
+                            onClick={onSimReset}
+                            aria-label="Reset simulation portfolio to $25,000"
+                            data-tooltip="Reset simulation balances to $25k"
+                        >
+                            RESET SIM
+                        </button>
+                    </Tooltip>
+                )}
+
+                <div className="market-clock">
+                    <div
+                        className={`market-status-badge ${marketStatus.cls}`}
+                        aria-label={`Market status: ${marketStatus.label}`}
+                        role="status"
+                    >
+                        {marketStatus.label}
+                    </div>
+                    <Tooltip text={`Data last refreshed ${Math.floor(staleSec)}s ago. Over 10s is considered stale — prices may not reflect current market.`}>
+                        <div
+                            className="live-indicator"
+                            data-tooltip={`Data last refreshed ${Math.floor(staleSec)}s ago. Over 10s is stale.`}
+                            aria-label={isStale ? 'Data is stale' : isFetching ? 'Refreshing data' : 'Data is live'}
+                            role="status"
+                        >
+                            <div className={`live-dot ${isStale ? 'stale' : 'active'}`} aria-hidden="true" />
+                            <span>{isStale ? 'Stale' : 'Live'}</span>
+                        </div>
+                    </Tooltip>
+                </div>
             </div>
-        </div>
+        </>
     );
 };
 
@@ -1031,14 +1395,14 @@ const SignalCommand = ({
     };
 
     return (
-        <div className="dash-col card">
+        <div className="dash-col card" role="region" aria-label="Signal Command — live Alpha Engine signals">
             <div className="section-header">
                 <Tooltip text="Live conviction signals from the Alpha Engine. Click any card for full details.">
-                    <span className="section-title">⚡ SIGNAL COMMAND</span>
+                    <span className="section-title" data-tooltip="Live conviction signals from the Alpha Engine. Click any card for full details.">⚡ SIGNAL COMMAND</span>
                 </Tooltip>
                 <div className="section-meta">
-                    <span className="inline-badge">{signals.length}</span>
-                    {hasNew && <span className="inline-badge new">NEW</span>}
+                    <span className="inline-badge" aria-label={`${signals.length} signals`}>{signals.length}</span>
+                    {hasNew && <span className="inline-badge new" aria-label="New signals available">NEW</span>}
                 </div>
             </div>
             <div className="scroll-col">
@@ -1055,6 +1419,10 @@ const SignalCommand = ({
                                 className={`signal-card ${isBull ? 'bullish' : 'bearish'} ${isNew ? 'signal-new' : ''} ${isStale ? 'signal-stale' : ''}`}
                                 onClick={() => onSelectSignal(s)}
                                 title="Click for full signal breakdown"
+                                role="button"
+                                tabIndex={0}
+                                aria-label={`${s.direction} signal: ${contract}, ${confPct.toFixed(1)}% confidence. Click for full breakdown.`}
+                                onKeyDown={e => e.key === 'Enter' && onSelectSignal(s)}
                             >
                                 <div className="signal-top-row">
                                     <Tooltip text={contractExplanation(s)}>
@@ -1064,7 +1432,7 @@ const SignalCommand = ({
                                         {s.action}
                                     </span>
                                 </div>
-                                <div className="conviction-bar-wrap">
+                                <div className="conviction-bar-wrap" role="meter" aria-valuenow={confPct} aria-valuemin={0} aria-valuemax={100} aria-label={`Conviction: ${confPct.toFixed(1)}%`}>
                                     <div className="conviction-bar-track">
                                         <div
                                             className="conviction-bar-fill"
@@ -1073,7 +1441,7 @@ const SignalCommand = ({
                                     </div>
                                     <div className="conviction-label">
                                         <Tooltip text="Model conviction: probability the signal is correct">
-                                            <span>{confPct.toFixed(1)}% conviction</span>
+                                            <span data-tooltip="Model conviction: probability the signal is correct">{confPct.toFixed(1)}% conviction</span>
                                         </Tooltip>
                                     </div>
                                 </div>
@@ -1125,6 +1493,69 @@ const SignalCommand = ({
                                         </div>
                                     )}
                                 </div>
+                                {/* ── Economics row ─────────────── */}
+                                {(() => {
+                                    const eco = computeEconomics(s);
+                                    const fmtC = (n: number) => n.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 0, maximumFractionDigits: 0 });
+                                    const fmtPrice = (n: number) => `$${n.toFixed(3)}`;
+                                    const rrCls = rrColorClass(eco.risk_reward_ratio);
+                                    if (eco.is_na) {
+                                        return (
+                                            <div className="signal-economics-row">
+                                                <span className="econ-pill">
+                                                    <span className="econ-pill-key">Economics</span>
+                                                    <Tooltip text={eco.na_reason ?? 'Cannot compute'}>
+                                                        <span className="econ-pill-val na" data-tooltip={eco.na_reason}>N/A</span>
+                                                    </Tooltip>
+                                                </span>
+                                            </div>
+                                        );
+                                    }
+                                    return (
+                                        <div className="signal-economics-row" data-testid="signal-economics-row">
+                                            <span className="econ-pill">
+                                                <span className="econ-pill-key">Max Profit</span>
+                                                <Tooltip text={`Net profit at TP ${s.take_profit_price}: (TP - entry) × qty × 100 - round-trip commission`}>
+                                                    <span className="econ-pill-val green"
+                                                          data-tooltip={`(${s.take_profit_price} - ${s.target_limit_price}) × ${s.quantity} × 100 - ${eco.round_trip_commission.toFixed(2)}`}
+                                                          data-testid="card-max-profit">
+                                                        {fmtC(eco.max_profit_at_tp)} (at ${s.take_profit_price})
+                                                    </span>
+                                                </Tooltip>
+                                            </span>
+                                            <span className="econ-pill">
+                                                <span className="econ-pill-key">Max Loss</span>
+                                                <Tooltip text={`Net loss at SL ${s.stop_loss_price}: (entry - SL) × qty × 100 + round-trip commission`}>
+                                                    <span className="econ-pill-val red"
+                                                          data-tooltip={`(${s.target_limit_price} - ${s.stop_loss_price}) × ${s.quantity} × 100 + ${eco.round_trip_commission.toFixed(2)}`}
+                                                          data-testid="card-max-loss">
+                                                        {fmtC(eco.max_loss_at_sl)} (at ${s.stop_loss_price})
+                                                    </span>
+                                                </Tooltip>
+                                            </span>
+                                            <span className="econ-pill">
+                                                <span className="econ-pill-key">R:R</span>
+                                                <Tooltip text={`Risk:Reward = net_profit / net_loss = ${eco.max_profit_at_tp.toFixed(2)} / ${eco.max_loss_at_sl.toFixed(2)}`}>
+                                                    <span className={`econ-pill-val ${rrCls}`}
+                                                          data-tooltip={`Per $1 risked, $${eco.risk_reward_ratio.toFixed(2)} expected at TP`}
+                                                          data-testid="card-rr">
+                                                        {formatRR(eco.risk_reward_ratio)}
+                                                    </span>
+                                                </Tooltip>
+                                            </span>
+                                            <span className="econ-pill">
+                                                <span className="econ-pill-key">Breakeven</span>
+                                                <Tooltip text={`entry + round_trip_commission / qty / 100 = ${s.target_limit_price} + ${eco.round_trip_commission.toFixed(2)} / ${s.quantity} / 100`}>
+                                                    <span className="econ-pill-val neutral"
+                                                          data-tooltip={`entry (${s.target_limit_price}) + commission spread (${(eco.round_trip_commission / s.quantity / 100).toFixed(4)})`}
+                                                          data-testid="card-breakeven">
+                                                        {fmtPrice(eco.breakeven)}
+                                                    </span>
+                                                </Tooltip>
+                                            </span>
+                                        </div>
+                                    );
+                                })()}
                                 <div className="signal-bottom-row">
                                     <span className="signal-time">
                                         {new Date(s.timestamp * 1000).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })}
@@ -1160,7 +1591,7 @@ const PositionModal = ({ pos, onClose }: { pos: IBKRPosition; onClose: () => voi
             <div className="signal-modal" onClick={e => e.stopPropagation()}>
                 <div className="signal-modal-header">
                     <span className="signal-modal-title">{label}</span>
-                    <button className="btn-modal-close" onClick={onClose}>×</button>
+                    <button className="btn-modal-close" onClick={onClose} aria-label="Close position detail">×</button>
                 </div>
                 <div className="modal-grid">
                     <div className="modal-row">
@@ -1226,6 +1657,8 @@ const PositionModal = ({ pos, onClose }: { pos: IBKRPosition; onClose: () => voi
                             target="_blank"
                             rel="noopener noreferrer"
                             className="ibkr-verify-link"
+                        aria-label="Verify this position on IBKR website (opens in new tab)"
+                        title="Verify this position on the IBKR portfolio page"
                         >
                             Verify on IBKR →
                         </a>
@@ -1237,9 +1670,215 @@ const PositionModal = ({ pos, onClose }: { pos: IBKRPosition; onClose: () => voi
 };
 
 // ============================================================
-//  Column B: Trading Floor (IBKR live positions + sim fallback)
+//  Pending Orders — interface + components
 // ============================================================
-const TradingFloor = ({
+interface PendingOrder {
+    orderId: number;
+    status: string;
+    symbol: string;
+    action: string;
+    qty: number;
+    strike: number;
+    expiry: string;
+    option_type: string;
+    limit_price: number;
+    filled_qty: number;
+    avg_fill_price: number;
+    timestamp: string;
+}
+
+interface PendingOrdersResponse {
+    active: PendingOrder[];
+    cancelled: PendingOrder[];
+    source: string;
+    error?: string;
+}
+
+function orderLabel(o: PendingOrder): string {
+    const strike = o.strike > 0 ? `$${o.strike}` : '';
+    const type   = o.option_type ? o.option_type[0] : '';
+    const exp    = o.expiry || '';
+    return `${o.symbol} ${strike}${type} ${exp}`.trim();
+}
+
+function fillWindowLabel(): string {
+    const now = new Date();
+    const fmt = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York',
+        hour: 'numeric', minute: 'numeric', hour12: false,
+        weekday: 'short',
+    });
+    const parts = fmt.formatToParts(now);
+    const h = parseInt(parts.find(p => p.type === 'hour')?.value ?? '0', 10);
+    const m = parseInt(parts.find(p => p.type === 'minute')?.value ?? '0', 10);
+    const wd = parts.find(p => p.type === 'weekday')?.value ?? '';
+    const t = h * 60 + m;
+    const isWeekend = ['Sat', 'Sun'].includes(wd);
+    const marketOpen = t >= 570 && t < 960; // 9:30–16:00 ET
+    if (marketOpen && !isWeekend) return 'fills next tick';
+    return 'fills next Monday 9:30 AM ET';
+}
+
+const PendingOrderModal = ({ order, onClose }: { order: PendingOrder; onClose: () => void }) => (
+    <div className="modal-overlay" onClick={onClose} role="dialog" aria-modal="true" aria-label="Pending Order Detail">
+        <div className="modal-card fill-drill" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+                <span className="modal-title">⏳ PENDING ORDER #{order.orderId}</span>
+                <button className="modal-close" onClick={onClose} aria-label="Close pending order detail">✕</button>
+            </div>
+            <div className="fill-drill-body pending-order-modal-body">
+                <div className={`fill-pnl-banner ${order.status === 'Filled' ? 'win' : ''}`}
+                     style={{ background: 'rgba(139,92,246,0.12)', borderColor: 'rgba(139,92,246,0.4)' }}>
+                    <span className="fill-pnl-label" style={{ color: '#c9d1d9' }}>{order.action} {orderLabel(order)}</span>
+                    <span className="fill-pnl-value" style={{ color: '#e6a200' }}>{order.status}</span>
+                </div>
+                <div className="fill-section">
+                    <div className="fill-section-title">Order Detail</div>
+                    <div className="fill-grid">
+                        <div className="fill-row"><span>Order ID</span><span>#{order.orderId}</span></div>
+                        <div className="fill-row"><span>Status</span><span style={{ color: '#e6a200', fontWeight: 700 }}>{order.status}</span></div>
+                        <div className="fill-row"><span>Symbol</span><span>{order.symbol}</span></div>
+                        <div className="fill-row"><span>Action</span><span>{order.action}</span></div>
+                        <div className="fill-row"><span>Option Type</span><span>{order.option_type || '—'}</span></div>
+                        <div className="fill-row"><span>Strike</span><span>{order.strike > 0 ? `$${order.strike}` : '—'}</span></div>
+                        <div className="fill-row"><span>Expiry</span><span>{order.expiry || '—'}</span></div>
+                        <div className="fill-row"><span>Qty</span><span>{order.qty}</span></div>
+                        <div className="fill-row"><span>Limit Price</span><span>{order.limit_price > 0 ? formatUSD(order.limit_price) : '—'}</span></div>
+                        <div className="fill-row"><span>Filled Qty</span><span>{order.filled_qty}</span></div>
+                        <div className="fill-row"><span>Avg Fill Price</span><span>{order.avg_fill_price > 0 ? formatUSD(order.avg_fill_price) : '—'}</span></div>
+                        <div className="fill-row"><span>Submitted At</span><span>{order.timestamp ? new Date(order.timestamp).toLocaleString() : '—'}</span></div>
+                    </div>
+                </div>
+                <div className="fill-section">
+                    <div className="fill-section-title">Fill Window</div>
+                    <div style={{ fontSize: '0.78rem', color: '#58a6ff', padding: '4px 0' }}>{fillWindowLabel()}</div>
+                </div>
+                <div className="fill-section">
+                    <div className="fill-section-title">Raw IBKR State</div>
+                    <div className="raw-order-block">{JSON.stringify(order, null, 2)}</div>
+                </div>
+            </div>
+        </div>
+    </div>
+);
+
+// ============================================================
+//  Column B: Pending Orders
+// ============================================================
+const PendingOrdersPanel = ({
+    orders,
+    source,
+}: {
+    orders: PendingOrdersResponse | null;
+    source: string;
+}) => {
+    const [selectedOrder, setSelectedOrder] = useState<PendingOrder | null>(null);
+    const [cancelledOpen, setCancelledOpen] = useState(false);
+
+    const active    = orders?.active    ?? [];
+    const cancelled = orders?.cancelled ?? [];
+    const hasError  = !!orders?.error;
+
+    return (
+        <>
+            {selectedOrder && (
+                <PendingOrderModal order={selectedOrder} onClose={() => setSelectedOrder(null)} />
+            )}
+            <div className="dash-col card" role="region" aria-label="Pending Orders — queued IBKR orders">
+                <div className="section-header">
+                    <Tooltip text="Orders submitted to IBKR but not yet filled. Click any row for full state.">
+                        <span className="section-title" data-tooltip="Orders submitted to IBKR but not yet filled. Click any row for full state.">
+                            ⏳ PENDING ORDERS
+                        </span>
+                    </Tooltip>
+                    <div className="section-meta">
+                        <span className="inline-badge" aria-label={`${active.length} pending orders`}>{active.length}</span>
+                        {source && source !== 'SIMULATION' && (
+                            <span className="inline-badge" style={{ background: 'rgba(139,92,246,0.15)', color: '#a371f7' }}>
+                                {source.replace('IBKR_', '')}
+                            </span>
+                        )}
+                    </div>
+                </div>
+                <div className="scroll-col">
+                    {hasError && (
+                        <div className="empty-position-card">
+                            <div className="empty-position-icon" style={{ color: '#f85149' }}>⚠</div>
+                            <div style={{ color: '#f85149', fontSize: '0.72rem' }}>{orders!.error}</div>
+                        </div>
+                    )}
+                    {!hasError && active.length === 0 && (
+                        <div className="empty-position-card">
+                            <div className="empty-position-icon" style={{ color: '#8b949e' }}>📭</div>
+                            <div style={{ color: '#8b949e' }}>No pending orders</div>
+                        </div>
+                    )}
+                    {active.map(o => (
+                        <div
+                            key={o.orderId}
+                            className="pending-order-row"
+                            onClick={() => setSelectedOrder(o)}
+                            role="button"
+                            tabIndex={0}
+                            aria-label={`Order #${o.orderId} — ${o.action} ${orderLabel(o)} — ${o.status}. Click for detail.`}
+                            onKeyDown={e => e.key === 'Enter' && setSelectedOrder(o)}
+                        >
+                            <div className="pending-order-top">
+                                <span>{o.action}</span>
+                                <Tooltip text={`${o.option_type || ''} ${o.strike > 0 ? `strike $${o.strike}` : ''} exp ${o.expiry}`}>
+                                    <span>{orderLabel(o)}</span>
+                                </Tooltip>
+                                <span className="pending-status-badge">{o.status}</span>
+                                <span className="pending-order-id">#{o.orderId}</span>
+                            </div>
+                            <div className="pending-order-detail">
+                                <span>×{o.qty}</span>
+                                {o.limit_price > 0 && <span>@ {formatUSD(o.limit_price)}</span>}
+                                {o.filled_qty > 0 && <span style={{ color: '#3fb950' }}>filled {o.filled_qty}</span>}
+                            </div>
+                            <div className="pending-fill-window">{fillWindowLabel()}</div>
+                        </div>
+                    ))}
+                    {cancelled.length > 0 && (
+                        <div className="cancelled-accordion">
+                            <div
+                                className="cancelled-accordion-header"
+                                onClick={() => setCancelledOpen(v => !v)}
+                                role="button"
+                                tabIndex={0}
+                                aria-expanded={cancelledOpen}
+                                aria-label={`Cancelled today — ${cancelled.length} orders. Click to ${cancelledOpen ? 'collapse' : 'expand'}.`}
+                                onKeyDown={e => e.key === 'Enter' && setCancelledOpen(v => !v)}
+                            >
+                                <span>Cancelled today ({cancelled.length})</span>
+                                <span style={{ transform: cancelledOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s' }}>▶</span>
+                            </div>
+                            {cancelledOpen && cancelled.map((o, i) => (
+                                <div
+                                    key={`${o.orderId}-${i}`}
+                                    className="cancelled-order-row"
+                                    onClick={() => setSelectedOrder(o)}
+                                    role="button"
+                                    tabIndex={0}
+                                    aria-label={`Cancelled: order #${o.orderId} ${orderLabel(o)}`}
+                                    onKeyDown={e => e.key === 'Enter' && setSelectedOrder(o)}
+                                    style={{ cursor: 'pointer' }}
+                                >
+                                    #{o.orderId} {o.action} {orderLabel(o)} — Cancelled
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            </div>
+        </>
+    );
+};
+
+// ============================================================
+//  Column C: Trading Floor (IBKR live positions + sim fallback)
+// ============================================================
+const TradingFloor = ({  // Column C in 4-col grid
     portfolio,
     ibkrPositions,
     brokerStatus,
@@ -1285,10 +1924,10 @@ const TradingFloor = ({
     return (
         <>
             {selectedPos && <PositionModal pos={selectedPos} onClose={() => setSelectedPos(null)} />}
-            <div className="dash-col card">
+            <div className="dash-col card" role="region" aria-label="Trading Floor — open positions">
                 <div className="section-header">
                     <Tooltip text="Open positions from live IBKR paper account. Click any card for drill-down.">
-                        <span className="section-title">🏛 TRADING FLOOR</span>
+                        <span className="section-title" data-tooltip="Open positions from live IBKR paper account. Click any card for drill-down.">🏛 TRADING FLOOR</span>
                     </Tooltip>
                     <div className="section-meta">
                         {brokerStatus && (
@@ -1320,6 +1959,10 @@ const TradingFloor = ({
                                     className={`position-card ${isProfit ? 'profit' : 'loss'} ${isFlip ? 'pnl-flip' : ''}`}
                                     onClick={() => setSelectedPos(pos)}
                                     style={{ cursor: 'pointer' }}
+                                    role="button"
+                                    tabIndex={0}
+                                    aria-label={`${label} — ${pnl >= 0 ? '+' : ''}${formatUSD(pnl)} unrealized P&L. Click for drill-down.`}
+                                    onKeyDown={e => e.key === 'Enter' && setSelectedPos(pos)}
                                 >
                                     <div className="position-header">
                                         <Tooltip text={`${pos.ticker} ${pos.option_type || 'STOCK'} — click for full details`}>
@@ -1501,7 +2144,7 @@ const FillDrilldownModal = ({ trade, onClose }: { trade: Trade; onClose: () => v
                     <span className="modal-title">
                         📋 {trade.ticker} {trade.option_type || ''} {trade.strike ? `$${trade.strike}` : ''} — Trade Detail
                     </span>
-                    <button className="modal-close" onClick={onClose}>✕</button>
+                    <button className="modal-close" onClick={onClose} aria-label="Close trade detail">✕</button>
                 </div>
 
                 {loading ? (
@@ -1682,7 +2325,7 @@ const LossDetailModal = ({
                     <span className="modal-title">
                         📉 {ticker} {optType && `${optType} `}{strike ? `$${strike}` : ''}{expiry ? ` · ${expiry}` : ''} — Loss Analysis
                     </span>
-                    <button className="modal-close" onClick={onClose}>✕</button>
+                    <button className="modal-close" onClick={onClose} aria-label="Close loss analysis">✕</button>
                 </div>
                 <div className="loss-detail-body">
                     {/* P&L Banner */}
@@ -1844,7 +2487,16 @@ const LossSummaryWidget = ({ summary }: { summary: LossSummary | null }) => {
                 {losingTrades.length > 0 && (
                     <div className="loss-mini-list">
                         {losingTrades.slice(0, 5).map((lt, i) => (
-                            <div key={i} className="loss-mini-row" onClick={() => setSelectedLoss(lt)}>
+                            <div
+                                key={i}
+                                className="loss-mini-row"
+                                onClick={() => setSelectedLoss(lt)}
+                                role="button"
+                                tabIndex={0}
+                                aria-label={`${lt.ticker}${lt.strike ? ` $${lt.strike}` : ''} — ${formatUSD(lt.pnl)} loss. Click to analyze.`}
+                                title="Click to open loss analysis"
+                                onKeyDown={e => e.key === 'Enter' && setSelectedLoss(lt)}
+                            >
                                 <span style={{ color: '#8b949e', fontSize: '10px' }}>
                                     {lt.entry_ts ? new Date(lt.entry_ts).toLocaleDateString() : '—'}
                                 </span>
@@ -1862,7 +2514,14 @@ const LossSummaryWidget = ({ summary }: { summary: LossSummary | null }) => {
 // ============================================================
 //  Model Scorecard Panel
 // ============================================================
-const ModelScorecardPanel = ({ scorecard }: { scorecard: ModelScorecard[] }) => {
+const ModelScorecardPanel = ({ scorecard, isLoading }: { scorecard: ModelScorecard[]; isLoading?: boolean }) => {
+    if (isLoading) {
+        return (
+            <div aria-busy="true" aria-label="Loading scorecard…">
+                <SkeletonTable rows={3} cols={8} />
+            </div>
+        );
+    }
     if (scorecard.length === 0) {
         return <div className="scorecard-empty">No closed trades recorded yet.</div>;
     }
@@ -1871,14 +2530,14 @@ const ModelScorecardPanel = ({ scorecard }: { scorecard: ModelScorecard[] }) => 
             <table className="scorecard-table">
                 <thead>
                     <tr>
-                        <th>Model</th>
-                        <th><Tooltip text="Total number of closed trades attributed to this model">Trades</Tooltip></th>
-                        <th><Tooltip text="Percentage of closed trades that were profitable">Win%</Tooltip></th>
-                        <th><Tooltip text="Average P&L per closed trade in dollars">Avg P&L</Tooltip></th>
-                        <th><Tooltip text="Sum of all realized P&L from this model's trades">Total P&L</Tooltip></th>
-                        <th><Tooltip text="Annualized Sharpe ratio — risk-adjusted return. >1 is good, >2 is excellent.">Sharpe</Tooltip></th>
-                        <th><Tooltip text="Win rate on trades where confidence was ≥80%. Tests if high-conviction signals outperform.">Hi-Conf%</Tooltip></th>
-                        <th><Tooltip text="Most common reason this model's trades were losers">Top Loss Tag</Tooltip></th>
+                        <th scope="col">Model</th>
+                        <th scope="col"><Tooltip text="Total number of closed trades attributed to this model"><span data-tooltip="Total number of closed trades attributed to this model">Trades</span></Tooltip></th>
+                        <th scope="col"><Tooltip text="Percentage of closed trades that were profitable"><span data-tooltip="Percentage of closed trades that were profitable">Win%</span></Tooltip></th>
+                        <th scope="col"><Tooltip text="Average P&L per closed trade in dollars"><span data-tooltip="Average P&L per closed trade in dollars">Avg P&L</span></Tooltip></th>
+                        <th scope="col"><Tooltip text="Sum of all realized P&L from this model's trades"><span data-tooltip="Sum of all realized P&L from this model's trades">Total P&L</span></Tooltip></th>
+                        <th scope="col"><Tooltip text="Annualized Sharpe ratio — risk-adjusted return. >1 is good, >2 is excellent."><span data-tooltip="Annualized Sharpe ratio — risk-adjusted return. >1 is good, >2 is excellent.">Sharpe</span></Tooltip></th>
+                        <th scope="col"><Tooltip text="Win rate on trades where confidence was ≥80%. Tests if high-conviction signals outperform."><span data-tooltip="Win rate on trades where confidence was ≥80%. Tests if high-conviction signals outperform.">Hi-Conf%</span></Tooltip></th>
+                        <th scope="col"><Tooltip text="Most common reason this model's trades were losers"><span data-tooltip="Most common reason this model's trades were losers">Top Loss Tag</span></Tooltip></th>
                     </tr>
                 </thead>
                 <tbody>
@@ -1926,9 +2585,16 @@ const ModelScorecardPanel = ({ scorecard }: { scorecard: ModelScorecard[] }) => 
 // ============================================================
 //  Intel Panel
 // ============================================================
-const IntelPanel = ({ intel }: { intel: Intel | null }) => {
+const IntelPanel = ({ intel, isLoading }: { intel: Intel | null; isLoading?: boolean }) => {
+    if (isLoading) {
+        return (
+            <div aria-busy="true" aria-label="Loading market intelligence…">
+                <SkeletonCard rows={4} />
+            </div>
+        );
+    }
     if (!intel || !intel.vix) {
-        return <div className="intel-loading">Fetching market intelligence…</div>;
+        return <div className="scorecard-empty">No market intelligence data available.</div>;
     }
     const news = intel.news ?? { headlines: [], sentiment_score: 0, headline_count: 0, bull_hits: 0, bear_hits: 0 };
     const vix = intel.vix ?? { vix_level: 0, vix_status: 'NORMAL' };
@@ -1968,9 +2634,9 @@ const IntelPanel = ({ intel }: { intel: Intel | null }) => {
         <div className="intel-panel">
             <div className="intel-grid">
                 {/* Card 1: Market Pulse */}
-                <div className="intel-card">
+                <div className="intel-card" role="region" aria-label="Market Pulse — VIX and SPY">
                     <Tooltip text="VIX = market fear gauge. SPY = S&P 500 ETF trend. Both influence TSLA signal confidence.">
-                        <div className="intel-card-title">Market Pulse</div>
+                        <div className="intel-card-title" data-tooltip="VIX = market fear gauge. SPY = S&P 500 ETF trend. Both influence TSLA signal confidence.">Market Pulse</div>
                     </Tooltip>
                     <div className="intel-row">
                         <span className="intel-label">VIX</span>
@@ -1990,11 +2656,11 @@ const IntelPanel = ({ intel }: { intel: Intel | null }) => {
                 </div>
 
                 {/* Card 2: News Sentiment */}
-                <div className="intel-card">
+                <div className="intel-card" role="region" aria-label="News Sentiment">
                     <Tooltip text="NLP score from recent TSLA headlines + Musk mentions. Positive = bullish sentiment, negative = bearish.">
-                        <div className="intel-card-title">
+                        <div className="intel-card-title" data-tooltip="NLP score from recent TSLA headlines + Musk mentions. Positive = bullish sentiment, negative = bearish.">
                             News Sentiment
-                            <span className="intel-count-badge">{news.headline_count}</span>
+                            <span className="intel-count-badge" aria-label={`${news.headline_count} headlines`}>{news.headline_count}</span>
                         </div>
                     </Tooltip>
                     <div className="sentiment-bar-wrap">
@@ -2021,9 +2687,9 @@ const IntelPanel = ({ intel }: { intel: Intel | null }) => {
                 </div>
 
                 {/* Card 3: Options Flow */}
-                <div className="intel-card">
+                <div className="intel-card" role="region" aria-label="Options Flow — put/call ratio">
                     <Tooltip text="Put/Call ratio from the nearest expiry chain. P/C > 1.3 = bearish positioning. P/C < 0.7 = bullish. OI bars show relative call vs put open interest.">
-                        <div className="intel-card-title">Options Flow</div>
+                        <div className="intel-card-title" data-tooltip="Put/Call ratio from the nearest expiry chain. P/C > 1.3 = bearish positioning. P/C < 0.7 = bullish. OI bars show relative call vs put open interest.">Options Flow</div>
                     </Tooltip>
                     <div className="intel-row">
                         <span className="intel-label">P/C Ratio</span>
@@ -2052,9 +2718,9 @@ const IntelPanel = ({ intel }: { intel: Intel | null }) => {
                 </div>
 
                 {/* Card 4: Earnings Watch */}
-                <div className="intel-card">
+                <div className="intel-card" role="region" aria-label="Earnings Watch">
                     <Tooltip text="Next TSLA earnings date. Within 2 days = reduced signal confidence (±50% haircut) due to binary event risk.">
-                        <div className="intel-card-title">Earnings Watch</div>
+                        <div className="intel-card-title" data-tooltip="Next TSLA earnings date. Within 2 days = reduced signal confidence (±50% haircut) due to binary event risk.">Earnings Watch</div>
                     </Tooltip>
                     {earnings.next_earnings_date ? (
                         <>
@@ -2095,10 +2761,10 @@ const ExecutionLog = ({ trades, fromLog, brokerStatus, lossSummary, simMode }: {
     const todayTrades = trades.filter(t => new Date(t.time).toDateString() === today);
 
     return (
-        <div className="dash-col card">
+        <div className="dash-col card" role="region" aria-label="Execution Log — all executed trades">
             <div className="section-header">
                 <Tooltip text="All executed orders — buys and sells with realized P&L">
-                    <span className="section-title">📋 {fromLog ? 'EXECUTION LOG (from system log)' : 'EXECUTION LOG'}</span>
+                    <span className="section-title" data-tooltip="All executed orders — buys and sells with realized P&L">📋 {fromLog ? 'EXECUTION LOG (from system log)' : 'EXECUTION LOG'}</span>
                 </Tooltip>
                 <div className="section-meta">
                     {brokerStatus && (
@@ -2137,7 +2803,17 @@ const ExecutionLog = ({ trades, fromLog, brokerStatus, lossSummary, simMode }: {
                         const hasPnl = t.pnl !== 0 && t.pnl !== undefined;
                         const pnlPos = (t.pnl ?? 0) >= 0;
                         return (
-                            <div key={i} className="trade-row" onClick={() => setDrillTrade(t)} style={{cursor:'pointer'}}>
+                            <div
+                                key={i}
+                                className="trade-row"
+                                onClick={() => setDrillTrade(t)}
+                                style={{cursor:'pointer'}}
+                                role="button"
+                                tabIndex={0}
+                                aria-label={`${t.action} ${t.ticker}${hasPnl ? ` — P&L ${formatUSD(t.pnl)}` : ''}. Click for trade detail.`}
+                                title="Click to open trade drill-down"
+                                onKeyDown={e => e.key === 'Enter' && setDrillTrade(t)}
+                            >
                                 <span className="trade-time">
                                     {new Date(t.time).toLocaleTimeString('en-US', {
                                         hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
@@ -2162,6 +2838,8 @@ const ExecutionLog = ({ trades, fromLog, brokerStatus, lossSummary, simMode }: {
                                     <button
                                         className="analyze-btn"
                                         onClick={e => { e.stopPropagation(); setAnalyzeTrade(t); }}
+                                        aria-label={`Analyze loss on ${t.ticker} — open loss reconstruction detail`}
+                                        title="Analyze this losing trade — view loss reconstruction, exit reason, and tagging"
                                     >ANALYZE</button>
                                 )}
                             </div>
@@ -2216,11 +2894,19 @@ const CollapsiblePanel = ({
 
     return (
         <div className="collapsible-panel">
-            <div className="collapsible-panel-header" onClick={toggle}>
+            <div
+                className="collapsible-panel-header"
+                onClick={toggle}
+                role="button"
+                tabIndex={0}
+                aria-expanded={open}
+                aria-label={`${title} panel — click to ${open ? 'collapse' : 'expand'}`}
+                onKeyDown={e => e.key === 'Enter' && toggle()}
+            >
                 <span className="collapsible-panel-title">{title}</span>
-                <span className={`panel-chevron ${open ? 'open' : ''}`}>▶</span>
+                <span className={`panel-chevron ${open ? 'open' : ''}`} aria-hidden="true">▶</span>
             </div>
-            <div className={`collapsible-panel-body ${open ? '' : 'hidden'}`}>
+            <div className={`collapsible-panel-body ${open ? '' : 'hidden'}`} aria-hidden={!open}>
                 {children}
             </div>
         </div>
@@ -2231,7 +2917,7 @@ const CollapsiblePanel = ({
 //  Main Dashboard Component
 // ============================================================
 
-const Dashboard = ({ brokerStatus }: { brokerStatus: BrokerStatus | null }) => {
+const Dashboard = ({ brokerStatus, integrityRed = false }: { brokerStatus: BrokerStatus | null; integrityRed?: boolean }) => {
     const [signals, setSignals] = useState<Signal[]>([]);
     const [trades, setTrades] = useState<Trade[]>([]);
     const [portfolio, setPortfolio] = useState<Portfolio>({
@@ -2242,11 +2928,16 @@ const Dashboard = ({ brokerStatus }: { brokerStatus: BrokerStatus | null }) => {
         unrealized_pnl: 0,
     });
     const [account, setAccount] = useState<AccountSummary | null>(null);
+    const [accountError, setAccountError] = useState<string | null>(null);
+    const [accountLoading, setAccountLoading] = useState(true);
     const [ibkrPositions, setIBKRPositions] = useState<IBKRPosition[]>([]);
+    const [pendingOrders, setPendingOrders] = useState<PendingOrdersResponse | null>(null);
     const [simMode, setSimMode] = useState<string>('paper');
     const [scorecard, setScorecard] = useState<ModelScorecard[]>([]);
+    const [scorecardLoading, setScorecardLoading] = useState(true);
     const [lossSummary, setLossSummary] = useState<LossSummary | null>(null);
     const [intel, setIntel] = useState<Intel | null>(null);
+    const [intelLoading, setIntelLoading] = useState(true);
     const [systemState, setSystemState] = useState<SystemState | null>(null);
     const [audit, setAudit] = useState<DataAudit | null>(null);
     const [isFetching, setIsFetching] = useState(false);
@@ -2272,6 +2963,7 @@ const Dashboard = ({ brokerStatus }: { brokerStatus: BrokerStatus | null }) => {
 
     // Fetch live IBKR account + positions (10s interval)
     const fetchAccount = useCallback(async () => {
+        setAccountLoading(true);
         try {
             const [acctRes, posRes] = await Promise.all([
                 fetch('/api/account'),
@@ -2279,13 +2971,32 @@ const Dashboard = ({ brokerStatus }: { brokerStatus: BrokerStatus | null }) => {
             ]);
             if (acctRes.ok) {
                 const a = await acctRes.json() as AccountSummary;
-                if (!a.error) setAccount(a);
+                if (a.error) {
+                    setAccountError(a.error);
+                } else {
+                    setAccount(a);
+                    setAccountError(null);
+                }
+            } else {
+                setAccountError(`IBKR account endpoint returned ${acctRes.status} — last attempt ${new Date().toLocaleTimeString()}`);
             }
             if (posRes.ok) {
                 const p = await posRes.json() as IBKRPosition[];
                 setIBKRPositions(Array.isArray(p) ? p : []);
             }
-        } catch { /* ignore */ }
+        } catch (e: unknown) {
+            const msg = e instanceof Error ? e.message : String(e);
+            setAccountError(`IB Gateway not reachable — ${msg} — last attempt ${new Date().toLocaleTimeString()}`);
+        }
+        setAccountLoading(false);
+    }, []);
+
+    // Fetch pending IBKR orders (30s interval — subprocess is slow)
+    const fetchPendingOrders = useCallback(async () => {
+        try {
+            const r = await fetch('/api/orders/pending');
+            if (r.ok) setPendingOrders(await r.json() as PendingOrdersResponse);
+        } catch { /* ignore — endpoint unavailable or gateway down */ }
     }, []);
 
     useEffect(() => {
@@ -2294,8 +3005,14 @@ const Dashboard = ({ brokerStatus }: { brokerStatus: BrokerStatus | null }) => {
         return () => clearInterval(id);
     }, [fetchAccount]);
 
+    useEffect(() => {
+        const id = setInterval(fetchPendingOrders, 30000);
+        return () => clearInterval(id);
+    }, [fetchPendingOrders]);
+
     // Fetch scorecard + loss summary (60s interval)
     const fetchScorecard = useCallback(async () => {
+        setScorecardLoading(true);
         try {
             const [scRes, lsRes] = await Promise.all([
                 fetch('/api/scorecard'),
@@ -2304,6 +3021,7 @@ const Dashboard = ({ brokerStatus }: { brokerStatus: BrokerStatus | null }) => {
             if (scRes.ok) setScorecard(await scRes.json() as ModelScorecard[]);
             if (lsRes.ok) setLossSummary(await lsRes.json() as LossSummary);
         } catch { /* ignore */ }
+        setScorecardLoading(false);
     }, []);
 
     useEffect(() => {
@@ -2313,10 +3031,12 @@ const Dashboard = ({ brokerStatus }: { brokerStatus: BrokerStatus | null }) => {
 
     // Fetch intel (5 min interval — cached server-side anyway)
     const fetchIntel = useCallback(async () => {
+        setIntelLoading(true);
         try {
             const r = await fetch('/api/intel');
             if (r.ok) setIntel(await r.json() as Intel);
         } catch { /* ignore */ }
+        setIntelLoading(false);
     }, []);
 
     useEffect(() => {
@@ -2435,17 +3155,61 @@ const Dashboard = ({ brokerStatus }: { brokerStatus: BrokerStatus | null }) => {
     useEffect(() => {
         fetchAll();
         setTimeout(fetchAccount, 500);
+        setTimeout(fetchPendingOrders, 2000);
         setTimeout(fetchScorecard, 1500);
         setTimeout(fetchIntel, 3000);
         const id = setInterval(fetchAll, 3000);
         return () => clearInterval(id);
-    }, [fetchAll]);
+    }, [fetchAll, fetchPendingOrders]);
 
     return (
         <>
             {/* Signal modal */}
             {selectedSignal && (
                 <SignalModal signal={selectedSignal} onClose={() => setSelectedSignal(null)} />
+            )}
+
+            {/* Integrity RED warning banner */}
+            {integrityRed && (
+                <div
+                    role="alert"
+                    aria-live="assertive"
+                    style={{
+                        background: 'rgba(248,81,73,0.12)',
+                        border: '1px solid rgba(248,81,73,0.4)',
+                        borderRadius: '6px',
+                        padding: '8px 16px',
+                        margin: '8px 0 0',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '10px',
+                        fontSize: '0.8rem',
+                        color: '#f85149',
+                        fontWeight: 600,
+                    }}
+                >
+                    <span>⛔</span>
+                    <span>INTEGRITY ALERT — Price or chain data integrity check failed. New trades are blocked. Check INTEGRITY indicators in the header.</span>
+                    <button
+                        data-testid="new-trade-blocked"
+                        disabled
+                        style={{
+                            marginLeft: 'auto',
+                            padding: '4px 14px',
+                            borderRadius: '4px',
+                            border: '1px solid rgba(248,81,73,0.4)',
+                            background: 'rgba(248,81,73,0.1)',
+                            color: '#f85149',
+                            cursor: 'not-allowed',
+                            fontSize: '0.72rem',
+                            fontWeight: 700,
+                        }}
+                        aria-label="New trade button — disabled while integrity check fails"
+                        aria-disabled="true"
+                    >
+                        NEW TRADE (BLOCKED)
+                    </button>
+                </div>
             )}
 
             {/* Broker status banner — prominent at top when LIVE */}
@@ -2455,6 +3219,9 @@ const Dashboard = ({ brokerStatus }: { brokerStatus: BrokerStatus | null }) => {
             <PortfolioBar
                 portfolio={portfolio}
                 account={account}
+                accountError={accountError}
+                accountLoading={accountLoading}
+                onRetryAccount={fetchAccount}
                 simMode={simMode}
                 onSimToggle={handleSimToggle}
                 onSimReset={handleSimReset}
@@ -2465,13 +3232,17 @@ const Dashboard = ({ brokerStatus }: { brokerStatus: BrokerStatus | null }) => {
             {/* Data Provenance Panel — TV vs YF spot comparison */}
             <DataProvenancePanel audit={audit} />
 
-            {/* Zone 2: 3-Column Trading Grid */}
+            {/* Zone 2: 4-Column Trading Grid */}
             <div className="dashboard-grid">
                 <SignalCommand
                     signals={signals}
                     newTimestamps={newTimestamps}
                     onSelectSignal={setSelectedSignal}
                     systemState={systemState}
+                />
+                <PendingOrdersPanel
+                    orders={pendingOrders}
+                    source={pendingOrders?.source ?? ''}
                 />
                 <TradingFloor portfolio={portfolio} ibkrPositions={ibkrPositions} brokerStatus={brokerStatus} />
                 <ExecutionLog trades={trades} brokerStatus={brokerStatus} lossSummary={lossSummary} simMode={simMode} />
@@ -2483,13 +3254,13 @@ const Dashboard = ({ brokerStatus }: { brokerStatus: BrokerStatus | null }) => {
                     storageKey="dashboard_intel_open"
                     title="🔭 MARKET INTELLIGENCE"
                 >
-                    <IntelPanel intel={intel} />
+                    <IntelPanel intel={intel} isLoading={intelLoading} />
                 </CollapsiblePanel>
                 <CollapsiblePanel
                     storageKey="dashboard_scorecard_open"
                     title="📊 MODEL SCORECARD"
                 >
-                    <ModelScorecardPanel scorecard={scorecard} />
+                    <ModelScorecardPanel scorecard={scorecard} isLoading={scorecardLoading} />
                 </CollapsiblePanel>
                 <CollapsiblePanel
                     storageKey="dashboard_chart_open"

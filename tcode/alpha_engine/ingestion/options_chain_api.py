@@ -6,7 +6,7 @@ import argparse
 import logging
 
 # Add parent dirs to path
-sys.path.insert(0, "/home/builder/src/gemini/alpha_engine")
+sys.path.insert(0, "/home/builder/src/gpfiles/tcode/alpha_engine")
 
 from ingestion.options_chain import get_chain_cache
 

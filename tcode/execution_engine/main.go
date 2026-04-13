@@ -19,13 +19,29 @@ double calculate_call_price(double S, double K, double T, double r, double sigma
 import "C"
 import (
 	"log"
-	"math/rand"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
+
+func envOrDefault(k, d string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return d
+}
+
+func envIntOrDefault(k string, d int) int {
+	if v := os.Getenv(k); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return d
+}
 
 // PricingEngine wraps the C-based Black-Scholes implementation.
 type PricingEngine struct{}
@@ -129,32 +145,7 @@ func (e *IBKRExecutor) ExecuteOrder(ticker string, optType string, strike float6
 	TradeCount.Inc()
 }
 
-func PaperTradingLoop(executor *IBKRExecutor, pricing *PricingEngine) {
-	log.Println("PHASE 3: Paper Trading (IBKR) Simulation Active.")
-	for i := 0; i < 3; i++ {
-		conf := 0.75 + rand.Float64()*0.2
-		if conf > 0.8 {
-			ticker := "TSLA"
-			expiry := "2026-03-20"
-			strike := 210.0
-			price := pricing.CallPrice(200, strike, 0.08, 0.04, 0.50)
-			executor.ExecuteOrder(ticker, "CALL", strike, expiry, 1, price)
-			
-			time.Sleep(100 * time.Millisecond)
-			// Simulate immediate exit for testing PnL/Wash Sale
-			exitPrice := price * 1.05
-			executor.ExecuteOrder(ticker, "CALL", strike, expiry, -1, exitPrice)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
 
-// fetchConsensusPrice is a mock bridge to the MultiSourcePricing logic.
-// In a real setup, this would be a CGO call or a separate microservice.
-func fetchConsensusPrice() (float64, error) {
-	// For this build, we simulate the consensus price around the high $300s
-	return 392.78 + (rand.Float64() * 2.0) - 1.0, nil
-}
 
 func main() {
 	// Setup logging to file
@@ -164,7 +155,10 @@ func main() {
 	}
 	log.SetOutput(logFile)
 
-	rand.Seed(time.Now().UnixNano())
+	// Resolve execution mode from EXECUTION_MODE env var (default: IBKR_PAPER).
+	initExecutionMode()
+	log.Printf("Execution mode: %s", ActiveExecutionMode)
+
 	pe := &PricingEngine{}
 	
 	// Setup Compliance Guard (Task C: PDT & Wash Sale)
@@ -172,13 +166,8 @@ func main() {
 	executor := NewIBKRExecutor(1000000.0, compliance)
 	log.Printf("Portfolio initialized: NAV=$%.2f Cash=$%.2f Positions=%d", executor.Portfolio.NAV, executor.Portfolio.Cash, len(executor.Portfolio.Positions))
 
-	// Setup Credential Management & Real Handshake (Task 3)
-	creds := &CredentialManager{}
-	os.Setenv("IBKR_USERNAME", "alpha_trader") // Mocking SOPS injection
-	os.Setenv("IBKR_PASSWORD", "bulletproof_pass")
-
 	// Setup External Alert Connectivity
-	bot := NewTelegramBot(creds.GetSecret("TELEGRAM_TOKEN"), creds.GetSecret("TELEGRAM_CHAT_ID"))
+	bot := NewTelegramBot(os.Getenv("TELEGRAM_TOKEN"), os.Getenv("TELEGRAM_CHAT_ID"))
 	guard := NewLiveCapitalGuard(10000.0, bot) // $10k Daily Loss Limit
 
 	// Setup Archive Sink (PostgreSQL)
@@ -208,6 +197,7 @@ func main() {
 	mux.HandleFunc("/api/metrics/vitals", configHandler.ServeVitals)
 	mux.HandleFunc("/api/metrics/latency", configHandler.ServeLatencyMetrics)
 	mux.HandleFunc("/api/metrics/signals/breakdown", configHandler.ServeSignalBreakdown)
+	mux.HandleFunc("/api/metrics/publisher", configHandler.ServePublisherMetrics)
 	mux.HandleFunc("/api/metrics/nats", configHandler.ServeNatsHealth)
 	mux.HandleFunc("/api/metrics/buildinfo", configHandler.ServeBuildInfo)
 	mux.HandleFunc("/api/metrics/goroutines", configHandler.ServeGoroutineProfile)
@@ -231,6 +221,7 @@ func main() {
 	mux.HandleFunc("/api/scorecard", configHandler.ServeScorecard)
 	mux.HandleFunc("/api/losses", configHandler.ServeLossSummary)
 	mux.HandleFunc("/api/fills/tag", configHandler.ServeTagTrade)
+	mux.HandleFunc("/api/orders/pending", configHandler.ServeOrdersPending)
 
 	// Live Reload WebSocket (Task: Auto-Refresh)
 	mux.Handle("/dev/ws", GlobalReloader)
@@ -259,9 +250,18 @@ func main() {
 		}
 	}()
 
-	ibClient := NewIBKRClient("127.0.0.1", 7497, 1)
-	if err := ibClient.Connect(); err != nil {
-		log.Printf("Handshake Warning: %v (Simulated offline)", err)
+	// Order path: SIMULATION uses internal PaperPortfolio.
+	// IBKR_PAPER/IBKR_LIVE uses Python subprocess (ingestion/ibkr_order.py) per order.
+	// No persistent TCP connection is held by the Go engine — each subprocess
+	// opens and closes its own ib_insync connection using a unique client ID.
+	if ActiveExecutionMode == ModeSimulation {
+		log.Printf("SIMULATION mode: no broker subprocess — /api/account returns error.")
+	} else {
+		log.Printf("IBKR order path: subprocess via ingestion/ibkr_order.py "+
+			"(host=%s port=%s mode=%s)",
+			envOrDefault("IBKR_HOST", "127.0.0.1"),
+			envOrDefault("IBKR_PORT", "4002"),
+			ActiveExecutionMode)
 	}
 
 	subscriber.Start()
@@ -270,10 +270,7 @@ func main() {
 	// Periodic Portfolio Revaluation (Task: Real-time NAV & Unrealized PnL)
 	go func() {
 		for {
-			spot, err := fetchConsensusPrice() 
-			if err == nil {
-				executor.Portfolio.UpdatePositions(spot, pe)
-			}
+			executor.Portfolio.UpdatePositions()
 			time.Sleep(5 * time.Second)
 		}
 	}()

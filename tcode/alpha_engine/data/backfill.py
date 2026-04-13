@@ -9,7 +9,7 @@ import logging
 import sqlite3
 from datetime import datetime, timedelta
 
-sys.path.insert(0, "/home/builder/src/gemini/alpha_engine")
+sys.path.insert(0, "/home/builder/src/gpfiles/tcode/alpha_engine")
 
 logger = logging.getLogger("Backfill")
 DB_PATH = "/home/builder/tsla_alpha.db"

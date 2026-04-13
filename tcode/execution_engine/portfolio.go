@@ -41,7 +41,7 @@ func (p *PaperPortfolio) GetContractSignature(ticker, optType, expiry string, st
 	return fmt.Sprintf("%s_%s_%s_%.2f", ticker, optType, expiry, strike)
 }
 
-func (p *PaperPortfolio) UpdatePositions(spot float64, pricing *PricingEngine) {
+func (p *PaperPortfolio) UpdatePositions() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 

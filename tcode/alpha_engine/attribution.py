@@ -10,7 +10,7 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-sys.path.insert(0, "/home/builder/src/gemini/alpha_engine")
+sys.path.insert(0, "/home/builder/src/gpfiles/tcode/alpha_engine")
 
 logger = logging.getLogger("Attribution")
 DB_PATH = "/home/builder/tsla_alpha.db"

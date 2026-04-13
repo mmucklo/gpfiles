@@ -20,7 +20,15 @@ const Panel = ({ title, icon, storageKey, children }: { title: string, icon: Rea
 
     return (
         <div className="monitor-panel">
-            <div className="panel-header" onClick={toggle}>
+            <div
+                className="panel-header"
+                onClick={toggle}
+                role="button"
+                tabIndex={0}
+                aria-expanded={isOpen}
+                aria-label={`${title} panel — click to ${isOpen ? 'collapse' : 'expand'}`}
+                onKeyDown={e => e.key === 'Enter' && toggle()}
+            >
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                     {icon}
                     <h3>{title}</h3>
@@ -47,7 +55,7 @@ const GoroutineModal = ({ dump, onClose }: { dump: string, onClose: () => void }
             <div className="goroutine-modal-content" onClick={e => e.stopPropagation()}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
                     <h3 style={{ margin: 0 }}>Goroutine Dump</h3>
-                    <button className="btn" onClick={onClose}>× Close</button>
+                    <button className="btn" onClick={onClose} aria-label="Close goroutine dump" title="Close goroutine dump">× Close</button>
                 </div>
                 <div style={{ overflowY: 'auto', maxHeight: 'calc(80vh - 4rem)', fontFamily: 'monospace', fontSize: '0.78rem' }}>
                     {blocks.map((block, i) => (
@@ -69,7 +77,7 @@ const VitalsPanel = () => {
     const [goroutineDump, setGoroutineDump] = useState<string | null>(null);
 
     const formatUptime = (seconds: number) => {
-        if (!seconds) return '...';
+        if (!seconds) return null;
         const d = Math.floor(seconds / (3600 * 24));
         const h = Math.floor(seconds % (3600 * 24) / 3600);
         const m = Math.floor(seconds % 3600 / 60);
@@ -115,7 +123,7 @@ const VitalsPanel = () => {
                             : "NATS not running — system operating in offline simulation mode. Expected in development."}
                         valueClass={nats.connected ? undefined : 'warn-amber'}
                     />
-                    <VitalsCard label="Server" value={nats.server_url || 'N/A'} />
+                    <VitalsCard label="Server" value={nats.server_url || null} tooltip="NATS server URL — empty when running in offline simulation mode" />
                     <VitalsCard label="Msgs In" value={nats.msgs_in?.toLocaleString() || 0} tooltip="Messages received/sent over the NATS connection lifetime" />
                     <VitalsCard label="Msgs Out" value={nats.msgs_out?.toLocaleString() || 0} tooltip="Messages received/sent over the NATS connection lifetime" />
                     <VitalsCard label="Reconnects" value={nats.reconnects || 0} tooltip="Number of times the NATS connection was dropped and re-established. Healthy: 0" />
@@ -132,12 +140,14 @@ const VitalsPanel = () => {
     );
 };
 
-const VitalsCard = ({ label, value, tooltip, onClick, valueClass }: { label: string, value: string | number, tooltip?: string, onClick?: () => void, valueClass?: string }) => (
-    <div className={`vitals-card${onClick ? ' clickable' : ''}`} onClick={onClick} title={onClick ? 'Click to inspect' : undefined}>
+const VitalsCard = ({ label, value, tooltip, onClick, valueClass }: { label: string, value: string | number | null | undefined, tooltip?: string, onClick?: () => void, valueClass?: string }) => (
+    <div className={`vitals-card${onClick ? ' clickable' : ''}`} onClick={onClick} title={onClick ? 'Click to inspect goroutines' : undefined} aria-label={onClick ? `${label}: click to inspect goroutines` : undefined}>
         <span className="vitals-label">
             {tooltip ? <Tooltip text={tooltip}>{label}</Tooltip> : label}
         </span>
-        <span className={`vitals-value${valueClass ? ' ' + valueClass : ''}`}>{value}</span>
+        <span className={`vitals-value${valueClass ? ' ' + valueClass : ''}`}>
+            {value === null || value === undefined || value === '' ? '—' : value}
+        </span>
     </div>
 );
 
@@ -215,6 +225,8 @@ const SignalPanel = () => {
                     className={`btn${tableView ? ' active' : ''}`}
                     style={{ fontSize: '0.7rem', padding: '2px 8px' }}
                     onClick={() => setTableView(v => !v)}
+                    aria-label={tableView ? 'Switch to sparkline graph view' : 'Switch to table view of recent signals'}
+                    title={tableView ? 'Switch to sparkline graph view' : 'Switch to table view showing recent signal details'}
                 >
                     {tableView ? 'Graph' : 'Table'}
                 </button>
@@ -317,11 +329,18 @@ const LogPanel = () => {
             <div className="log-controls">
                 <input
                     type="text"
-                    placeholder="Filter logs (regex)..."
+                    placeholder="Filter logs (regex)"
                     value={filter}
                     onChange={(e) => setFilter(e.target.value)}
+                    aria-label="Filter log lines by regex pattern"
+                    title="Filter log lines by regex — e.g. ERROR, WARN, or a specific message substring"
                 />
-                <button onClick={() => setAutoScroll(!autoScroll)} className={`btn ${autoScroll ? 'active' : ''}`}>
+                <button
+                    onClick={() => setAutoScroll(!autoScroll)}
+                    className={`btn ${autoScroll ? 'active' : ''}`}
+                    aria-label={autoScroll ? 'Auto-scroll enabled — click to disable' : 'Auto-scroll disabled — click to enable'}
+                    title={autoScroll ? 'Auto-scroll: ON — log will follow new lines. Click to disable.' : 'Auto-scroll: OFF — log is paused. Click to re-enable.'}
+                >
                     Auto-Scroll
                 </button>
             </div>
@@ -352,7 +371,7 @@ const SystemMonitor = () => {
     };
 
     const formatUptime = (seconds: number) => {
-        if (!seconds) return '...';
+        if (!seconds) return null;
         const d = Math.floor(seconds / (3600 * 24));
         const h = Math.floor(seconds % (3600 * 24) / 3600);
         const m = Math.floor(seconds % 3600 / 60);
@@ -369,7 +388,15 @@ const SystemMonitor = () => {
 
     if (!isExpanded) {
         return (
-            <div className="system-monitor-compact" onClick={toggleExpand}>
+            <div
+                className="system-monitor-compact"
+                onClick={toggleExpand}
+                role="button"
+                tabIndex={0}
+                aria-label={`System monitor — health: ${healthStatus}. Click to expand.`}
+                title="Click to expand system monitor"
+                onKeyDown={e => e.key === 'Enter' && toggleExpand()}
+            >
                 <Tooltip text={`System Health: ${healthStatus}`}>
                     <div className={`health-dot ${healthStatus}`} />
                 </Tooltip>
@@ -385,7 +412,15 @@ const SystemMonitor = () => {
 
     return (
         <div className="monitor-expanded">
-            <div className="system-monitor-compact" onClick={toggleExpand}>
+            <div
+                className="system-monitor-compact"
+                onClick={toggleExpand}
+                role="button"
+                tabIndex={0}
+                aria-label="System monitor — click to collapse"
+                title="Click to collapse system monitor"
+                onKeyDown={e => e.key === 'Enter' && toggleExpand()}
+            >
                  <Tooltip text={`System Health: ${healthStatus}`}>
                     <div className={`health-dot ${healthStatus}`} />
                 </Tooltip>
@@ -404,7 +439,11 @@ const SystemMonitor = () => {
 const CompactStat = ({ label, value }: { label: string, value: any }) => (
     <div className="compact-stat">
         <span className="label">{label}</span>
-        <span className="value">{value || '...'}</span>
+        <span className="value">
+            {value !== null && value !== undefined && value !== '' && value !== false
+                ? value
+                : '—'}
+        </span>
     </div>
 );
 

@@ -1,0 +1,59 @@
+/* ============================================================
+   Skeleton Loaders — shimmer animation for >300ms loading states
+   ============================================================ */
+
+@keyframes skeleton-shimmer {
+  0%   { background-position: -400px 0; }
+  100% { background-position: 400px 0; }
+}
+
+.skeleton-line,
+.skeleton-pill,
+.skeleton-card,
+.skeleton-table-row > .skeleton-line {
+  background: linear-gradient(
+    90deg,
+    #21262d 25%,
+    #2d333b 50%,
+    #21262d 75%
+  );
+  background-size: 800px 100%;
+  animation: skeleton-shimmer 1.4s infinite linear;
+  border-radius: 4px;
+}
+
+.skeleton-line {
+  display: block;
+  margin-bottom: 8px;
+}
+
+.skeleton-pill {
+  width: 80px;
+  height: 28px;
+  border-radius: 6px;
+  display: inline-block;
+}
+
+.skeleton-card {
+  padding: 14px 16px;
+  border-radius: 8px;
+  border: 1px solid #21262d;
+  margin-bottom: 10px;
+  background: transparent;
+}
+.skeleton-card .skeleton-line {
+  background: linear-gradient(90deg, #21262d 25%, #2d333b 50%, #21262d 75%);
+  background-size: 800px 100%;
+  animation: skeleton-shimmer 1.4s infinite linear;
+}
+
+.skeleton-table {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.skeleton-table-row {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+}
