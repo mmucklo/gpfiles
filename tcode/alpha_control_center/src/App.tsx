@@ -24,6 +24,14 @@ function App() {
   const [showHelp, setShowHelp] = useState(false);
   const [integrityRed, setIntegrityRed] = useState(false);
 
+  // Notional account size state
+  const [notional, setNotional] = useState<number>(25000);
+  const [notionalInput, setNotionalInput] = useState<string>('');
+  const [showNotionalAdjust, setShowNotionalAdjust] = useState(false);
+  const [notionalToast, setNotionalToast] = useState<string>('');
+  const [notionalPendingRestart, setNotionalPendingRestart] = useState(false);
+  const [showNotionalDrill, setShowNotionalDrill] = useState(false);
+
   const brokerStatus = useDataFetching('/api/broker/status', 10000, null);
 
   useEffect(() => {
@@ -54,6 +62,55 @@ function App() {
             setPortfolio(port);
         }
     } catch (e) { }
+  };
+
+  // Fetch notional config on mount
+  useEffect(() => {
+    fetch('/api/config/notional')
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d?.notional_account_size) { setNotional(d.notional_account_size); setNotionalInput(String(d.notional_account_size)); } })
+      .catch(() => {});
+  }, []);
+
+  const isMarketHours = (() => {
+    const now = new Date();
+    const et = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    const h = et.getHours(), m = et.getMinutes();
+    const t = h * 60 + m;
+    const wd = et.getDay();
+    return wd >= 1 && wd <= 5 && t >= 570 && t < 960;
+  })();
+
+  const handleNotionalApply = async (newValue: number) => {
+    if (newValue < 5000 || newValue > 250000) {
+      setNotionalToast(`Invalid: must be $5,000–$250,000`);
+      setTimeout(() => setNotionalToast(''), 4000);
+      return;
+    }
+    const prevNotional = notional;
+    const pctChange = Math.abs(newValue - prevNotional) / prevNotional * 100;
+    if (pctChange > 50) {
+      const confirmed = window.confirm(
+        `Changing notional from $${prevNotional.toLocaleString()} to $${newValue.toLocaleString()} (${pctChange.toFixed(0)}% change). Confirm?`
+      );
+      if (!confirmed) return;
+    }
+    try {
+      const r = await fetch('/api/config/notional', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ notional_account_size: newValue }),
+      });
+      if (r.ok) {
+        const d = await r.json();
+        setNotional(d.notional_account_size);
+        setNotionalInput(String(d.notional_account_size));
+        setNotionalPendingRestart(d.pending_restart ?? false);
+        setShowNotionalAdjust(false);
+        setNotionalToast(`Notional updated to $${d.notional_account_size.toLocaleString()} — new signals will use this value`);
+        setTimeout(() => setNotionalToast(''), 5000);
+      }
+    } catch { /* ignore */ }
   };
 
   const fetchConfig = async () => {
@@ -118,9 +175,9 @@ function App() {
         <div style={{ display: 'flex', alignItems: 'center', gap: '2rem' }}>
           <h1 aria-label="TSLA Alpha Command Center">TSLA ALPHA COMMAND</h1>
           <nav aria-label="Portfolio summary" style={{ display: 'flex', gap: '1rem', backgroundColor: '#161b22', padding: '0.5rem 1rem', borderRadius: '8px', border: '1px solid #30363d' }}>
-            <Tooltip text="Net Asset Value — total portfolio value including open positions. Click Dashboard for drill-down.">
-              <div aria-label={`NAV: ${portfolio.nav?.toLocaleString(undefined, {minimumFractionDigits: 2}) ?? '—'}`} role="status">
-                <span style={{color:'#8b949e'}}>NAV:</span> ${portfolio.nav?.toLocaleString(undefined, {minimumFractionDigits: 2})}
+            <Tooltip text="IBKR Net Asset Value — total portfolio value from broker account. This is NOT used for sizing.">
+              <div aria-label={`IBKR NAV: ${portfolio.nav?.toLocaleString(undefined, {minimumFractionDigits: 2}) ?? '—'}`} role="status">
+                <span style={{color:'#8b949e'}}>IBKR NAV:</span> ${portfolio.nav?.toLocaleString(undefined, {minimumFractionDigits: 2})}
               </div>
             </Tooltip>
             <Tooltip text="Available Cash — spendable balance. See Trading Floor for breakdown.">
@@ -133,7 +190,132 @@ function App() {
                 <span style={{color:'#8b949e'}}>REALIZED:</span> ${portfolio.realized_pnl?.toLocaleString(undefined, {minimumFractionDigits: 2})}
               </div>
             </Tooltip>
+            {/* Notional sizing display — separate from NAV */}
+            {(() => {
+              const ibkrNav = portfolio.nav ?? 0;
+              const diverges = ibkrNav > 0 && (ibkrNav >= notional * 5 || ibkrNav <= notional * 0.5);
+              return (
+                <div style={{display:'flex',alignItems:'center',gap:'0.4rem',borderLeft:'1px solid #30363d',paddingLeft:'0.8rem'}}>
+                  <Tooltip text="Position sizing derives from this value, NOT from IBKR NAV. Paper trading uses $25k notional to practice small-account discipline for live trading. Click to explain.">
+                    <div
+                      role="button"
+                      tabIndex={0}
+                      style={{cursor:'pointer',color:'#79c0ff'}}
+                      data-testid="notional-display"
+                      aria-label={`Sizing for: $${notional.toLocaleString()}`}
+                      onClick={() => setShowNotionalDrill(true)}
+                      onKeyDown={e => e.key === 'Enter' && setShowNotionalDrill(true)}
+                    >
+                      <span style={{color:'#8b949e'}}>Sizing for:</span>{' '}
+                      <span style={{fontWeight:700}}>${notional.toLocaleString()}</span>
+                    </div>
+                  </Tooltip>
+                  {diverges && (
+                    <Tooltip text="Sizing target diverges materially from IBKR account — check NOTIONAL_ACCOUNT_SIZE configuration.">
+                      <span style={{backgroundColor:'#9e6a03',color:'white',fontSize:'10px',padding:'1px 6px',borderRadius:'4px',fontWeight:700}} data-testid="notional-divergence-badge">
+                        ⚠ SIZING DIVERGES
+                      </span>
+                    </Tooltip>
+                  )}
+                  <Tooltip text={isMarketHours && brokerStatus?.mode === 'IBKR_LIVE' ? 'Disabled during live market hours — adjust outside trading window.' : 'Adjust notional account size used for position sizing.'}>
+                    <button
+                      style={{
+                        background:'#21262d',border:'1px solid #30363d',color:'#c9d1d9',
+                        borderRadius:'4px',padding:'1px 6px',cursor: (isMarketHours && brokerStatus?.mode === 'IBKR_LIVE') ? 'not-allowed' : 'pointer',
+                        fontSize:'11px',opacity: (isMarketHours && brokerStatus?.mode === 'IBKR_LIVE') ? 0.5 : 1,
+                      }}
+                      disabled={isMarketHours && brokerStatus?.mode === 'IBKR_LIVE'}
+                      data-testid="notional-adjust-toggle"
+                      aria-label="Adjust notional account size"
+                      onClick={() => setShowNotionalAdjust(v => !v)}
+                    >
+                      ▲▼
+                    </button>
+                  </Tooltip>
+                </div>
+              );
+            })()}
           </nav>
+
+          {/* Notional adjust flyout */}
+          {showNotionalAdjust && (
+            <div style={{position:'absolute',top:'70px',left:'20%',backgroundColor:'#161b22',border:'1px solid #30363d',borderRadius:'8px',padding:'1rem',zIndex:1000,display:'flex',gap:'0.5rem',alignItems:'center',boxShadow:'0 4px 12px rgba(0,0,0,0.4)'}}>
+              <span style={{color:'#8b949e',fontSize:'12px'}}>Notional:</span>
+              <button style={{background:'#21262d',border:'1px solid #30363d',color:'#c9d1d9',borderRadius:'4px',padding:'2px 8px',cursor:'pointer'}}
+                onClick={() => { const v = Math.round(notional * 0.9); setNotionalInput(String(v)); handleNotionalApply(v); }}
+                data-testid="notional-decrease"
+                aria-label="Decrease notional by 10%">
+                −10%
+              </button>
+              <input
+                type="number"
+                value={notionalInput}
+                onChange={e => setNotionalInput(e.target.value)}
+                style={{width:'90px',background:'#0d1117',border:'1px solid #30363d',color:'#c9d1d9',borderRadius:'4px',padding:'2px 6px',fontSize:'12px'}}
+                min={5000} max={250000} step={1000}
+                data-testid="notional-input"
+                aria-label="Notional account size value"
+              />
+              <button style={{background:'#21262d',border:'1px solid #30363d',color:'#c9d1d9',borderRadius:'4px',padding:'2px 8px',cursor:'pointer'}}
+                onClick={() => { const v = Math.round(notional * 1.1); setNotionalInput(String(v)); handleNotionalApply(v); }}
+                data-testid="notional-increase"
+                aria-label="Increase notional by 10%">
+                +10%
+              </button>
+              <button style={{background:'#1a7f37',border:'1px solid #3fb950',color:'white',borderRadius:'4px',padding:'2px 10px',cursor:'pointer',fontWeight:700}}
+                onClick={() => handleNotionalApply(parseInt(notionalInput, 10) || notional)}
+                data-testid="notional-apply"
+                aria-label="Apply notional change">
+                APPLY
+              </button>
+              <button style={{background:'none',border:'none',color:'#8b949e',cursor:'pointer',fontSize:'14px'}}
+                onClick={() => setShowNotionalAdjust(false)}
+                aria-label="Close notional adjust">✕</button>
+            </div>
+          )}
+
+          {/* Notional toast */}
+          {notionalToast && (
+            <div style={{position:'fixed',bottom:'20px',right:'20px',backgroundColor:'#1a7f37',color:'white',padding:'0.75rem 1.2rem',borderRadius:'8px',fontSize:'13px',fontWeight:600,zIndex:9999,boxShadow:'0 2px 8px rgba(0,0,0,0.4)'}}
+              data-testid="notional-toast" role="alert">
+              {notionalToast}
+            </div>
+          )}
+
+          {/* Notional pending restart banner */}
+          {notionalPendingRestart && (
+            <div style={{backgroundColor:'#9e6a03',color:'white',padding:'4px 12px',borderRadius:'4px',fontSize:'11px',fontWeight:600,marginTop:'4px'}}
+              data-testid="notional-restart-banner">
+              Restart services to apply new notional — or wait for publisher auto-reload
+            </div>
+          )}
+
+          {/* Notional drill-down modal */}
+          {showNotionalDrill && (
+            <div className="modal-overlay" onClick={() => setShowNotionalDrill(false)} role="dialog" aria-modal="true" aria-label="Notional Sizing Explanation">
+              <div className="modal-card nav-drill" onClick={e => e.stopPropagation()}>
+                <div className="modal-header">
+                  <span className="modal-title">📐 NOTIONAL SIZING EXPLAINED</span>
+                  <button className="modal-close" onClick={() => setShowNotionalDrill(false)} aria-label="Close">✕</button>
+                </div>
+                <div className="fill-drill-body">
+                  <div className="fill-row"><span>Sizing for (notional)</span><span style={{color:'#79c0ff',fontWeight:700}}>${notional.toLocaleString()}</span></div>
+                  <div className="fill-row"><span>IBKR account NAV</span><span>${portfolio.nav?.toLocaleString(undefined, {minimumFractionDigits: 2}) ?? '—'}</span></div>
+                  <div className="fill-section" style={{marginTop:'12px'}}>
+                    <p style={{color:'#8b949e',fontSize:'13px',lineHeight:'1.6'}}>
+                      Position sizing derives from <strong style={{color:'#c9d1d9'}}>NOTIONAL_ACCOUNT_SIZE</strong>, not from IBKR NAV.
+                      Paper trading uses ${notional.toLocaleString()} to practice small-account discipline for live trading.
+                      This means all risk budgets, contract quantities, and minimum-edge floors are calculated as if you
+                      have ${notional.toLocaleString()} — regardless of how large the paper account balance grows.
+                    </p>
+                  </div>
+                  <div className="fill-row"><span>Risk per directional trade</span><span>1.0–1.5% of notional = ${Math.round(notional * 0.01).toLocaleString()}–${Math.round(notional * 0.015).toLocaleString()}</span></div>
+                  <div className="fill-row"><span>Min edge floor</span><span>0.25% of notional = ${Math.round(notional * 0.0025).toLocaleString()}</span></div>
+                  <div className="fill-row"><span>Gross outstanding cap</span><span>6% of notional = ${Math.round(notional * 0.06).toLocaleString()}</span></div>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
         <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
             {/* Integrity Status — three traffic lights */}

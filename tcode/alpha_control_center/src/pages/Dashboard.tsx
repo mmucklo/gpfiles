@@ -288,6 +288,18 @@ interface IntelOptionsFlow {
     total_put_oi: number;
     error?: string;
 }
+interface IntelPremarket {
+    is_premarket: boolean;
+    is_signal_window: boolean;
+    futures_bias: string;
+    es_change_pct: number;
+    nq_change_pct: number;
+    europe_direction: string;
+    tsla_premarket_change_pct: number;
+    tsla_premarket_volume: number;
+    overnight_catalyst: string | null;
+}
+
 interface Intel {
     fetch_timestamp: number;
     news: IntelNews;
@@ -295,6 +307,7 @@ interface Intel {
     spy: IntelSpy;
     earnings: IntelEarnings;
     options_flow: IntelOptionsFlow;
+    premarket?: IntelPremarket;
 }
 
 interface LosingTrade {
@@ -2750,6 +2763,236 @@ const ModelScorecardPanel = ({ scorecard, isLoading }: { scorecard: ModelScoreca
 };
 
 // ============================================================
+//  Pre-Market Panel
+// ============================================================
+const PreMarketPanel = ({ intel, isLoading }: { intel: Intel | null; isLoading?: boolean }) => {
+    const [drillTarget, setDrillTarget] = useState<string | null>(null);
+
+    if (isLoading) {
+        return (
+            <div aria-busy="true" aria-label="Loading pre-market data…">
+                <SkeletonCard rows={3} />
+            </div>
+        );
+    }
+
+    const pm = intel?.premarket;
+
+    // Countdown to US market open/close
+    const marketCountdown = (() => {
+        const now = new Date();
+        const et = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+        const h = et.getHours(), m = et.getMinutes();
+        const totalMin = h * 60 + m;
+        const isWeekend = et.getDay() === 0 || et.getDay() === 6;
+        if (isWeekend) return 'Market closed — weekend';
+        if (totalMin < 570) {
+            const minsLeft = 570 - totalMin;
+            return `Next US open: ${Math.floor(minsLeft / 60)}h ${minsLeft % 60}m`;
+        }
+        if (totalMin < 960) {
+            const minsLeft = 960 - totalMin;
+            return `Market open — closes in ${Math.floor(minsLeft / 60)}h ${minsLeft % 60}m`;
+        }
+        return 'Market closed — after hours';
+    })();
+
+    const biasColor = (bias: string) => {
+        if (bias === 'BULLISH') return '#3fb950';
+        if (bias === 'BEARISH') return '#f85149';
+        return '#8b949e';
+    };
+
+    const changePctLabel = (pct: number | undefined) => {
+        if (pct === undefined || pct === null) return '—';
+        const sign = pct >= 0 ? '+' : '';
+        return <span style={{ color: pct >= 0 ? '#3fb950' : '#f85149' }}>{sign}{pct.toFixed(2)}%</span>;
+    };
+
+    return (
+        <div className="intel-panel" data-testid="premarket-panel" aria-label="Pre-Market Intelligence">
+            {drillTarget && (
+                <div className="modal-overlay" onClick={() => setDrillTarget(null)} role="dialog" aria-modal="true" aria-label="Pre-Market Drill-Down">
+                    <div className="modal-card nav-drill" onClick={e => e.stopPropagation()}>
+                        <div className="modal-header">
+                            <span className="modal-title">📡 PRE-MARKET: {drillTarget}</span>
+                            <button className="modal-close" onClick={() => setDrillTarget(null)} aria-label="Close">✕</button>
+                        </div>
+                        <div className="fill-drill-body">
+                            {drillTarget === 'TSLA' && pm && (
+                                <>
+                                    <div className="fill-row">
+                                        <span>Extended-hours change</span>
+                                        <span>{changePctLabel(pm.tsla_premarket_change_pct)}</span>
+                                    </div>
+                                    <div className="fill-row">
+                                        <span>Extended-hours volume</span>
+                                        <span>{pm.tsla_premarket_volume > 0 ? pm.tsla_premarket_volume.toLocaleString() : 'No pre/post activity'}</span>
+                                    </div>
+                                    {pm.overnight_catalyst && (
+                                        <div className="fill-row"><span>Catalyst</span><span>{pm.overnight_catalyst}</span></div>
+                                    )}
+                                    <div className="fill-row"><span>Source</span><span style={{fontSize:'11px'}}>yfinance TSLA prepost=True (1d)</span></div>
+                                </>
+                            )}
+                            {drillTarget === 'Futures' && pm && (
+                                <>
+                                    <div className="fill-row"><span>ES (S&P 500)</span><span>{changePctLabel(pm.es_change_pct)}</span></div>
+                                    <div className="fill-row"><span>NQ (Nasdaq 100)</span><span>{changePctLabel(pm.nq_change_pct)}</span></div>
+                                    <div className="fill-row"><span>RTY</span><span style={{color:'#8b949e'}}>Not yet wired — see Phase A stash</span></div>
+                                    <div className="fill-row"><span>Bias</span><span style={{color:biasColor(pm.futures_bias)}}>{pm.futures_bias}</span></div>
+                                    <div className="fill-row"><span>Source</span><span style={{fontSize:'11px'}}>yfinance ES=F, NQ=F (2d history)</span></div>
+                                </>
+                            )}
+                            {drillTarget === 'Europe' && pm && (
+                                <>
+                                    <div className="fill-row"><span>STOXX50E</span><span style={{color:biasColor(pm.europe_direction)}}>{pm.europe_direction}</span></div>
+                                    <div className="fill-row"><span>DAX (^GDAXI)</span><span style={{color:'#8b949e'}}>Not yet wired — see Phase A stash</span></div>
+                                    <div className="fill-row"><span>FTSE (^FTSE)</span><span style={{color:'#8b949e'}}>Not yet wired — see Phase A stash</span></div>
+                                    <div className="fill-row"><span>Source</span><span style={{fontSize:'11px'}}>yfinance ^STOXX50E (2d history)</span></div>
+                                </>
+                            )}
+                            {drillTarget === 'Composite Bias' && pm && (
+                                <>
+                                    <div className="fill-row"><span>ES change</span><span>{changePctLabel(pm.es_change_pct)} × 0.35</span></div>
+                                    <div className="fill-row"><span>NQ change</span><span>{changePctLabel(pm.nq_change_pct)} × 0.35</span></div>
+                                    <div className="fill-row"><span>Europe</span><span style={{color:biasColor(pm.europe_direction)}}>{pm.europe_direction} × 0.30</span></div>
+                                    <div className="fill-row"><span>Result</span><span style={{color:biasColor(pm.futures_bias),fontWeight:700}}>{pm.futures_bias}</span></div>
+                                </>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            <div className="intel-grid">
+                {/* TSLA Pre/Post */}
+                <div className="intel-card" role="region" aria-label="TSLA Extended Hours"
+                     style={{cursor:'pointer'}} onClick={() => setDrillTarget('TSLA')}>
+                    <Tooltip text="TSLA extended-hours price change vs prior close. Click for detail.">
+                        <div className="intel-card-title">TSLA Pre/Post</div>
+                    </Tooltip>
+                    {pm ? (
+                        <>
+                            <div className="intel-row">
+                                <span className="intel-label">Change</span>
+                                <span>{changePctLabel(pm.tsla_premarket_change_pct)}</span>
+                            </div>
+                            <div className="intel-row">
+                                <span className="intel-label">Volume</span>
+                                <span style={{color:'#8b949e'}}>
+                                    {pm.tsla_premarket_volume > 0
+                                        ? pm.tsla_premarket_volume.toLocaleString()
+                                        : 'No pre/post activity'}
+                                </span>
+                            </div>
+                        </>
+                    ) : (
+                        <div style={{color:'#8b949e',fontSize:'12px'}}>No pre/post activity — awaiting data</div>
+                    )}
+                </div>
+
+                {/* US Futures */}
+                <div className="intel-card" role="region" aria-label="US Futures"
+                     style={{cursor:'pointer'}} onClick={() => setDrillTarget('Futures')}>
+                    <Tooltip text="ES and NQ futures change vs prior session. Click for detail.">
+                        <div className="intel-card-title">US Futures</div>
+                    </Tooltip>
+                    {pm ? (
+                        <>
+                            <div className="intel-row">
+                                <span className="intel-label">ES (S&P)</span>
+                                <span>{changePctLabel(pm.es_change_pct)}</span>
+                            </div>
+                            <div className="intel-row">
+                                <span className="intel-label">NQ (NDX)</span>
+                                <span>{changePctLabel(pm.nq_change_pct)}</span>
+                            </div>
+                            <div className="intel-row">
+                                <span className="intel-label">RTY</span>
+                                <span style={{color:'#d29922',fontSize:'11px'}}>Not yet wired</span>
+                            </div>
+                        </>
+                    ) : (
+                        <div style={{color:'#8b949e',fontSize:'12px'}}>Not yet wired — see Phase A stash</div>
+                    )}
+                </div>
+
+                {/* European Indices */}
+                <div className="intel-card" role="region" aria-label="European Indices"
+                     style={{cursor:'pointer'}} onClick={() => setDrillTarget('Europe')}>
+                    <Tooltip text="European equity session direction. STOXX50E wired; DAX/FTSE planned Phase A.">
+                        <div className="intel-card-title">Europe</div>
+                    </Tooltip>
+                    {pm ? (
+                        <>
+                            <div className="intel-row">
+                                <span className="intel-label">STOXX50E</span>
+                                <span style={{color:biasColor(pm.europe_direction)}}>{pm.europe_direction}</span>
+                            </div>
+                            <div className="intel-row">
+                                <span className="intel-label">DAX</span>
+                                <span style={{color:'#d29922',fontSize:'11px'}}>Not yet wired</span>
+                            </div>
+                            <div className="intel-row">
+                                <span className="intel-label">FTSE</span>
+                                <span style={{color:'#d29922',fontSize:'11px'}}>Not yet wired</span>
+                            </div>
+                        </>
+                    ) : (
+                        <div style={{color:'#8b949e',fontSize:'12px'}}>Not yet wired — see Phase A stash</div>
+                    )}
+                </div>
+
+                {/* Asian Indices — Phase A stash */}
+                <div className="intel-card" role="region" aria-label="Asian Indices">
+                    <Tooltip text="Asian equity session indices — planned in Phase A stash. Not yet wired.">
+                        <div className="intel-card-title">Asia</div>
+                    </Tooltip>
+                    <div className="intel-row"><span className="intel-label">Nikkei</span><span style={{color:'#d29922',fontSize:'11px'}}>Not yet wired</span></div>
+                    <div className="intel-row"><span className="intel-label">Hang Seng</span><span style={{color:'#d29922',fontSize:'11px'}}>Not yet wired</span></div>
+                    <div className="intel-row"><span className="intel-label">Shanghai</span><span style={{color:'#d29922',fontSize:'11px'}}>Not yet wired</span></div>
+                </div>
+
+                {/* FX Risk Barometer — Phase A stash */}
+                <div className="intel-card" role="region" aria-label="FX Risk Barometer">
+                    <Tooltip text="USDJPY carry, EURUSD, DXY — risk-on/risk-off signal. Planned Phase A.">
+                        <div className="intel-card-title">FX Barometer</div>
+                    </Tooltip>
+                    <div className="intel-row"><span className="intel-label">USDJPY</span><span style={{color:'#d29922',fontSize:'11px'}}>Not yet wired</span></div>
+                    <div className="intel-row"><span className="intel-label">DXY</span><span style={{color:'#d29922',fontSize:'11px'}}>Not yet wired</span></div>
+                </div>
+
+                {/* Composite Bias */}
+                <div className="intel-card" role="region" aria-label="Composite Pre-Market Bias"
+                     style={{cursor:'pointer'}} onClick={() => pm && setDrillTarget('Composite Bias')}>
+                    <Tooltip text="Composite pre-market bias computed from futures + Europe. Click for breakdown.">
+                        <div className="intel-card-title">Composite Bias</div>
+                    </Tooltip>
+                    {pm ? (
+                        <>
+                            <div className="intel-row">
+                                <span className="intel-label">Bias</span>
+                                <span style={{color:biasColor(pm.futures_bias),fontWeight:700,fontSize:'14px'}}>{pm.futures_bias}</span>
+                            </div>
+                            <div className="intel-row">
+                                <span className="intel-label">Signal window</span>
+                                <span style={{color: pm.is_signal_window ? '#3fb950' : '#8b949e'}}>
+                                    {pm.is_signal_window ? 'ACTIVE' : 'INACTIVE'}
+                                </span>
+                            </div>
+                        </>
+                    ) : (
+                        <div style={{color:'#8b949e',fontSize:'12px'}}>Awaiting intel data</div>
+                    )}
+                    <div className="intel-stale" data-testid="market-countdown">{marketCountdown}</div>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+// ============================================================
 //  Intel Panel
 // ============================================================
 const IntelPanel = ({ intel, isLoading }: { intel: Intel | null; isLoading?: boolean }) => {
@@ -3424,6 +3667,14 @@ const Dashboard = ({ brokerStatus, integrityRed = false }: { brokerStatus: Broke
 
             {/* Data Provenance Panel — TV vs YF spot comparison */}
             <DataProvenancePanel audit={audit} />
+
+            {/* Pre-Market Intelligence Panel */}
+            <CollapsiblePanel
+                storageKey="dashboard_premarket_open"
+                title="📡 PRE-MARKET INTELLIGENCE"
+            >
+                <PreMarketPanel intel={intel} isLoading={intelLoading} />
+            </CollapsiblePanel>
 
             {/* Zone 2: 4-Column Trading Grid */}
             <div className="dashboard-grid">
