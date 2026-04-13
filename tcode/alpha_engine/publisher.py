@@ -5,6 +5,7 @@ Broadcasts validated consensus signals to the Go-based execution engine.
 import asyncio
 import dataclasses
 import json
+import os
 import nats
 import random
 import time
@@ -18,6 +19,16 @@ from ingestion.options_chain import get_chain_cache
 from ingestion.tv_feed import validate_spot_price, get_tv_cache, TVFeedError
 from ingestion.ibkr_feed import get_ibkr_feed
 from data.logger import DataLogger
+from config.archetypes import get_archetype, MODEL_ARCHETYPE_MAP, ARCHETYPES
+
+# ── Notional account size: NEVER use portfolio NAV for sizing. ───────────────
+# Default $25k represents the small-account discipline target for live trading.
+# Override at runtime with NOTIONAL_ACCOUNT_SIZE env var.
+NOTIONAL: int = int(os.getenv("NOTIONAL_ACCOUNT_SIZE", "25000"))
+
+# Gross outstanding cap: total option premium outstanding must not exceed this
+# fraction of notional. Prevents over-allocation during fast-firing periods.
+_GROSS_OUTSTANDING_CAP_PCT = 0.06  # 6% of notional
 
 STALENESS_MAX_SECONDS = 300  # 5 minutes
 DIVERGENCE_MAX_PCT = 0.5     # 0.5% max IBKR vs TV divergence
@@ -46,15 +57,43 @@ def check_data_gates(spot_sources: dict) -> tuple[bool, str]:
     return True, ""
 
 # Task 2: Observability Metrics for Intelligence Engine
-SIGNAL_SENT_COUNT = Counter('alpha_signal_sent_total', 'Total signals published to NATS')
-SIGNAL_CONFIDENCE_GAUGE = Gauge('alpha_intelligence_confidence', 'Confidence score of the latest published signal')
-INFERENCE_LATENCY = Histogram('alpha_inference_latency_seconds', 'Inference latency for intelligence models')
+# Wrapped in try/except to tolerate duplicate imports in test environments where
+# both "publisher" and "alpha_engine.publisher" are loaded as separate modules.
+def _safe_counter(name, doc):
+    try:
+        return Counter(name, doc)
+    except ValueError:
+        from prometheus_client import REGISTRY
+        return REGISTRY._names_to_collectors.get(name) or Counter.__new__(Counter)
 
-# Commission viability gate — signals rejected because IBKR commissions would
-# eliminate or invert the expected profit at the stated take-profit price.
-SIGNAL_REJECTED_COMMISSION = Counter(
+def _safe_gauge(name, doc):
+    try:
+        return Gauge(name, doc)
+    except ValueError:
+        from prometheus_client import REGISTRY
+        return REGISTRY._names_to_collectors.get(name) or Gauge.__new__(Gauge)
+
+def _safe_histogram(name, doc):
+    try:
+        return Histogram(name, doc)
+    except ValueError:
+        from prometheus_client import REGISTRY
+        return REGISTRY._names_to_collectors.get(name) or Histogram.__new__(Histogram)
+
+SIGNAL_SENT_COUNT = _safe_counter('alpha_signal_sent_total', 'Total signals published to NATS')
+SIGNAL_CONFIDENCE_GAUGE = _safe_gauge('alpha_intelligence_confidence', 'Confidence score of the latest published signal')
+INFERENCE_LATENCY = _safe_histogram('alpha_inference_latency_seconds', 'Inference latency for intelligence models')
+
+# Commission viability gate
+SIGNAL_REJECTED_COMMISSION = _safe_counter(
     'signals_rejected_commission_total',
     'Signals suppressed because round-trip IBKR commissions make net profit at TP non-positive',
+)
+
+# Min-edge floor gate
+SIGNAL_REJECTED_MINEDGE = _safe_counter(
+    'signals_rejected_minedge_total',
+    'Signals suppressed because expected net profit is below the minimum edge floor',
 )
 
 # IBKR Pro options commission schedule (USD).
@@ -63,9 +102,10 @@ IBKR_OPTION_MIN_PER_LEG: float = 1.00         # minimum charge per order/leg
 _SINGLE_LEG_ROUND_TRIP: int = 2               # open + close = 2 legs
 _SPREAD_ROUND_TRIP: int = 4                    # 2 legs per side × open + close = 4 legs
 
-# In-process counter for writing to the metrics file (Prometheus Counter values
+# In-process counters for writing to the metrics file (Prometheus Counter values
 # cannot be read back from the counter object itself in all versions).
 _rejected_commission_total: int = 0
+_rejected_minedge_total: int = 0
 _PUBLISHER_METRICS_PATH = "/tmp/publisher_metrics.json"
 
 
@@ -116,13 +156,85 @@ def signal_is_commission_viable(
     return True, ""
 
 
+def compute_notional_sizing(
+    notional: int,
+    risk_pct: float,
+    entry_price: float,
+    stop_loss_price: float,
+    premium: float,
+    is_spread: bool = False,
+) -> tuple[int, str]:
+    """Compute position size from notional risk budget.
+
+    Returns (qty, rejection_reason). rejection_reason is "" if viable.
+
+    Sizing logic:
+      max_loss_dollars  = notional * risk_pct
+      per_contract_loss = (entry_price - stop_loss_price) * 100
+      qty               = max(1, floor(max_loss_dollars / per_contract_loss))
+
+    Gross outstanding cap:  qty * premium * 100 <= notional * GROSS_CAP
+    """
+    max_loss_dollars = notional * risk_pct
+    per_contract_loss = abs(entry_price - stop_loss_price) * 100
+    if per_contract_loss <= 0:
+        return 1, ""  # degenerate stop → use minimum qty
+
+    qty = max(1, int(max_loss_dollars // per_contract_loss))
+
+    gross_outstanding = qty * premium * 100
+    gross_cap = notional * _GROSS_OUTSTANDING_CAP_PCT
+    if gross_outstanding > gross_cap:
+        qty = max(1, int(gross_cap // (premium * 100)))
+        gross_outstanding = qty * premium * 100
+
+    return qty, ""
+
+
+def compute_min_edge_floor(notional: int, qty: int, is_spread: bool = False) -> float:
+    """Return the minimum acceptable net profit for a signal to be published.
+
+    Floor = max(notional * 0.0025,  5 * round_trip_commission)
+          = max(0.25% of notional, 5× what we'd pay IBKR per round trip)
+    """
+    commission_5x = 5 * compute_round_trip_commission(qty, is_spread=is_spread)
+    return max(notional * 0.0025, commission_5x)
+
+
+def signal_passes_min_edge(
+    limit_price: float,
+    take_profit_price: float,
+    qty: int,
+    notional: int,
+    is_spread: bool = False,
+) -> tuple[bool, str]:
+    """Return (passes, reason_string).
+
+    Net expected profit = gross_profit_at_tp - round_trip_commission.
+    Must exceed the min-edge floor.
+    """
+    gross_profit_at_tp = abs(take_profit_price - limit_price) * 100 * qty
+    commission = compute_round_trip_commission(qty, is_spread=is_spread)
+    net_profit = gross_profit_at_tp - commission
+    floor = compute_min_edge_floor(notional, qty, is_spread=is_spread)
+    if net_profit < floor:
+        return False, (
+            f"min-edge floor: net={net_profit:.2f} < floor={floor:.2f} "
+            f"(notional={notional}, qty={qty}, "
+            f"gross={gross_profit_at_tp:.2f}, commission={commission:.2f})"
+        )
+    return True, ""
+
+
 def _write_publisher_metrics() -> None:
-    """Persist the in-process rejected-signal counter to a JSON file so the
-    Go API can serve it to the dashboard without scraping Python's Prometheus."""
+    """Persist the in-process rejected-signal counters to a JSON file so the
+    Go API can serve them to the dashboard without scraping Python's Prometheus."""
     try:
         with open(_PUBLISHER_METRICS_PATH, "w") as fh:
             json.dump({
                 "signals_rejected_commission_total": _rejected_commission_total,
+                "signals_rejected_minedge_total": _rejected_minedge_total,
+                "notional_account_size": NOTIONAL,
                 "ts": time.time(),
             }, fh)
     except OSError:
@@ -289,6 +401,20 @@ async def broadcast_loop():
     SIGNAL_COOLDOWN = 300  # 5 minutes between same signal
 
     while True:
+        # Reload NOTIONAL_ACCOUNT_SIZE if the Go API wrote a reload marker
+        global NOTIONAL
+        _reload_path = "/tmp/notional_reload"
+        if os.path.exists(_reload_path):
+            try:
+                with open(_reload_path) as _rf:
+                    _new_notional = int(_rf.read().strip())
+                if _new_notional != NOTIONAL and 5000 <= _new_notional <= 250000:
+                    print(f"[NOTIONAL] Reloaded: {NOTIONAL} → {_new_notional}")
+                    NOTIONAL = _new_notional
+                os.remove(_reload_path)
+            except Exception as _re:
+                print(f"[NOTIONAL] Reload error: {_re}")
+
         # Step 1: Fetch consensus REAL price
         try:
             spot = publisher.pricing.get_consensus_price()
@@ -491,7 +617,13 @@ async def broadcast_loop():
             if confidence < 0.55:
                 continue
 
-            # ── Strike selection ──
+            # ── Archetype config for this model ──
+            archetype_cfg = get_archetype(model.name)
+            target_delta = archetype_cfg["delta"]
+            archetype_risk_pct = archetype_cfg["risk_pct"]
+            archetype_rr = archetype_cfg["rr"]
+            archetype_expiry_str = archetype_cfg["expiry"]
+
             opt_type = "CALL" if direction == SignalDirection.BULLISH else "PUT"
 
             # Non-contrarian/sector/premarket: determine action from VIX
@@ -499,17 +631,32 @@ async def broadcast_loop():
                 if model != ModelType.VOLATILITY:
                     vix_now = intel.get("macro_regime", {}).get("vix_spot", 20) or 20
                     action = "SELL" if vix_now > 25 and confidence > 0.8 else "BUY"
-                # Standard moneyness
-                moneyness = 1.05 if opt_type == "CALL" else 0.95
 
+            # ── Delta-targeted strike selection ──────────────────────────────
+            # Use snap_strike_by_delta; fall back to moneyness if chain is cold.
+            chain_expiry = compute_expiry(archetype_expiry_str)
             try:
-                strike, chain_iv, chain_expiry = get_chain_cache().snap_strike(spot, opt_type, moneyness)
-            except Exception:
+                # Nearest liquid expiry that matches archetype DTE
+                _nearest = get_chain_cache().nearest_expiry_with_liquidity(min_dte=0)
+                if _nearest:
+                    chain_expiry = _nearest
+                strike, chain_iv, chain_expiry = get_chain_cache().snap_strike_by_delta(
+                    spot, opt_type, target_delta, expiry=chain_expiry
+                )
+                if strike < 0:
+                    # No strike within ±5 delta of target — reject signal
+                    print(f"[REJECT] delta-miss: no {opt_type} strike within 5 delta of "
+                          f"{target_delta:.2f} for {model.name} (expiry={chain_expiry})")
+                    continue
+            except Exception as _se:
+                # Chain unavailable — moneyness fallback
+                moneyness = 1.0 + (target_delta - 0.5) * 0.2
                 strike = round(spot * moneyness / 5.0) * 5.0
                 chain_iv = 0.0
-                chain_expiry = ""
+                print(f"[WARN] delta-snap failed ({_se}), using moneyness fallback "
+                      f"strike=${strike:.0f}")
 
-            # MANDATE: Never sell naked. All SELL actions → credit spread
+            # ── MANDATE: Never sell naked. All SELL actions → credit spread ──
             if action == "SELL":
                 is_spread = True
                 short_strike = strike
@@ -532,6 +679,7 @@ async def broadcast_loop():
                     limit_price = round(max(0.01, short_row.bid - long_row.ask), 2) if short_row and long_row else round(abs(short_strike - long_strike) * 0.15, 2)
                 except Exception:
                     limit_price = round(abs(short_strike - long_strike) * 0.15, 2)
+                # Credit spreads: TP = 50% of credit (buy back cheap), SL = 2× credit
                 take_profit_price = round(limit_price * 0.5, 2)
                 stop_loss_price = round(limit_price * 2.0, 2)
             else:
@@ -543,26 +691,27 @@ async def broadcast_loop():
                 except Exception:
                     limit_price = max(0.05, round(abs(strike - spot) * 0.01 + 0.10, 2))
 
-                if model == ModelType.CONTRARIAN:
-                    take_profit_price = round(limit_price * 3.0, 2)
-                    stop_loss_price = 0.01
-                else:
-                    take_profit_price = round(limit_price * 1.30, 2)
-                    stop_loss_price = round(limit_price * 0.70, 2)
+                # ── Asymmetric TP/SL from archetype R:R ─────────────────────
+                # stop_loss set at 100% loss of premium (option goes to near-zero)
+                # take_profit = entry + rr * (entry - stop_loss)
+                stop_loss_price = round(max(0.01, limit_price * 0.10), 2)  # ~90% loss
+                take_profit_price = round(
+                    limit_price + archetype_rr * (limit_price - stop_loss_price), 2
+                )
 
-            # Kelly sizing with hard caps
-            full_kelly = max(0, 2 * confidence - 1)
-            if model == ModelType.CONTRARIAN:
-                kelly = full_kelly * 0.02  # 2% of Kelly for lottery tickets
-            else:
-                kelly = full_kelly * 0.05  # 5% of Kelly (conservative)
+            # ── Fractional Kelly: 30% of raw Kelly, capped at 2% of notional ─
+            raw_edge = max(0.0, 2 * confidence - 1)
+            kelly_fraction = min(raw_edge * 0.3, 0.02)
 
-            # Position size: max 1% of portfolio per trade, max 10 contracts
-            max_position_value = 1000000 * 0.01  # 1% = $10,000
-            if limit_price > 0:
-                qty = min(10, max(1, int(max_position_value / (limit_price * 100))))
-            else:
-                qty = 1
+            # ── Notional-risk sizing ─────────────────────────────────────────
+            qty, _size_reason = compute_notional_sizing(
+                notional=NOTIONAL,
+                risk_pct=archetype_risk_pct,
+                entry_price=limit_price,
+                stop_loss_price=stop_loss_price,
+                premium=limit_price,
+                is_spread=is_spread,
+            )
 
             # Validate strikes at $5 chain increments
             strike = round(strike / 5.0) * 5.0
@@ -592,21 +741,20 @@ async def broadcast_loop():
                 short_strike=float(short_strike),
                 long_strike=float(long_strike),
                 is_spread=is_spread,
-                recommended_expiry="7DTE",
+                recommended_expiry=archetype_expiry_str,
                 option_type=opt_type,
                 action=action,
-                expiration_date=chain_expiry if chain_expiry else compute_expiry("7DTE"),
+                expiration_date=chain_expiry if chain_expiry else compute_expiry(archetype_expiry_str),
                 target_limit_price=float(limit_price),
                 take_profit_price=float(take_profit_price),
                 stop_loss_price=float(stop_loss_price),
-                kelly_wager_pct=float(kelly),
+                kelly_wager_pct=float(kelly_fraction),
                 quantity=qty,
                 confidence_rationale=f"SNIPER ALERT: {rationale}",
                 implied_volatility=float(chain_iv),
             )
 
-            # Commission viability gate — suppress signals where IBKR fees
-            # would eliminate the profit at the stated take-profit price.
+            # ── Commission viability gate ─────────────────────────────────────
             if scan_sig.quantity > 0 and scan_sig.take_profit_price > 0:
                 global _rejected_commission_total
                 viable, reason = signal_is_commission_viable(
@@ -620,6 +768,23 @@ async def broadcast_loop():
                     print(f"[REJECT] commission-negative signal ({model.name} {opt_type} ${strike:.0f}): {reason}")
                     SIGNAL_REJECTED_COMMISSION.inc()
                     _rejected_commission_total += 1
+                    _write_publisher_metrics()
+                    continue
+
+            # ── Minimum-edge floor gate ───────────────────────────────────────
+            if scan_sig.quantity > 0 and scan_sig.take_profit_price > 0:
+                global _rejected_minedge_total
+                edge_ok, edge_reason = signal_passes_min_edge(
+                    scan_sig.target_limit_price,
+                    scan_sig.take_profit_price,
+                    scan_sig.quantity,
+                    notional=NOTIONAL,
+                    is_spread=scan_sig.is_spread,
+                )
+                if not edge_ok:
+                    print(f"[REJECT] min-edge floor ({model.name} {opt_type} ${strike:.0f}): {edge_reason}")
+                    SIGNAL_REJECTED_MINEDGE.inc()
+                    _rejected_minedge_total += 1
                     _write_publisher_metrics()
                     continue
 
