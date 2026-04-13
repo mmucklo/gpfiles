@@ -1685,13 +1685,23 @@ interface PendingOrder {
     filled_qty: number;
     avg_fill_price: number;
     timestamp: string;
+    rank?: number;  // signal rank [0,1] from pending cap tracker
 }
 
 interface PendingOrdersResponse {
     active: PendingOrder[];
     cancelled: PendingOrder[];
     source: string;
+    cap?: number;   // MAX_PENDING_ORDERS value
     error?: string;
+}
+
+interface CapEvent {
+    ts: string;
+    kind: 'REPLACE' | 'REJECT-CAP';
+    cancelled_id: number;
+    cancelled_rank: number;
+    incoming_rank: number;
 }
 
 function orderLabel(o: PendingOrder): string {
@@ -1719,48 +1729,68 @@ function fillWindowLabel(): string {
     return 'fills next Monday 9:30 AM ET';
 }
 
-const PendingOrderModal = ({ order, onClose }: { order: PendingOrder; onClose: () => void }) => (
-    <div className="modal-overlay" onClick={onClose} role="dialog" aria-modal="true" aria-label="Pending Order Detail">
-        <div className="modal-card fill-drill" onClick={e => e.stopPropagation()}>
-            <div className="modal-header">
-                <span className="modal-title">⏳ PENDING ORDER #{order.orderId}</span>
-                <button className="modal-close" onClick={onClose} aria-label="Close pending order detail">✕</button>
-            </div>
-            <div className="fill-drill-body pending-order-modal-body">
-                <div className={`fill-pnl-banner ${order.status === 'Filled' ? 'win' : ''}`}
-                     style={{ background: 'rgba(139,92,246,0.12)', borderColor: 'rgba(139,92,246,0.4)' }}>
-                    <span className="fill-pnl-label" style={{ color: '#c9d1d9' }}>{order.action} {orderLabel(order)}</span>
-                    <span className="fill-pnl-value" style={{ color: '#e6a200' }}>{order.status}</span>
+const PendingOrderModal = ({ order, onClose }: { order: PendingOrder; onClose: () => void }) => {
+    // Approximate rank breakdown for display (mirrors computeRank in subscriber.go).
+    const rankBreakdown = order.rank != null ? { total: order.rank } : null;
+
+    return (
+        <div className="modal-overlay" onClick={onClose} role="dialog" aria-modal="true" aria-label="Pending Order Detail">
+            <div className="modal-card fill-drill" onClick={e => e.stopPropagation()}>
+                <div className="modal-header">
+                    <span className="modal-title">⏳ PENDING ORDER #{order.orderId}</span>
+                    <button className="modal-close" onClick={onClose} aria-label="Close pending order detail">✕</button>
                 </div>
-                <div className="fill-section">
-                    <div className="fill-section-title">Order Detail</div>
-                    <div className="fill-grid">
-                        <div className="fill-row"><span>Order ID</span><span>#{order.orderId}</span></div>
-                        <div className="fill-row"><span>Status</span><span style={{ color: '#e6a200', fontWeight: 700 }}>{order.status}</span></div>
-                        <div className="fill-row"><span>Symbol</span><span>{order.symbol}</span></div>
-                        <div className="fill-row"><span>Action</span><span>{order.action}</span></div>
-                        <div className="fill-row"><span>Option Type</span><span>{order.option_type || '—'}</span></div>
-                        <div className="fill-row"><span>Strike</span><span>{order.strike > 0 ? `$${order.strike}` : '—'}</span></div>
-                        <div className="fill-row"><span>Expiry</span><span>{order.expiry || '—'}</span></div>
-                        <div className="fill-row"><span>Qty</span><span>{order.qty}</span></div>
-                        <div className="fill-row"><span>Limit Price</span><span>{order.limit_price > 0 ? formatUSD(order.limit_price) : '—'}</span></div>
-                        <div className="fill-row"><span>Filled Qty</span><span>{order.filled_qty}</span></div>
-                        <div className="fill-row"><span>Avg Fill Price</span><span>{order.avg_fill_price > 0 ? formatUSD(order.avg_fill_price) : '—'}</span></div>
-                        <div className="fill-row"><span>Submitted At</span><span>{order.timestamp ? new Date(order.timestamp).toLocaleString() : '—'}</span></div>
+                <div className="fill-drill-body pending-order-modal-body">
+                    <div className={`fill-pnl-banner ${order.status === 'Filled' ? 'win' : ''}`}
+                         style={{ background: 'rgba(139,92,246,0.12)', borderColor: 'rgba(139,92,246,0.4)' }}>
+                        <span className="fill-pnl-label" style={{ color: '#c9d1d9' }}>{order.action} {orderLabel(order)}</span>
+                        <span className="fill-pnl-value" style={{ color: '#e6a200' }}>{order.status}</span>
                     </div>
-                </div>
-                <div className="fill-section">
-                    <div className="fill-section-title">Fill Window</div>
-                    <div style={{ fontSize: '0.78rem', color: '#58a6ff', padding: '4px 0' }}>{fillWindowLabel()}</div>
-                </div>
-                <div className="fill-section">
-                    <div className="fill-section-title">Raw IBKR State</div>
-                    <div className="raw-order-block">{JSON.stringify(order, null, 2)}</div>
+                    <div className="fill-section">
+                        <div className="fill-section-title">Order Detail</div>
+                        <div className="fill-grid">
+                            <div className="fill-row"><span>Order ID</span><span>#{order.orderId}</span></div>
+                            <div className="fill-row"><span>Status</span><span style={{ color: '#e6a200', fontWeight: 700 }}>{order.status}</span></div>
+                            <div className="fill-row"><span>Symbol</span><span>{order.symbol}</span></div>
+                            <div className="fill-row"><span>Action</span><span>{order.action}</span></div>
+                            <div className="fill-row"><span>Option Type</span><span>{order.option_type || '—'}</span></div>
+                            <div className="fill-row"><span>Strike</span><span>{order.strike > 0 ? `$${order.strike}` : '—'}</span></div>
+                            <div className="fill-row"><span>Expiry</span><span>{order.expiry || '—'}</span></div>
+                            <div className="fill-row"><span>Qty</span><span>{order.qty}</span></div>
+                            <div className="fill-row"><span>Limit Price</span><span>{order.limit_price > 0 ? formatUSD(order.limit_price) : '—'}</span></div>
+                            <div className="fill-row"><span>Filled Qty</span><span>{order.filled_qty}</span></div>
+                            <div className="fill-row"><span>Avg Fill Price</span><span>{order.avg_fill_price > 0 ? formatUSD(order.avg_fill_price) : '—'}</span></div>
+                            <div className="fill-row"><span>Submitted At</span><span>{order.timestamp ? new Date(order.timestamp).toLocaleString() : '—'}</span></div>
+                        </div>
+                    </div>
+                    {rankBreakdown && (
+                        <div className="fill-section">
+                            <div className="fill-section-title">Signal Rank</div>
+                            <div className="fill-grid">
+                                <div className="fill-row">
+                                    <span>Overall Rank</span>
+                                    <span style={{ color: '#58a6ff', fontWeight: 700 }}>{rankBreakdown.total.toFixed(3)}</span>
+                                </div>
+                                <div className="fill-row" style={{ fontSize: '0.72rem', color: '#8b949e' }}>
+                                    <span>Formula</span>
+                                    <span>confidence×0.5 + roi×0.3 + recency×0.2</span>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                    <div className="fill-section">
+                        <div className="fill-section-title">Fill Window</div>
+                        <div style={{ fontSize: '0.78rem', color: '#58a6ff', padding: '4px 0' }}>{fillWindowLabel()}</div>
+                    </div>
+                    <div className="fill-section">
+                        <div className="fill-section-title">Raw IBKR State</div>
+                        <div className="raw-order-block">{JSON.stringify(order, null, 2)}</div>
+                    </div>
                 </div>
             </div>
         </div>
-    </div>
-);
+    );
+};
 
 // ============================================================
 //  Column B: Pending Orders
@@ -1768,22 +1798,57 @@ const PendingOrderModal = ({ order, onClose }: { order: PendingOrder; onClose: (
 const PendingOrdersPanel = ({
     orders,
     source,
+    capEvents,
+    replacementToast,
 }: {
     orders: PendingOrdersResponse | null;
     source: string;
+    capEvents: CapEvent[];
+    replacementToast: CapEvent | null;
 }) => {
     const [selectedOrder, setSelectedOrder] = useState<PendingOrder | null>(null);
     const [cancelledOpen, setCancelledOpen] = useState(false);
+    const [eventsOpen, setEventsOpen] = useState(false);
 
     const active    = orders?.active    ?? [];
     const cancelled = orders?.cancelled ?? [];
+    const cap       = orders?.cap       ?? 2;
     const hasError  = !!orders?.error;
+
+    // Header color: red at cap, amber at cap-1, green below
+    const capColor = active.length >= cap
+        ? '#f85149'
+        : active.length >= cap - 1
+        ? '#e6a200'
+        : '#3fb950';
 
     return (
         <>
             {selectedOrder && (
                 <PendingOrderModal order={selectedOrder} onClose={() => setSelectedOrder(null)} />
             )}
+
+            {/* Replacement toast */}
+            {replacementToast && (
+                <div
+                    role="status"
+                    aria-live="polite"
+                    data-testid="cap-replacement-toast"
+                    style={{
+                        position: 'fixed', bottom: 24, right: 24, zIndex: 9999,
+                        background: 'rgba(88,166,255,0.15)',
+                        border: '1px solid rgba(88,166,255,0.5)',
+                        borderRadius: 8, padding: '10px 16px',
+                        fontSize: '0.78rem', color: '#c9d1d9', maxWidth: 320,
+                    }}
+                >
+                    {replacementToast.kind === 'REPLACE'
+                        ? `Better signal replaced orderId=${replacementToast.cancelled_id} (rank ${replacementToast.cancelled_rank.toFixed(2)} → ${replacementToast.incoming_rank.toFixed(2)})`
+                        : `Signal rejected — cap full (rank ${replacementToast.incoming_rank.toFixed(2)} below cutoff ${replacementToast.cancelled_rank.toFixed(2)})`
+                    }
+                </div>
+            )}
+
             <div className="dash-col card" role="region" aria-label="Pending Orders — queued IBKR orders">
                 <div className="section-header">
                     <Tooltip text="Orders submitted to IBKR but not yet filled. Click any row for full state.">
@@ -1792,7 +1857,14 @@ const PendingOrdersPanel = ({
                         </span>
                     </Tooltip>
                     <div className="section-meta">
-                        <span className="inline-badge" aria-label={`${active.length} pending orders`}>{active.length}</span>
+                        {/* "Pending (N/max)" badge — color by saturation */}
+                        <span
+                            className="inline-badge"
+                            aria-label={`${active.length} of ${cap} pending orders`}
+                            style={{ color: capColor, border: `1px solid ${capColor}44`, background: `${capColor}11` }}
+                        >
+                            {active.length}/{cap}
+                        </span>
                         {source && source !== 'SIMULATION' && (
                             <span className="inline-badge" style={{ background: 'rgba(139,92,246,0.15)', color: '#a371f7' }}>
                                 {source.replace('IBKR_', '')}
@@ -1830,6 +1902,16 @@ const PendingOrdersPanel = ({
                                 </Tooltip>
                                 <span className="pending-status-badge">{o.status}</span>
                                 <span className="pending-order-id">#{o.orderId}</span>
+                                {/* Rank badge */}
+                                {o.rank != null && o.rank > 0 && (
+                                    <span
+                                        className="inline-badge"
+                                        title={`Signal rank: ${o.rank.toFixed(3)}`}
+                                        style={{ fontSize: '0.65rem', color: '#58a6ff', background: 'rgba(88,166,255,0.1)', border: '1px solid rgba(88,166,255,0.3)' }}
+                                    >
+                                        rank: {o.rank.toFixed(2)}
+                                    </span>
+                                )}
                             </div>
                             <div className="pending-order-detail">
                                 <span>×{o.qty}</span>
@@ -1865,6 +1947,41 @@ const PendingOrdersPanel = ({
                                     style={{ cursor: 'pointer' }}
                                 >
                                     #{o.orderId} {o.action} {orderLabel(o)} — Cancelled
+                                </div>
+                            ))}
+                        </div>
+                    )}
+
+                    {/* Cap event feed — last 10 REPLACE / REJECT-CAP events */}
+                    {capEvents.length > 0 && (
+                        <div className="cancelled-accordion" style={{ marginTop: 8 }}>
+                            <div
+                                className="cancelled-accordion-header"
+                                onClick={() => setEventsOpen(v => !v)}
+                                role="button"
+                                tabIndex={0}
+                                aria-expanded={eventsOpen}
+                                aria-label={`Cap events — ${capEvents.length} recent. Click to ${eventsOpen ? 'collapse' : 'expand'}.`}
+                                onKeyDown={e => e.key === 'Enter' && setEventsOpen(v => !v)}
+                            >
+                                <span>Cap events ({capEvents.length})</span>
+                                <span style={{ transform: eventsOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s' }}>▶</span>
+                            </div>
+                            {eventsOpen && capEvents.map((ev, i) => (
+                                <div
+                                    key={`${ev.ts}-${i}`}
+                                    style={{
+                                        padding: '4px 10px',
+                                        fontSize: '0.7rem',
+                                        color: ev.kind === 'REPLACE' ? '#3fb950' : '#e6a200',
+                                        borderBottom: '1px solid rgba(48,54,61,0.5)',
+                                    }}
+                                >
+                                    <span style={{ color: '#8b949e', marginRight: 6 }}>{new Date(ev.ts).toLocaleTimeString()}</span>
+                                    {ev.kind === 'REPLACE'
+                                        ? `[REPLACE] cancelled #${ev.cancelled_id} (rank ${ev.cancelled_rank.toFixed(2)}) → ${ev.incoming_rank.toFixed(2)}`
+                                        : `[REJECT-CAP] rank ${ev.incoming_rank.toFixed(2)} below ${ev.cancelled_rank.toFixed(2)}`
+                                    }
                                 </div>
                             ))}
                         </div>
@@ -2932,6 +3049,9 @@ const Dashboard = ({ brokerStatus, integrityRed = false }: { brokerStatus: Broke
     const [accountLoading, setAccountLoading] = useState(true);
     const [ibkrPositions, setIBKRPositions] = useState<IBKRPosition[]>([]);
     const [pendingOrders, setPendingOrders] = useState<PendingOrdersResponse | null>(null);
+    const [capEvents, setCapEvents] = useState<CapEvent[]>([]);
+    const [replacementToast, setReplacementToast] = useState<CapEvent | null>(null);
+    const prevCapEventsLenRef = useRef(0);
     const [simMode, setSimMode] = useState<string>('paper');
     const [scorecard, setScorecard] = useState<ModelScorecard[]>([]);
     const [scorecardLoading, setScorecardLoading] = useState(true);
@@ -2999,6 +3119,23 @@ const Dashboard = ({ brokerStatus, integrityRed = false }: { brokerStatus: Broke
         } catch { /* ignore — endpoint unavailable or gateway down */ }
     }, []);
 
+    // Fetch cap events (15s interval — in-memory, fast)
+    const fetchCapEvents = useCallback(async () => {
+        try {
+            const r = await fetch('/api/orders/cap-events');
+            if (!r.ok) return;
+            const data = await r.json() as { events: CapEvent[] };
+            const events: CapEvent[] = data.events ?? [];
+            setCapEvents(events);
+            // Show toast if a new event arrived since last poll
+            if (events.length > prevCapEventsLenRef.current && events.length > 0) {
+                setReplacementToast(events[0]);
+                setTimeout(() => setReplacementToast(null), 6000);
+            }
+            prevCapEventsLenRef.current = events.length;
+        } catch { /* ignore */ }
+    }, []);
+
     useEffect(() => {
         // Initial call handled by main stagger below
         const id = setInterval(fetchAccount, 10000);
@@ -3009,6 +3146,11 @@ const Dashboard = ({ brokerStatus, integrityRed = false }: { brokerStatus: Broke
         const id = setInterval(fetchPendingOrders, 30000);
         return () => clearInterval(id);
     }, [fetchPendingOrders]);
+
+    useEffect(() => {
+        const id = setInterval(fetchCapEvents, 15000);
+        return () => clearInterval(id);
+    }, [fetchCapEvents]);
 
     // Fetch scorecard + loss summary (60s interval)
     const fetchScorecard = useCallback(async () => {
@@ -3156,11 +3298,12 @@ const Dashboard = ({ brokerStatus, integrityRed = false }: { brokerStatus: Broke
         fetchAll();
         setTimeout(fetchAccount, 500);
         setTimeout(fetchPendingOrders, 2000);
+        setTimeout(fetchCapEvents, 2500);
         setTimeout(fetchScorecard, 1500);
         setTimeout(fetchIntel, 3000);
         const id = setInterval(fetchAll, 3000);
         return () => clearInterval(id);
-    }, [fetchAll, fetchPendingOrders]);
+    }, [fetchAll, fetchPendingOrders, fetchCapEvents]);
 
     return (
         <>
@@ -3243,6 +3386,8 @@ const Dashboard = ({ brokerStatus, integrityRed = false }: { brokerStatus: Broke
                 <PendingOrdersPanel
                     orders={pendingOrders}
                     source={pendingOrders?.source ?? ''}
+                    capEvents={capEvents}
+                    replacementToast={replacementToast}
                 />
                 <TradingFloor portfolio={portfolio} ibkrPositions={ibkrPositions} brokerStatus={brokerStatus} />
                 <ExecutionLog trades={trades} brokerStatus={brokerStatus} lossSummary={lossSummary} simMode={simMode} />

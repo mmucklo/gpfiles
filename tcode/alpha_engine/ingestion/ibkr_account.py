@@ -2,11 +2,16 @@
 TSLA Alpha Engine: IBKR Account + Positions Fetcher
 Retrieves live account summary, positions, fills, and P&L from IB Gateway.
 
-CLI modes (for Go subprocess calls):
+CLI sub-commands (for Go subprocess calls):
   python -m ingestion.ibkr_account account
   python -m ingestion.ibkr_account positions
   python -m ingestion.ibkr_account fills [hours]
   python -m ingestion.ibkr_account pnl
+
+Mode aliases (Phase 4+ vocabulary) -- also accepted as argv[1]:
+  python -m ingestion.ibkr_account IBKR_PAPER   -> alias for "account"
+  python -m ingestion.ibkr_account IBKR_LIVE    -> alias for "account"
+  python -m ingestion.ibkr_account SIMULATION   -> returns error (no broker)
 """
 import json
 import logging
@@ -20,6 +25,36 @@ from datetime import datetime, timezone
 logger = logging.getLogger("IBKRAccount")
 
 DB_PATH = os.path.expanduser("~/tsla_alpha.db")
+
+
+# ── mode normalizer ────────────────────────────────────────────────────────────
+
+_MODE_ALIASES = {
+    "IBKR_PAPER": "PAPER",
+    "PAPER":      "PAPER",
+    "IBKR_LIVE":  "LIVE",
+    "LIVE":       "LIVE",
+    "SIMULATION": "SIMULATION",
+    "SIM":        "SIMULATION",
+}
+
+_SUBCOMMANDS = {"account", "positions", "fills", "pnl"}
+
+
+def normalize_mode(m: str) -> str:
+    """
+    Translate execution mode vocabulary to a canonical string.
+
+    Accepts Phase 4+ strings (IBKR_PAPER, IBKR_LIVE, SIMULATION) and legacy
+    short forms (paper, live, sim) in any case.
+
+    Returns one of: "PAPER", "LIVE", "SIMULATION".
+    Raises ValueError for unrecognised strings.
+    """
+    key = m.strip().upper()
+    if key in _MODE_ALIASES:
+        return _MODE_ALIASES[key]
+    raise ValueError(f"Unknown mode: {m!r}")
 
 
 def _nan_to_zero(v) -> float:
@@ -205,7 +240,7 @@ def get_pnl() -> dict:
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def _fmt_expiry(raw: str) -> str:
-    """Convert YYYYMMDD → YYYY-MM-DD."""
+    """Convert YYYYMMDD -> YYYY-MM-DD."""
     raw = (raw or "").strip()
     if len(raw) == 8 and raw.isdigit():
         return f"{raw[:4]}-{raw[4:6]}-{raw[6:]}"
@@ -237,20 +272,39 @@ def _lookup_signal(ticker: str, strike: int, expiration: str, option_type: str):
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.WARNING)
-    mode = sys.argv[1] if len(sys.argv) > 1 else "account"
+    arg1 = sys.argv[1] if len(sys.argv) > 1 else "account"
+
+    # Accept execution mode vocabulary (IBKR_PAPER, IBKR_LIVE, SIMULATION, ...)
+    # as an alias for the "account" sub-command so callers using either
+    # Phase 4+ or legacy vocabulary work without modification.
+    if arg1 not in _SUBCOMMANDS:
+        try:
+            canonical = normalize_mode(arg1)
+        except ValueError:
+            print(json.dumps({"error": f"Unknown mode: {arg1}"}))
+            sys.exit(1)
+        if canonical == "SIMULATION":
+            print(json.dumps({
+                "error": "SIMULATION mode -- no broker connected",
+                "ibkr_connected": False,
+                "source": "SIMULATION",
+            }))
+            sys.exit(0)
+        # PAPER or LIVE -> run the "account" sub-command; port is set by env vars.
+        arg1 = "account"
 
     try:
-        if mode == "account":
+        if arg1 == "account":
             print(json.dumps(get_account_summary()))
-        elif mode == "positions":
+        elif arg1 == "positions":
             print(json.dumps(get_positions()))
-        elif mode == "fills":
+        elif arg1 == "fills":
             hours = int(sys.argv[2]) if len(sys.argv) > 2 else 24
             print(json.dumps(get_fills(hours)))
-        elif mode == "pnl":
+        elif arg1 == "pnl":
             print(json.dumps(get_pnl()))
         else:
-            print(json.dumps({"error": f"Unknown mode: {mode}"}))
+            print(json.dumps({"error": f"Unknown sub-command: {arg1}"}))
     except ConnectionError as e:
         print(json.dumps({"error": str(e), "ibkr_connected": False}))
     except Exception as e:

@@ -222,6 +222,7 @@ func main() {
 	mux.HandleFunc("/api/losses", configHandler.ServeLossSummary)
 	mux.HandleFunc("/api/fills/tag", configHandler.ServeTagTrade)
 	mux.HandleFunc("/api/orders/pending", configHandler.ServeOrdersPending)
+	mux.HandleFunc("/api/orders/cap-events", configHandler.ServeCapEvents)
 
 	// Live Reload WebSocket (Task: Auto-Refresh)
 	mux.Handle("/dev/ws", GlobalReloader)

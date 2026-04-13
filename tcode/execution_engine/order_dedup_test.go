@@ -104,3 +104,51 @@ func TestSignalFingerprintFormat(t *testing.T) {
 		t.Errorf("fingerprint = %q, want %q", fp, expected)
 	}
 }
+
+// TestCheckAndMarkOrderConcurrent verifies that the package-level dedup map
+// (Bug 2 fix) has no data races under concurrent access.
+// Run with: go test -race ./...
+func TestCheckAndMarkOrderConcurrent(t *testing.T) {
+	// Reset the global dedup map for this test.
+	orderDedupMu.Lock()
+	orderDedup = map[string]orderState{}
+	orderDedupMu.Unlock()
+
+	fp := signalFingerprint("TSLA", "CALL", "2026-05-16", "BUY", 370.0, 5)
+	fakeResult := orderState{OrderID: 99, Status: "PreSubmitted"}
+
+	var wg sync.WaitGroup
+	placedCount := 0
+	var placedMu sync.Mutex
+
+	// 20 goroutines all racing to check-and-mark the same fingerprint.
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			shouldPlace, _ := checkAndMarkOrder(fp, orderState{OrderID: 0, Status: "pending"})
+			if shouldPlace {
+				// Simulate broker returning a real order ID.
+				updateOrderState(fp, fakeResult)
+				placedMu.Lock()
+				placedCount++
+				placedMu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+
+	// Only one goroutine should have won the race to place.
+	if placedCount != 1 {
+		t.Errorf("expected exactly 1 placement from 20 concurrent goroutines, got %d", placedCount)
+	}
+
+	// Final state should reflect the placed order.
+	state, ok := readOrderState(fp)
+	if !ok {
+		t.Fatal("expected dedup entry to exist after placement")
+	}
+	if state.Status != "PreSubmitted" {
+		t.Errorf("expected status PreSubmitted, got %q", state.Status)
+	}
+}

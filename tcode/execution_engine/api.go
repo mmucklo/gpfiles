@@ -1700,12 +1700,25 @@ func (h *ConfigHandler) ServeOrdersPending(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	active    := []OrderResult{}
+	active    := []interface{}{}
 	cancelled := []OrderResult{}
+	maxPending := envIntOrDefault("MAX_PENDING_ORDERS", 2)
+	capOrders  := GetPendingCapOrders()
+	rankByID   := make(map[int]float64, len(capOrders))
+	for _, info := range capOrders {
+		rankByID[info.OrderID] = info.Rank
+	}
+
 	for _, o := range orders {
 		switch {
 		case pendingActiveStatuses[o.Status]:
-			active = append(active, o)
+			// Merge stored rank into the order DTO.
+			type pendingDTO struct {
+				OrderResult
+				Rank float64 `json:"rank"`
+			}
+			rank := rankByID[o.OrderID] // 0.0 if not tracked
+			active = append(active, pendingDTO{OrderResult: o, Rank: rank})
 		case o.Status == "Cancelled":
 			cancelled = append(cancelled, o)
 		}
@@ -1715,6 +1728,57 @@ func (h *ConfigHandler) ServeOrdersPending(w http.ResponseWriter, r *http.Reques
 		"active":    active,
 		"cancelled": cancelled,
 		"source":    string(ActiveExecutionMode),
+		"cap":       maxPending,
+	})
+}
+
+// ServeCapEvents returns the last 10 [REPLACE] / [REJECT-CAP] events for the UI feed.
+func (h *ConfigHandler) ServeCapEvents(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	events := GetCapEvents()
+	maxPending := envIntOrDefault("MAX_PENDING_ORDERS", 2)
+
+	type eventDTO struct {
+		Ts            string  `json:"ts"`
+		Kind          string  `json:"kind"`
+		CancelledID   int     `json:"cancelled_id,omitempty"`
+		CancelledRank float64 `json:"cancelled_rank"`
+		IncomingRank  float64 `json:"incoming_rank"`
+	}
+	dtos := make([]eventDTO, 0, len(events))
+	for _, ev := range events {
+		dtos = append(dtos, eventDTO{
+			Ts:            ev.Ts.Format(time.RFC3339),
+			Kind:          ev.Kind,
+			CancelledID:   ev.CancelledID,
+			CancelledRank: ev.CancelledRank,
+			IncomingRank:  ev.IncomingRank,
+		})
+	}
+
+	// Also include current pending rank snapshot.
+	capOrders := GetPendingCapOrders()
+	type rankDTO struct {
+		OrderID  int     `json:"order_id"`
+		Rank     float64 `json:"rank"`
+		PlacedAt string  `json:"placed_at"`
+	}
+	ranks := make([]rankDTO, 0, len(capOrders))
+	for _, o := range capOrders {
+		ranks = append(ranks, rankDTO{
+			OrderID:  o.OrderID,
+			Rank:     o.Rank,
+			PlacedAt: o.PlacedAt.Format(time.RFC3339),
+		})
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"events":      dtos,
+		"ranks":       ranks,
+		"cap":         maxPending,
+		"pending_cnt": activePendingCount(),
 	})
 }
 

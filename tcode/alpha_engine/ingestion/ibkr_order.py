@@ -308,12 +308,21 @@ def main() -> None:
     parser.add_argument("--client-id",   type=int, default=3, dest="client_id")
     args = parser.parse_args()
 
-    # Safety gate: refuse to execute unless mode is an IBKR paper mode.
-    if args.mode not in ("IBKR_PAPER", "IBKR_LIVE"):
+    # Normalise mode vocabulary: accept both legacy ("paper"/"live") and
+    # Phase 4+ ("IBKR_PAPER"/"IBKR_LIVE") strings before the safety gate.
+    _mode_norm = {
+        "IBKR_PAPER": "IBKR_PAPER",
+        "PAPER":      "IBKR_PAPER",
+        "IBKR_LIVE":  "IBKR_LIVE",
+        "LIVE":       "IBKR_LIVE",
+    }
+    normalised_mode = _mode_norm.get(args.mode.strip().upper(), "")
+    if not normalised_mode:
         print(json.dumps({
             "error": f"Refusing order: mode={args.mode!r} is not a real IBKR mode"
         }))
         sys.exit(1)
+    args.mode = normalised_mode
 
     if args.mode == "IBKR_LIVE":
         msg = "IBKR_LIVE mode is experimental and not enabled in this build"

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"sync"
 	"time"
 
@@ -41,6 +42,9 @@ type AlphaSignal struct {
 	IBKROrderID int    `json:"ibkr_order_id,omitempty"` // > 0 when order reached broker
 	ExecStatus  string `json:"exec_status,omitempty"`   // "submitted" | "failed" | "sim_filled" | "rejected"
 	ExecError   string `json:"exec_error,omitempty"`    // non-empty on failure
+
+	// Rank assigned at placement time (for pending-cap comparisons in UI).
+	SignalRank float64 `json:"signal_rank,omitempty"`
 }
 
 // orderState tracks the last-known status for a signal fingerprint so we can
@@ -48,6 +52,24 @@ type AlphaSignal struct {
 type orderState struct {
 	OrderID int
 	Status  string
+}
+
+// pendingOrderInfo stores rank and originating signal data alongside an IBKR
+// pending order.  Kept in-memory; TODO(phase-9): persist to SQLite for restart durability.
+type pendingOrderInfo struct {
+	OrderID  int
+	Rank     float64
+	Signal   AlphaSignal
+	PlacedAt time.Time
+}
+
+// capReplacementEvent is a ring-buffer entry for the UI event feed.
+type capReplacementEvent struct {
+	Ts            time.Time
+	Kind          string // "REPLACE" or "REJECT-CAP"
+	CancelledID   int
+	CancelledRank float64
+	IncomingRank  float64
 }
 
 // activeStatuses is the set of IBKR statuses that mean an order is already
@@ -60,6 +82,165 @@ var activeStatuses = map[string]bool{
 	"Filled":        true,
 }
 
+// ── Bug 2 fix: package-level dedup map protected by sync.RWMutex ─────────────
+// Lifted out of SignalSubscriber so the mutex is explicit and any future helper
+// (e.g. the cap-check path) cannot race against the NATS handler goroutine.
+
+var (
+	orderDedupMu sync.RWMutex
+	orderDedup   = map[string]orderState{}
+)
+
+// inFlightStatuses extends activeStatuses with an internal sentinel used while
+// the order placement is in progress.  Any goroutine that sees "pending" should
+// also skip re-entry, ensuring exactly one goroutine places per fingerprint.
+var inFlightStatuses = map[string]bool{
+	"PreSubmitted":  true,
+	"Submitted":     true,
+	"PendingSubmit": true,
+	"Filled":        true,
+	"pending":       true, // in-flight sentinel; cleared on error
+}
+
+// checkAndMarkOrder atomically checks whether a fingerprint has an active or
+// in-flight order and, if not, reserves it with a "pending" sentinel.
+// Returns (shouldPlace bool, prevState orderState).
+// The entire check+mark is under the write lock so concurrent goroutines cannot
+// both return shouldPlace=true for the same fingerprint (Bug 2 fix).
+func checkAndMarkOrder(fp string, newState orderState) (shouldPlace bool, prev orderState) {
+	orderDedupMu.Lock()
+	defer orderDedupMu.Unlock()
+	prev = orderDedup[fp]
+	if prev.Status != "" && inFlightStatuses[prev.Status] {
+		return false, prev
+	}
+	orderDedup[fp] = newState
+	return true, prev
+}
+
+// updateOrderState records the latest known broker state for a fingerprint.
+func updateOrderState(fp string, state orderState) {
+	orderDedupMu.Lock()
+	defer orderDedupMu.Unlock()
+	orderDedup[fp] = state
+}
+
+// readOrderState returns the last-known state for a fingerprint (read-only).
+func readOrderState(fp string) (orderState, bool) {
+	orderDedupMu.RLock()
+	defer orderDedupMu.RUnlock()
+	s, ok := orderDedup[fp]
+	return s, ok
+}
+
+// ── Pending-order cap ─────────────────────────────────────────────────────────
+
+var (
+	pendingCapMu     sync.RWMutex
+	pendingCapOrders = map[int]pendingOrderInfo{}
+)
+
+var (
+	capEventsMu sync.RWMutex
+	capEvents   []capReplacementEvent // last 10 events
+)
+
+func recordCapEvent(ev capReplacementEvent) {
+	capEventsMu.Lock()
+	defer capEventsMu.Unlock()
+	capEvents = append([]capReplacementEvent{ev}, capEvents...)
+	if len(capEvents) > 10 {
+		capEvents = capEvents[:10]
+	}
+}
+
+// GetCapEvents returns the last ≤10 cap replacement events for the UI feed.
+func GetCapEvents() []capReplacementEvent {
+	capEventsMu.RLock()
+	defer capEventsMu.RUnlock()
+	out := make([]capReplacementEvent, len(capEvents))
+	copy(out, capEvents)
+	return out
+}
+
+// computeRank scores a signal on [0,1] using confidence, return-on-cost, and recency.
+//
+//	rank = confidence * 0.5
+//	     + min((TakeProfit - LimitPrice) / LimitPrice, 1.0) * 0.3
+//	     + exp(-age_seconds / 600) * 0.2
+func computeRank(sig AlphaSignal) float64 {
+	// Confidence component
+	conf := math.Max(0, math.Min(1, sig.Confidence))
+
+	// Return-on-cost: (TP - LimitPrice) / LimitPrice, capped at 1.0
+	roi := 0.0
+	if sig.TargetLimitPrice > 0 && sig.TakeProfitPrice > sig.TargetLimitPrice {
+		roi = math.Min((sig.TakeProfitPrice-sig.TargetLimitPrice)/sig.TargetLimitPrice, 1.0)
+	}
+
+	// Recency: e^(-age/600) — fresh≈1, 10 min≈0.37, 30 min≈0.05
+	ageSec := time.Since(time.Unix(int64(sig.Timestamp), 0)).Seconds()
+	if ageSec < 0 {
+		ageSec = 0
+	}
+	recency := math.Exp(-ageSec / 600.0)
+
+	rank := conf*0.5 + roi*0.3 + recency*0.2
+	return math.Max(0, math.Min(1, rank))
+}
+
+// lowestRankedPending returns the pending order with the lowest rank.
+func lowestRankedPending() (lowest pendingOrderInfo, found bool) {
+	pendingCapMu.RLock()
+	defer pendingCapMu.RUnlock()
+	for _, info := range pendingCapOrders {
+		if !found || info.Rank < lowest.Rank {
+			lowest = info
+			found = true
+		}
+	}
+	return
+}
+
+// addPendingOrder records a newly placed order in the cap tracker.
+func addPendingOrder(orderID int, rank float64, sig AlphaSignal) {
+	pendingCapMu.Lock()
+	defer pendingCapMu.Unlock()
+	pendingCapOrders[orderID] = pendingOrderInfo{
+		OrderID:  orderID,
+		Rank:     rank,
+		Signal:   sig,
+		PlacedAt: time.Now(),
+	}
+}
+
+// removePendingOrder removes a cancelled or filled order from the cap tracker.
+func removePendingOrder(orderID int) {
+	pendingCapMu.Lock()
+	defer pendingCapMu.Unlock()
+	delete(pendingCapOrders, orderID)
+}
+
+// activePendingCount returns the number of orders tracked as pending.
+func activePendingCount() int {
+	pendingCapMu.RLock()
+	defer pendingCapMu.RUnlock()
+	return len(pendingCapOrders)
+}
+
+// GetPendingCapOrders returns a snapshot of tracked pending orders for the UI.
+func GetPendingCapOrders() []pendingOrderInfo {
+	pendingCapMu.RLock()
+	defer pendingCapMu.RUnlock()
+	out := make([]pendingOrderInfo, 0, len(pendingCapOrders))
+	for _, v := range pendingCapOrders {
+		out = append(out, v)
+	}
+	return out
+}
+
+// ── SignalSubscriber ──────────────────────────────────────────────────────────
+
 // SignalSubscriber listens for Alpha Engine broadcasts and triggers execution.
 type SignalSubscriber struct {
 	Conn       *nats.Conn
@@ -68,21 +249,15 @@ type SignalSubscriber struct {
 	Guard      *LiveCapitalGuard
 	Compliance *ComplianceGuard
 	Archive    *ArchiveSink
-
-	// orderFingerprints deduplicates signal → order calls.
-	// Key: "<strike>_<expiry>_<action>_<qty>"  Value: last-known orderState.
-	orderFingerprints   map[string]orderState
-	orderFingerprintsMu sync.Mutex
 }
 
 func NewSignalSubscriber(natsURL string, executor *IBKRExecutor, pricing *PricingEngine, guard *LiveCapitalGuard, compliance *ComplianceGuard, archive *ArchiveSink) *SignalSubscriber {
 	sub := &SignalSubscriber{
-		Executor:          executor,
-		Pricing:           pricing,
-		Guard:             guard,
-		Compliance:        compliance,
-		Archive:           archive,
-		orderFingerprints: make(map[string]orderState),
+		Executor:   executor,
+		Pricing:    pricing,
+		Guard:      guard,
+		Compliance: compliance,
+		Archive:    archive,
 	}
 	nc, err := nats.Connect(natsURL)
 	if err != nil {
@@ -207,10 +382,9 @@ func (s *SignalSubscriber) Start() {
 
 			// ── Dedup: skip if an order with the same fingerprint is already active ──
 			fp := signalFingerprint(ticker, sig.OptionType, sig.ExpirationDate, action, strike, absQty)
-			s.orderFingerprintsMu.Lock()
-			prev, exists := s.orderFingerprints[fp]
-			s.orderFingerprintsMu.Unlock()
-			if exists && activeStatuses[prev.Status] {
+			// checkAndMarkOrder is atomic (RWMutex-protected) — Bug 2 fix.
+			shouldPlace, prev := checkAndMarkOrder(fp, orderState{OrderID: 0, Status: "pending"})
+			if !shouldPlace {
 				log.Printf("[SKIP] duplicate signal — orderId=%d status=%s fingerprint=%s",
 					prev.OrderID, prev.Status, fp)
 				sig.IBKROrderID = prev.OrderID
@@ -219,29 +393,79 @@ func (s *SignalSubscriber) Start() {
 				break
 			}
 
+			// ── Pending-order cap: rank-based replacement ──────────────────────
+			incomingRank := computeRank(sig)
+			maxPending := envIntOrDefault("MAX_PENDING_ORDERS", 2)
+
+			if activePendingCount() >= maxPending {
+				lowest, found := lowestRankedPending()
+				if !found || incomingRank <= lowest.Rank {
+					log.Printf("[REJECT-CAP] pending queue full (%d/%d), incoming rank=%.3f <= lowest=%.3f",
+						activePendingCount(), maxPending, incomingRank, lowest.Rank)
+					sig.ExecStatus = "rejected"
+					sig.ExecError = fmt.Sprintf("pending_cap_full:rank=%.3f:cutoff=%.3f", incomingRank, lowest.Rank)
+					// Clear the tentative dedup entry so future higher-rank signals aren't blocked.
+					updateOrderState(fp, orderState{})
+					AddSignal(sig)
+					recordCapEvent(capReplacementEvent{
+						Ts:            time.Now(),
+						Kind:          "REJECT-CAP",
+						CancelledID:   0,
+						CancelledRank: lowest.Rank,
+						IncomingRank:  incomingRank,
+					})
+					break
+				}
+
+				// Incoming signal outranks the lowest pending — cancel it.
+				if err := CancelIBKROrder(lowest.OrderID); err != nil {
+					log.Printf("[CANCEL-FAIL] orderId=%d: %v", lowest.OrderID, err)
+					sig.ExecStatus = "rejected"
+					sig.ExecError = fmt.Sprintf("cancel_failed:orderId=%d", lowest.OrderID)
+					updateOrderState(fp, orderState{})
+					AddSignal(sig)
+					break
+				}
+				removePendingOrder(lowest.OrderID)
+				log.Printf("[REPLACE] cancelled orderId=%d (rank=%.3f) for better rank=%.3f",
+					lowest.OrderID, lowest.Rank, incomingRank)
+				recordCapEvent(capReplacementEvent{
+					Ts:            time.Now(),
+					Kind:          "REPLACE",
+					CancelledID:   lowest.OrderID,
+					CancelledRank: lowest.Rank,
+					IncomingRank:  incomingRank,
+				})
+			}
+
 			result, err := PlaceIBKROrder(contract, action, absQty, price)
 			if err != nil {
 				sig.ExecStatus = "failed"
 				sig.ExecError = err.Error()
+				// Clear the tentative dedup entry so the fingerprint can retry.
+				updateOrderState(fp, orderState{})
 				AddSignal(sig)
 				log.Printf("IBKR ORDER FAILED: %s %dx %s strike=%.2f expiry=%s price=%.4f — %v",
 					action, absQty, ticker, strike, sig.ExpirationDate, price, err)
 				return
 			}
 
-			// Record new fingerprint state.
-			s.orderFingerprintsMu.Lock()
-			s.orderFingerprints[fp] = orderState{OrderID: result.OrderID, Status: result.Status}
-			s.orderFingerprintsMu.Unlock()
+			// Commit the real broker state to the dedup map.
+			updateOrderState(fp, orderState{OrderID: result.OrderID, Status: result.Status})
+
+			// Track in pending cap map.
+			sig.SignalRank = incomingRank
+			addPendingOrder(result.OrderID, incomingRank, sig)
 
 			sig.IBKROrderID = result.OrderID
 			sig.ExecStatus = "submitted"
 			AddSignal(sig)
 
-			// Log only when this is genuinely a new order (not a status repeat).
-			if !exists || prev.Status != result.Status {
-				log.Printf("IBKR ORDER PLACED: orderId=%d status=%s symbol=%s strike=%.2f expiry=%s price=%.4f qty=%d",
-					result.OrderID, result.Status, ticker, strike, sig.ExpirationDate, price, absQty)
+			// Log only on genuine new orders (not status repeats).
+			// prev was captured by checkAndMarkOrder before we marked this fp.
+			if prev.Status == "" || prev.Status != result.Status {
+				log.Printf("IBKR ORDER PLACED: orderId=%d status=%s symbol=%s strike=%.2f expiry=%s price=%.4f qty=%d rank=%.3f",
+					result.OrderID, result.Status, ticker, strike, sig.ExpirationDate, price, absQty, incomingRank)
 			}
 
 			// Record in trade log as a real broker order (not a simulated fill).
