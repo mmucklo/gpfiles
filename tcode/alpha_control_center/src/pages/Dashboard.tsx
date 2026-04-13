@@ -288,9 +288,25 @@ interface IntelOptionsFlow {
     total_put_oi: number;
     error?: string;
 }
+interface IntelIndexEntry {
+    symbol: string;
+    change_pct: number;
+    ok: boolean;
+}
+
 interface IntelPremarket {
     is_premarket: boolean;
     is_signal_window: boolean;
+    // Structured regional data (Phase 11)
+    us_futures?: { ES: IntelIndexEntry; NQ: IntelIndexEntry };
+    europe?: { STOXX50E: IntelIndexEntry; GDAXI: IntelIndexEntry; FTSE: IntelIndexEntry };
+    asia?: { N225: IntelIndexEntry; HSI: IntelIndexEntry; SSE: IntelIndexEntry };
+    fx?: { USDJPY: IntelIndexEntry; EURUSD: IntelIndexEntry; DXY: IntelIndexEntry };
+    tsla_premarket?: { change_pct: number; volume: number; ok: boolean };
+    composite_bias?: string;
+    confidence?: number;
+    rationale?: string;
+    // Legacy flat fields (backward compat)
     futures_bias: string;
     es_change_pct: number;
     nq_change_pct: number;
@@ -298,6 +314,35 @@ interface IntelPremarket {
     tsla_premarket_change_pct: number;
     tsla_premarket_volume: number;
     overnight_catalyst: string | null;
+}
+
+interface IntelCongressTrade {
+    source: string;
+    name: string;
+    date_filed: string;
+    transaction_type: string;
+    amount: string;
+    committee: string;
+    committee_weight: number;
+    within_48h: boolean;
+}
+
+interface IntelCongress {
+    signal: string;
+    committee_weighted_buy_48h: boolean;
+    committee_weighted_sell_48h: boolean;
+    sentiment_multiplier: number;
+    filing_count: number;
+    recent_count: number;
+    recent_trades?: IntelCongressTrade[];
+}
+
+interface IntelCorrelationRegime {
+    regime: string;
+    tsla_qqq_5d_corr: number | null;
+    z_score: number | null;
+    mag7_avg_5d_corr: number | null;
+    error?: string | null;
 }
 
 interface Intel {
@@ -308,6 +353,8 @@ interface Intel {
     earnings: IntelEarnings;
     options_flow: IntelOptionsFlow;
     premarket?: IntelPremarket;
+    congress?: IntelCongress;
+    correlation_regime?: IntelCorrelationRegime;
 }
 
 interface LosingTrade {
@@ -2819,6 +2866,24 @@ const PreMarketPanel = ({ intel, isLoading }: { intel: Intel | null; isLoading?:
                             <button className="modal-close" onClick={() => setDrillTarget(null)} aria-label="Close">✕</button>
                         </div>
                         <div className="fill-drill-body">
+                            {drillTarget === 'Asia' && pm?.asia && (
+                                <>
+                                    <div className="fill-row"><span>Nikkei (^N225)</span><span>{changePctLabel(pm.asia.N225.change_pct)}</span></div>
+                                    <div className="fill-row"><span>Hang Seng (^HSI)</span><span>{changePctLabel(pm.asia.HSI.change_pct)}</span></div>
+                                    <div className="fill-row"><span>Shanghai (000001.SS)</span><span>{changePctLabel(pm.asia.SSE.change_pct)}</span></div>
+                                    <div className="fill-row"><span>Weight in composite</span><span style={{color:'#8b949e'}}>30%</span></div>
+                                    <div className="fill-row"><span>Source</span><span style={{fontSize:'11px'}}>yfinance (2d history)</span></div>
+                                </>
+                            )}
+                            {drillTarget === 'FX' && pm?.fx && (
+                                <>
+                                    <div className="fill-row"><span>USDJPY</span><span>{changePctLabel(pm.fx.USDJPY.change_pct)}</span></div>
+                                    <div className="fill-row"><span>EURUSD</span><span>{changePctLabel(pm.fx.EURUSD.change_pct)}</span></div>
+                                    <div className="fill-row"><span>DXY</span><span>{changePctLabel(pm.fx.DXY.change_pct)}</span></div>
+                                    <div className="fill-row"><span>FX override</span><span style={{color:'#8b949e',fontSize:'11px'}}>Moves &gt;0.5% add ±0.20 to confidence</span></div>
+                                    <div className="fill-row"><span>Source</span><span style={{fontSize:'11px'}}>yfinance (2d history)</span></div>
+                                </>
+                            )}
                             {drillTarget === 'TSLA' && pm && (
                                 <>
                                     <div className="fill-row">
@@ -2837,27 +2902,30 @@ const PreMarketPanel = ({ intel, isLoading }: { intel: Intel | null; isLoading?:
                             )}
                             {drillTarget === 'Futures' && pm && (
                                 <>
-                                    <div className="fill-row"><span>ES (S&P 500)</span><span>{changePctLabel(pm.es_change_pct)}</span></div>
-                                    <div className="fill-row"><span>NQ (Nasdaq 100)</span><span>{changePctLabel(pm.nq_change_pct)}</span></div>
-                                    <div className="fill-row"><span>RTY</span><span style={{color:'#8b949e'}}>Not yet wired — see Phase A stash</span></div>
-                                    <div className="fill-row"><span>Bias</span><span style={{color:biasColor(pm.futures_bias)}}>{pm.futures_bias}</span></div>
+                                    <div className="fill-row"><span>ES (S&P 500)</span><span>{changePctLabel(pm.us_futures?.ES?.change_pct ?? pm.es_change_pct)}</span></div>
+                                    <div className="fill-row"><span>NQ (Nasdaq 100)</span><span>{changePctLabel(pm.us_futures?.NQ?.change_pct ?? pm.nq_change_pct)}</span></div>
+                                    <div className="fill-row"><span>Bias</span><span style={{color:biasColor(pm.composite_bias ?? pm.futures_bias)}}>{pm.composite_bias ?? pm.futures_bias}</span></div>
                                     <div className="fill-row"><span>Source</span><span style={{fontSize:'11px'}}>yfinance ES=F, NQ=F (2d history)</span></div>
                                 </>
                             )}
                             {drillTarget === 'Europe' && pm && (
                                 <>
-                                    <div className="fill-row"><span>STOXX50E</span><span style={{color:biasColor(pm.europe_direction)}}>{pm.europe_direction}</span></div>
-                                    <div className="fill-row"><span>DAX (^GDAXI)</span><span style={{color:'#8b949e'}}>Not yet wired — see Phase A stash</span></div>
-                                    <div className="fill-row"><span>FTSE (^FTSE)</span><span style={{color:'#8b949e'}}>Not yet wired — see Phase A stash</span></div>
-                                    <div className="fill-row"><span>Source</span><span style={{fontSize:'11px'}}>yfinance ^STOXX50E (2d history)</span></div>
+                                    <div className="fill-row"><span>STOXX50E</span><span>{changePctLabel(pm.europe?.STOXX50E?.change_pct)}</span></div>
+                                    <div className="fill-row"><span>DAX (^GDAXI)</span><span>{changePctLabel(pm.europe?.GDAXI?.change_pct)}</span></div>
+                                    <div className="fill-row"><span>FTSE (^FTSE)</span><span>{changePctLabel(pm.europe?.FTSE?.change_pct)}</span></div>
+                                    <div className="fill-row"><span>Source</span><span style={{fontSize:'11px'}}>yfinance ^STOXX50E, ^GDAXI, ^FTSE (2d history)</span></div>
                                 </>
                             )}
                             {drillTarget === 'Composite Bias' && pm && (
                                 <>
-                                    <div className="fill-row"><span>ES change</span><span>{changePctLabel(pm.es_change_pct)} × 0.35</span></div>
-                                    <div className="fill-row"><span>NQ change</span><span>{changePctLabel(pm.nq_change_pct)} × 0.35</span></div>
-                                    <div className="fill-row"><span>Europe</span><span style={{color:biasColor(pm.europe_direction)}}>{pm.europe_direction} × 0.30</span></div>
-                                    <div className="fill-row"><span>Result</span><span style={{color:biasColor(pm.futures_bias),fontWeight:700}}>{pm.futures_bias}</span></div>
+                                    <div className="fill-row"><span>Asia (30%)</span><span>{[pm.asia?.N225, pm.asia?.HSI, pm.asia?.SSE].filter(Boolean).map(e => `${e!.symbol} ${e!.change_pct >= 0 ? '+' : ''}${e!.change_pct.toFixed(1)}%`).join(', ') || '—'}</span></div>
+                                    <div className="fill-row"><span>Europe (40%)</span><span>{[pm.europe?.STOXX50E, pm.europe?.GDAXI, pm.europe?.FTSE].filter(Boolean).map(e => `${e!.symbol} ${e!.change_pct >= 0 ? '+' : ''}${e!.change_pct.toFixed(1)}%`).join(', ') || '—'}</span></div>
+                                    <div className="fill-row"><span>US Futures (30%)</span><span>ES {changePctLabel(pm.us_futures?.ES?.change_pct ?? pm.es_change_pct)}, NQ {changePctLabel(pm.us_futures?.NQ?.change_pct ?? pm.nq_change_pct)}</span></div>
+                                    {pm.fx?.DXY?.ok && Math.abs(pm.fx.DXY.change_pct) > 0.3 && (
+                                        <div className="fill-row"><span>DXY override</span><span>{changePctLabel(pm.fx.DXY.change_pct)} (FX adj +0.20)</span></div>
+                                    )}
+                                    {pm.rationale && <div className="fill-row"><span>Rationale</span><span style={{fontSize:'11px'}}>{pm.rationale}</span></div>}
+                                    <div className="fill-row"><span>Result</span><span style={{color:biasColor(pm.composite_bias ?? pm.futures_bias),fontWeight:700}}>{pm.composite_bias ?? pm.futures_bias}</span></div>
                                 </>
                             )}
                         </div>
@@ -2902,79 +2970,96 @@ const PreMarketPanel = ({ intel, isLoading }: { intel: Intel | null; isLoading?:
                         <>
                             <div className="intel-row">
                                 <span className="intel-label">ES (S&P)</span>
-                                <span>{changePctLabel(pm.es_change_pct)}</span>
+                                <span>{changePctLabel(pm.us_futures?.ES?.change_pct ?? pm.es_change_pct)}</span>
                             </div>
                             <div className="intel-row">
                                 <span className="intel-label">NQ (NDX)</span>
-                                <span>{changePctLabel(pm.nq_change_pct)}</span>
-                            </div>
-                            <div className="intel-row">
-                                <span className="intel-label">RTY</span>
-                                <span style={{color:'#d29922',fontSize:'11px'}}>Not yet wired</span>
+                                <span>{changePctLabel(pm.us_futures?.NQ?.change_pct ?? pm.nq_change_pct)}</span>
                             </div>
                         </>
                     ) : (
-                        <div style={{color:'#8b949e',fontSize:'12px'}}>Not yet wired — see Phase A stash</div>
+                        <div style={{color:'#8b949e',fontSize:'12px'}}>Awaiting data</div>
                     )}
                 </div>
 
                 {/* European Indices */}
                 <div className="intel-card" role="region" aria-label="European Indices"
                      style={{cursor:'pointer'}} onClick={() => setDrillTarget('Europe')}>
-                    <Tooltip text="European equity session direction. STOXX50E wired; DAX/FTSE planned Phase A.">
+                    <Tooltip text="European equity session direction. STOXX50E, DAX, FTSE. Click for breakdown.">
                         <div className="intel-card-title">Europe</div>
                     </Tooltip>
-                    {pm ? (
+                    {pm?.europe ? (
                         <>
                             <div className="intel-row">
                                 <span className="intel-label">STOXX50E</span>
-                                <span style={{color:biasColor(pm.europe_direction)}}>{pm.europe_direction}</span>
+                                <span>{changePctLabel(pm.europe.STOXX50E.change_pct)}</span>
                             </div>
                             <div className="intel-row">
                                 <span className="intel-label">DAX</span>
-                                <span style={{color:'#d29922',fontSize:'11px'}}>Not yet wired</span>
+                                <span>{changePctLabel(pm.europe.GDAXI.change_pct)}</span>
                             </div>
                             <div className="intel-row">
                                 <span className="intel-label">FTSE</span>
-                                <span style={{color:'#d29922',fontSize:'11px'}}>Not yet wired</span>
+                                <span>{changePctLabel(pm.europe.FTSE.change_pct)}</span>
                             </div>
                         </>
                     ) : (
-                        <div style={{color:'#8b949e',fontSize:'12px'}}>Not yet wired — see Phase A stash</div>
+                        <div style={{color:'#8b949e',fontSize:'12px'}}>Awaiting data</div>
                     )}
                 </div>
 
-                {/* Asian Indices — Phase A stash */}
-                <div className="intel-card" role="region" aria-label="Asian Indices">
-                    <Tooltip text="Asian equity session indices — planned in Phase A stash. Not yet wired.">
+                {/* Asian Indices */}
+                <div className="intel-card" role="region" aria-label="Asian Indices"
+                     style={{cursor:'pointer'}} onClick={() => pm?.asia && setDrillTarget('Asia')}>
+                    <Tooltip text="Asian equity session closes. Nikkei, Hang Seng, Shanghai — 30% weight in composite bias.">
                         <div className="intel-card-title">Asia</div>
                     </Tooltip>
-                    <div className="intel-row"><span className="intel-label">Nikkei</span><span style={{color:'#d29922',fontSize:'11px'}}>Not yet wired</span></div>
-                    <div className="intel-row"><span className="intel-label">Hang Seng</span><span style={{color:'#d29922',fontSize:'11px'}}>Not yet wired</span></div>
-                    <div className="intel-row"><span className="intel-label">Shanghai</span><span style={{color:'#d29922',fontSize:'11px'}}>Not yet wired</span></div>
+                    {pm?.asia ? (
+                        <>
+                            <div className="intel-row"><span className="intel-label">Nikkei</span><span>{changePctLabel(pm.asia.N225.change_pct)}</span></div>
+                            <div className="intel-row"><span className="intel-label">Hang Seng</span><span>{changePctLabel(pm.asia.HSI.change_pct)}</span></div>
+                            <div className="intel-row"><span className="intel-label">Shanghai</span><span>{changePctLabel(pm.asia.SSE.change_pct)}</span></div>
+                        </>
+                    ) : (
+                        <div style={{color:'#8b949e',fontSize:'12px'}}>Awaiting data</div>
+                    )}
                 </div>
 
-                {/* FX Risk Barometer — Phase A stash */}
-                <div className="intel-card" role="region" aria-label="FX Risk Barometer">
-                    <Tooltip text="USDJPY carry, EURUSD, DXY — risk-on/risk-off signal. Planned Phase A.">
+                {/* FX Risk Barometer */}
+                <div className="intel-card" role="region" aria-label="FX Risk Barometer"
+                     style={{cursor:'pointer'}} onClick={() => pm?.fx && setDrillTarget('FX')}>
+                    <Tooltip text="DXY and USDJPY — risk-on/risk-off. Moves >0.5% adjust composite confidence ±0.20.">
                         <div className="intel-card-title">FX Barometer</div>
                     </Tooltip>
-                    <div className="intel-row"><span className="intel-label">USDJPY</span><span style={{color:'#d29922',fontSize:'11px'}}>Not yet wired</span></div>
-                    <div className="intel-row"><span className="intel-label">DXY</span><span style={{color:'#d29922',fontSize:'11px'}}>Not yet wired</span></div>
+                    {pm?.fx ? (
+                        <>
+                            <div className="intel-row"><span className="intel-label">USDJPY</span><span>{changePctLabel(pm.fx.USDJPY.change_pct)}</span></div>
+                            <div className="intel-row"><span className="intel-label">EURUSD</span><span>{changePctLabel(pm.fx.EURUSD.change_pct)}</span></div>
+                            <div className="intel-row"><span className="intel-label">DXY</span><span>{changePctLabel(pm.fx.DXY.change_pct)}</span></div>
+                        </>
+                    ) : (
+                        <div style={{color:'#8b949e',fontSize:'12px'}}>Awaiting data</div>
+                    )}
                 </div>
 
                 {/* Composite Bias */}
                 <div className="intel-card" role="region" aria-label="Composite Pre-Market Bias"
                      style={{cursor:'pointer'}} onClick={() => pm && setDrillTarget('Composite Bias')}>
-                    <Tooltip text="Composite pre-market bias computed from futures + Europe. Click for breakdown.">
+                    <Tooltip text="Composite bias: Asia 30% + Europe 40% + US Futures 30%, FX-adjusted. Click for breakdown.">
                         <div className="intel-card-title">Composite Bias</div>
                     </Tooltip>
                     {pm ? (
                         <>
                             <div className="intel-row">
                                 <span className="intel-label">Bias</span>
-                                <span style={{color:biasColor(pm.futures_bias),fontWeight:700,fontSize:'14px'}}>{pm.futures_bias}</span>
+                                <span style={{color:biasColor(pm.composite_bias ?? pm.futures_bias),fontWeight:700,fontSize:'14px'}}>{pm.composite_bias ?? pm.futures_bias}</span>
                             </div>
+                            {pm.confidence !== undefined && (
+                                <div className="intel-row">
+                                    <span className="intel-label">Confidence</span>
+                                    <span style={{color:'#8b949e'}}>{(pm.confidence * 100).toFixed(0)}%</span>
+                                </div>
+                            )}
                             <div className="intel-row">
                                 <span className="intel-label">Signal window</span>
                                 <span style={{color: pm.is_signal_window ? '#3fb950' : '#8b949e'}}>
@@ -3014,6 +3099,9 @@ const IntelPanel = ({ intel, isLoading }: { intel: Intel | null; isLoading?: boo
     const staleMs = Date.now() - intel.fetch_timestamp * 1000;
     const staleSec = Math.floor(staleMs / 1000);
     const staleLabel = staleSec < 60 ? `${staleSec}s ago` : `${Math.floor(staleSec / 60)}m ago`;
+
+    const congress = intel.congress;
+    const corrRegime = intel.correlation_regime;
 
     const vixCls = vix.vix_status === 'LOW' ? 'low'
         : vix.vix_status === 'HIGH' ? 'high'
@@ -3151,6 +3239,101 @@ const IntelPanel = ({ intel, isLoading }: { intel: Intel | null; isLoading?: boo
                         </>
                     ) : (
                         <div className="intel-no-news">Earnings date unavailable</div>
+                    )}
+                </div>
+
+                {/* Card 5: Congress STOCK Act Disclosure */}
+                <div className="intel-card" role="region" aria-label="Congressional STOCK Act Disclosures" data-testid="congress-card">
+                    <Tooltip text="STOCK Act filings: TSLA trades by Congress members within 48h, committee-weighted. Committee members (Senate Commerce / House Energy) = 2× weight. Buying boosts SENTIMENT confidence ×1.15; selling = ×0.85.">
+                        <div className="intel-card-title">Congress Trades</div>
+                    </Tooltip>
+                    {congress ? (
+                        <>
+                            <div className="intel-row">
+                                <span className="intel-label">Signal</span>
+                                <span style={{
+                                    color: congress.signal === 'BULLISH' ? '#3fb950' : congress.signal === 'BEARISH' ? '#f85149' : '#8b949e',
+                                    fontWeight: 600,
+                                }}>
+                                    {congress.signal}
+                                </span>
+                            </div>
+                            <div className="intel-row">
+                                <span className="intel-label">Recent (48h/$15k+)</span>
+                                <span style={{color: congress.recent_count > 0 ? '#f0883e' : '#8b949e'}}>{congress.recent_count}</span>
+                            </div>
+                            <div className="intel-row">
+                                <span className="intel-label">Total filings</span>
+                                <span style={{color:'#8b949e'}}>{congress.filing_count}</span>
+                            </div>
+                            {congress.committee_weighted_buy_48h && (
+                                <div className="intel-row"><span className="intel-label">Committee</span><span style={{color:'#3fb950',fontSize:'11px'}}>KEY CMTE BUYING</span></div>
+                            )}
+                            {congress.committee_weighted_sell_48h && (
+                                <div className="intel-row"><span className="intel-label">Committee</span><span style={{color:'#f85149',fontSize:'11px'}}>KEY CMTE SELLING</span></div>
+                            )}
+                            {congress.recent_trades && congress.recent_trades.slice(0, 2).map((t, i) => (
+                                <div key={i} className="intel-row" style={{fontSize:'10px',flexDirection:'column',alignItems:'flex-start',gap:'1px'}}>
+                                    <span style={{color:'#8b949e'}}>{t.name} — {t.transaction_type} {t.amount}</span>
+                                    <span style={{color:'#666'}}>{t.date_filed} {t.committee_weight >= 2 ? '(key cmte)' : ''}</span>
+                                </div>
+                            ))}
+                            <div className="intel-stale">Cached 1h · STOCK Act data</div>
+                        </>
+                    ) : (
+                        <div className="intel-no-news">No STOCK Act data</div>
+                    )}
+                </div>
+
+                {/* Card 6: TSLA↔Mag7 Correlation Regime */}
+                <div className="intel-card" role="region" aria-label="TSLA-Mag7 Correlation Regime" data-testid="correlation-regime-card">
+                    <Tooltip text="TSLA vs QQQ 5-day rolling correlation z-score. IDIOSYNCRATIC (z&lt;-2): TSLA decoupled, amplify SENTIMENT/CONTRARIAN ×1.20. MACRO_LOCKED (z&gt;+2): amplify MACRO ×1.20.">
+                        <div className="intel-card-title">Correlation Regime</div>
+                    </Tooltip>
+                    {corrRegime ? (
+                        <>
+                            <div className="intel-row">
+                                <span className="intel-label">Regime</span>
+                                <span style={{
+                                    color: corrRegime.regime === 'IDIOSYNCRATIC' ? '#f0883e'
+                                         : corrRegime.regime === 'MACRO_LOCKED' ? '#58a6ff'
+                                         : '#8b949e',
+                                    fontWeight: 700,
+                                    fontSize: '12px',
+                                }}>
+                                    {corrRegime.regime}
+                                </span>
+                            </div>
+                            {corrRegime.tsla_qqq_5d_corr !== null && (
+                                <div className="intel-row">
+                                    <span className="intel-label">TSLA↔QQQ 5d r</span>
+                                    <span style={{color:'#8b949e'}}>{corrRegime.tsla_qqq_5d_corr?.toFixed(3)}</span>
+                                </div>
+                            )}
+                            {corrRegime.z_score !== null && (
+                                <div className="intel-row">
+                                    <span className="intel-label">Z-score</span>
+                                    <span style={{color: Math.abs(corrRegime.z_score ?? 0) > 2 ? '#f0883e' : '#8b949e'}}>
+                                        {corrRegime.z_score !== null ? (corrRegime.z_score >= 0 ? '+' : '') + corrRegime.z_score?.toFixed(2) : '—'}
+                                    </span>
+                                </div>
+                            )}
+                            {corrRegime.mag7_avg_5d_corr !== null && (
+                                <div className="intel-row">
+                                    <span className="intel-label">Mag7 avg r</span>
+                                    <span style={{color:'#8b949e'}}>{corrRegime.mag7_avg_5d_corr?.toFixed(3)}</span>
+                                </div>
+                            )}
+                            {corrRegime.regime === 'IDIOSYNCRATIC' && (
+                                <div className="intel-row" style={{fontSize:'10px',color:'#f0883e'}}>SENTIMENT/CONTRARIAN ×1.20 conf</div>
+                            )}
+                            {corrRegime.regime === 'MACRO_LOCKED' && (
+                                <div className="intel-row" style={{fontSize:'10px',color:'#58a6ff'}}>MACRO ×1.20 conf</div>
+                            )}
+                            <div className="intel-stale">Cached 1h · yfinance 60d</div>
+                        </>
+                    ) : (
+                        <div className="intel-no-news">Correlation regime unavailable</div>
                     )}
                 </div>
             </div>

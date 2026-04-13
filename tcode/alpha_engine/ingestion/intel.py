@@ -229,7 +229,28 @@ def get_intel() -> dict:
         from ingestion.premarket import get_premarket_intel
         premarket = get_premarket_intel()
     except Exception as e:
-        premarket = {"is_premarket": False, "futures_bias": "FLAT"}
+        premarket = {"is_premarket": False, "futures_bias": "FLAT", "composite_bias": "FLAT"}
+
+    # Congressional STOCK Act disclosure lag-arb
+    try:
+        from ingestion.congress_trades import get_congress_trades
+        congress = get_congress_trades()
+    except Exception as e:
+        congress = {
+            "signal": "NEUTRAL",
+            "sentiment_multiplier": 1.0,
+            "committee_weighted_buy_48h": False,
+            "committee_weighted_sell_48h": False,
+            "recent_count": 0,
+            "filing_count": 0,
+        }
+
+    # TSLA↔Mag7 correlation regime (IDIOSYNCRATIC / MACRO_LOCKED / NORMAL)
+    try:
+        from ingestion.correlation_regime import get_correlation_regime
+        correlation_regime = get_correlation_regime()
+    except Exception as e:
+        correlation_regime = {"regime": "NORMAL", "error": str(e)}
 
     result = {
         "fetch_timestamp": now,
@@ -243,6 +264,8 @@ def get_intel() -> dict:
         "ev_sector": ev_sector,
         "macro_regime": macro_regime,
         "premarket": premarket,
+        "congress": congress,
+        "correlation_regime": correlation_regime,
     }
     # Sanitize NaN/Inf values (yfinance returns NaN for missing data)
     import math

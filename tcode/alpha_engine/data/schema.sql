@@ -1,6 +1,25 @@
 -- TSLA Alpha Engine: SQLite Schema
 -- Designed to be run idempotently (CREATE TABLE IF NOT EXISTS).
 
+-- fills_audit: immutable log of every Kelly sizing decision.
+-- Purpose: audit trail for regime-conditional Kelly (Feature 3).
+-- One row per signal that passed confidence threshold and entered sizing.
+CREATE TABLE IF NOT EXISTS fills_audit (
+  id VARCHAR(36) PRIMARY KEY,
+  ts DATETIME NOT NULL,
+  model_id VARCHAR(64),
+  regime VARCHAR(16),         -- RISK_ON | RISK_OFF | NEUTRAL
+  vix FLOAT,                  -- VIX spot at time of sizing
+  kelly_base_fraction FLOAT,  -- VIX-tier fraction (0.20 / 0.35 / 0.50)
+  vol_ratio FLOAT,            -- realized_vol / implied_vol
+  regime_multiplier FLOAT,    -- 0.5 if RISK_OFF, else 1.0
+  final_multiplier FLOAT,     -- kelly_base * min(1, vol_ratio) * regime_multiplier
+  contracts_sized INT,        -- final qty after all adjustments
+  kelly_wager_pct FLOAT,
+  confidence FLOAT,
+  raw_json TEXT
+);
+
 CREATE TABLE IF NOT EXISTS signals (
   id VARCHAR(36) PRIMARY KEY,
   ts DATETIME NOT NULL,

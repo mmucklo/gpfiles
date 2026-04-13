@@ -84,6 +84,37 @@ def _fetch_macro_data() -> dict:
         return {"yield_curve_inverted": False, "spy_trend": "NEUTRAL", "china_risk": 0.0}
 
 
+def _fetch_tsla_realized_vol(window: int = 20) -> float:
+    """
+    Compute TSLA 20-day annualized realized volatility from daily log-returns.
+
+    Realized vol = std(log-returns) * sqrt(252).  Used in vol-targeting Kelly to
+    compare against implied vol (ATM IV from options chain).
+
+    If IV > realized, options are "rich" → shrink position (vol ratio < 1).
+    If IV < realized, options are "cheap" relative to realized → hold at full Kelly.
+    """
+    try:
+        import yfinance as yf
+        import math
+        hist = yf.Ticker("TSLA").history(period="1mo")
+        closes = [float(c) for c in hist["Close"].tolist() if c > 0]
+        if len(closes) < window + 1:
+            return 0.0
+        # Use the most recent `window` return observations
+        closes = closes[-(window + 1):]
+        log_returns = [math.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))]
+        if len(log_returns) < 2:
+            return 0.0
+        mean = sum(log_returns) / len(log_returns)
+        variance = sum((r - mean) ** 2 for r in log_returns) / (len(log_returns) - 1)
+        realized_vol = (variance ** 0.5) * (252 ** 0.5)
+        return round(realized_vol, 4)
+    except Exception as e:
+        logger.debug(f"TSLA realized vol fetch failed: {e}")
+        return 0.0
+
+
 def _fetch_vix_term_structure() -> dict:
     """Fetch VIX term structure: spot VIX vs 9-day VIX."""
     try:
@@ -168,6 +199,10 @@ def get_macro_regime() -> dict:
         macro["regime"] = "RISK_ON"
     else:
         macro["regime"] = "NEUTRAL"
+
+    # Realized vol (20-day annualized) — used by publisher.py vol-targeting Kelly
+    # Cached at VIX frequency (5 min) since it's similarly latency-tolerant
+    macro["tsla_realized_vol"] = _fetch_tsla_realized_vol()
 
     return macro
 

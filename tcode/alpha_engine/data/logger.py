@@ -128,6 +128,10 @@ class DataLogger:
         }
         await self._queue.put(("account_snapshot", payload))
 
+    async def log_kelly_audit(self, audit: dict) -> None:
+        """Persist a Kelly sizing decision to fills_audit for post-trade attribution."""
+        await self._queue.put(("fills_audit", audit))
+
     async def log_options_snapshot(self, chain: list):
         """Persist a list of options chain rows."""
         ts = _isotime(time.time())
@@ -198,6 +202,17 @@ class DataLogger:
                         unrealized_pnl,realized_pnl,equity_with_loan)
                        VALUES (:ts,:net_liquidation,:cash_balance,:buying_power,
                                :unrealized_pnl,:realized_pnl,:equity_with_loan)""",
+                    payload,
+                )
+            elif kind == "fills_audit":
+                c.execute(
+                    """INSERT OR IGNORE INTO fills_audit
+                       (id,ts,model_id,regime,vix,kelly_base_fraction,vol_ratio,
+                        regime_multiplier,final_multiplier,contracts_sized,
+                        kelly_wager_pct,confidence,raw_json)
+                       VALUES (:id,:ts,:model_id,:regime,:vix,:kelly_base_fraction,
+                               :vol_ratio,:regime_multiplier,:final_multiplier,
+                               :contracts_sized,:kelly_wager_pct,:confidence,:raw_json)""",
                     payload,
                 )
             elif kind == "options_snapshot":

@@ -91,6 +91,70 @@ def validate_archetypes() -> list[str]:
     return errors
 
 
+def compute_regime_kelly(
+    confidence: float,
+    vix: float,
+    regime: str,
+    realized_vol: float,
+    implied_vol: float,
+) -> tuple[float, dict]:
+    """
+    Regime-conditional Kelly sizing formula.
+
+    Combined formula:
+        final_risk_pct = archetype.risk_pct × kelly_base_fraction × vol_ratio × regime_multiplier
+        capped at 0.02 (2% of NOTIONAL_ACCOUNT_SIZE, Phase 10 hard cap)
+
+    Kelly wager fraction:
+        full_kelly   = max(0, 2 × confidence − 1)   [binary-bet approximation, Thorp 2006]
+        kelly_wager  = full_kelly × final_multiplier
+
+    VIX-tiered base fraction (quarter-Kelly staircase):
+        VIX > 30  → 0.20   HIGH_VIX: 1/5 Kelly
+        VIX > 20  → 0.35   MED_VIX
+        VIX ≤ 20  → 0.50   LOW_VIX: half Kelly max
+
+    Vol-targeting (AQR 2012):
+        vol_ratio = min(1.0, realized_vol / implied_vol)
+        If IV > realized → options "rich" → size down proportionally
+
+    Regime multiplier:
+        RISK_OFF → 0.5 (halve position regardless of VIX)
+        else     → 1.0
+
+    Returns:
+        (kelly_wager_pct, audit_dict)  — audit_dict contains all intermediate values
+        for fills_audit table insertion.
+    """
+    full_kelly = max(0.0, 2 * confidence - 1)
+
+    if vix > 30:
+        kelly_base_fraction = 0.20
+    elif vix > 20:
+        kelly_base_fraction = 0.35
+    else:
+        kelly_base_fraction = 0.50
+
+    if implied_vol > 0 and realized_vol > 0:
+        vol_ratio = min(1.0, realized_vol / implied_vol)
+    else:
+        vol_ratio = 1.0
+
+    regime_multiplier = 0.5 if regime == "RISK_OFF" else 1.0
+    final_multiplier = kelly_base_fraction * vol_ratio * regime_multiplier
+    kelly_wager_pct = full_kelly * final_multiplier
+
+    audit = {
+        "regime": regime,
+        "vix": vix,
+        "kelly_base_fraction": kelly_base_fraction,
+        "vol_ratio": vol_ratio,
+        "regime_multiplier": regime_multiplier,
+        "final_multiplier": final_multiplier,
+    }
+    return kelly_wager_pct, audit
+
+
 if __name__ == "__main__":
     errs = validate_archetypes()
     if errs:

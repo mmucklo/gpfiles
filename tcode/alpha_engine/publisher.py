@@ -587,26 +587,38 @@ async def broadcast_loop():
                 moneyness = 1.03 if direction == SignalDirection.BULLISH else 0.97
                 rationale = f"EV Sector {sector_dir}: relative strength {rel_strength:+.1f}%"
 
-            # ── PREMARKET: driven by futures ──
+            # ── PREMARKET: composite bias from international indices + FX ──
             elif model == ModelType.PREMARKET:
                 pm = intel.get("premarket", {})
                 if not pm.get("is_signal_window", False):
                     continue
 
-                futures_bias = pm.get("futures_bias", "FLAT")
-                if futures_bias == "BULLISH":
+                # Use composite_bias (new multi-region scoring) with fallback to legacy futures_bias
+                composite_bias = pm.get("composite_bias") or pm.get("futures_bias", "FLAT")
+                if composite_bias == "BULLISH":
                     direction = SignalDirection.BULLISH
-                elif futures_bias == "BEARISH":
+                elif composite_bias == "BEARISH":
                     direction = SignalDirection.BEARISH
                 else:
                     continue
 
-                futures_mag = abs(pm.get("nq_change_pct", 0))
-                confidence = min(0.90, max(0.55, futures_mag / 3.0 + 0.5))
+                # Confidence from the composite scoring engine (includes FX override)
+                pm_confidence = pm.get("confidence", 0.0)
+                if pm_confidence > 0.0:
+                    confidence = pm_confidence
+                else:
+                    # Legacy fallback: derive from NQ magnitude
+                    futures_mag = abs(pm.get("nq_change_pct", 0))
+                    confidence = min(0.90, max(0.55, futures_mag / 3.0 + 0.5))
+
                 action = "BUY"
                 is_spread = False
                 moneyness = 1.03 if direction == SignalDirection.BULLISH else 0.97
-                rationale = f"PRE-MARKET: NQ {pm.get('nq_change_pct', 0):+.1f}%, ES {pm.get('es_change_pct', 0):+.1f}%"
+                pm_rationale = pm.get("rationale", "")
+                rationale = (
+                    f"PRE-MARKET: {pm_rationale}" if pm_rationale
+                    else f"PRE-MARKET: NQ {pm.get('nq_change_pct', 0):+.1f}%, ES {pm.get('es_change_pct', 0):+.1f}%"
+                )
 
             else:
                 continue
@@ -624,6 +636,30 @@ async def broadcast_loop():
             archetype_rr = archetype_cfg["rr"]
             archetype_expiry_str = archetype_cfg["expiry"]
 
+            # ── Correlation regime confidence adjustment ──────────────────────
+            # IDIOSYNCRATIC: TSLA decoupled from index → amplify SENTIMENT/CONTRARIAN,
+            #                dampen MACRO signals (idiosyncratic factors dominate)
+            # MACRO_LOCKED:  TSLA hyper-correlated → amplify MACRO, dampen SENTIMENT
+            corr_regime = intel.get("correlation_regime", {}).get("regime", "NORMAL")
+            if corr_regime == "IDIOSYNCRATIC":
+                if model in (ModelType.SENTIMENT, ModelType.CONTRARIAN):
+                    confidence = min(0.95, confidence * 1.20)
+                elif model == ModelType.MACRO:
+                    confidence *= 0.80
+            elif corr_regime == "MACRO_LOCKED":
+                if model == ModelType.SENTIMENT:
+                    confidence *= 0.80
+                elif model == ModelType.MACRO:
+                    confidence = min(0.95, confidence * 1.20)
+
+            # ── Congress trades SENTIMENT confidence adjustment ───────────────
+            # Committee-weighted buying in last 48h boosts SENTIMENT confidence;
+            # committee-weighted selling dampens it.
+            if model == ModelType.SENTIMENT:
+                congress_mult = intel.get("congress", {}).get("sentiment_multiplier", 1.0)
+                confidence = min(0.95, confidence * congress_mult)
+
+            # ── Strike selection ──
             opt_type = "CALL" if direction == SignalDirection.BULLISH else "PUT"
 
             # Non-contrarian/sector/premarket: determine action from VIX
@@ -699,19 +735,84 @@ async def broadcast_loop():
                     limit_price + archetype_rr * (limit_price - stop_loss_price), 2
                 )
 
-            # ── Fractional Kelly: 30% of raw Kelly, capped at 2% of notional ─
-            raw_edge = max(0.0, 2 * confidence - 1)
-            kelly_fraction = min(raw_edge * 0.3, 0.02)
+            # ── Regime-conditional Kelly + vol-targeting ─────────────────────
+            # Formula: final_risk_pct = archetype.risk_pct × vix_mult × regime_mult
+            # capped at 2% of notional (Phase 10 hard cap).
+            # kelly_wager_pct tracks the Kelly fraction for audit; notional sizing
+            # uses the archetype-adjusted final_risk_pct via compute_notional_sizing.
+            # Refs: Thorp (2006), AQR Vol-Targeting (2012), Man AHL (2025).
+            full_kelly = max(0.0, 2 * confidence - 1)
+
+            macro_data = intel.get("macro_regime", {})
+            vix_now = macro_data.get("vix_spot", 20) or 20
+            regime   = macro_data.get("regime", "NEUTRAL")
+            realized_vol = macro_data.get("tsla_realized_vol", 0.0) or 0.0
+            # ATM IV from the selected option row; use chain_iv computed above
+            implied_vol_for_sizing = chain_iv if chain_iv > 0 else 0.0
+
+            # VIX-tiered base fraction (quarter-Kelly staircase)
+            if vix_now > 30:
+                kelly_base_fraction = 0.20  # HIGH_VIX: 1/5 full Kelly
+            elif vix_now > 20:
+                kelly_base_fraction = 0.35  # MED_VIX
+            else:
+                kelly_base_fraction = 0.50  # LOW_VIX: half Kelly max
+
+            # Vol-targeting ratio: if IV > realized, options are "rich" → size down
+            if implied_vol_for_sizing > 0 and realized_vol > 0:
+                vol_ratio = min(1.0, realized_vol / implied_vol_for_sizing)
+            else:
+                vol_ratio = 1.0
+
+            # RISK_OFF override: half position in risk-off regime regardless of VIX
+            regime_multiplier = 0.5 if regime == "RISK_OFF" else 1.0
+
+            if model == ModelType.CONTRARIAN:
+                kelly = full_kelly * 0.02
+                final_multiplier = 0.02
+                final_risk_pct = min(0.02, archetype_risk_pct * 0.02)
+            else:
+                final_multiplier = kelly_base_fraction * vol_ratio * regime_multiplier
+                kelly = full_kelly * final_multiplier
+                # Archetype risk_pct scaled by same VIX/regime multipliers, hard-capped 2%
+                final_risk_pct = min(0.02, archetype_risk_pct * kelly_base_fraction * regime_multiplier)
 
             # ── Notional-risk sizing ─────────────────────────────────────────
             qty, _size_reason = compute_notional_sizing(
                 notional=NOTIONAL,
-                risk_pct=archetype_risk_pct,
+                risk_pct=final_risk_pct,
                 entry_price=limit_price,
                 stop_loss_price=stop_loss_price,
                 premium=limit_price,
                 is_spread=is_spread,
             )
+
+            # Log sizing decision to fills_audit (non-blocking: fire-and-forget via queue)
+            try:
+                import uuid as _uuid, json as _json
+                _audit_row = {
+                    "id": str(_uuid.uuid4()),
+                    "ts": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
+                    "model_id": model.name,
+                    "regime": regime,
+                    "vix": vix_now,
+                    "kelly_base_fraction": kelly_base_fraction if model != ModelType.CONTRARIAN else 0.02,
+                    "vol_ratio": vol_ratio,
+                    "regime_multiplier": regime_multiplier,
+                    "final_multiplier": final_multiplier,
+                    "contracts_sized": qty,
+                    "kelly_wager_pct": kelly,
+                    "confidence": confidence,
+                    "raw_json": _json.dumps({
+                        "model": model.name, "direction": direction.name,
+                        "strike": float(strike) if strike else 0,
+                        "implied_vol": implied_vol_for_sizing,
+                        "realized_vol": realized_vol,
+                    }),
+                }
+                await _logger.log_kelly_audit(_audit_row)
+            except Exception as _ae:
+                pass  # Audit failure must never block signal emission
 
             # Validate strikes at $5 chain increments
             strike = round(strike / 5.0) * 5.0
@@ -748,7 +849,7 @@ async def broadcast_loop():
                 target_limit_price=float(limit_price),
                 take_profit_price=float(take_profit_price),
                 stop_loss_price=float(stop_loss_price),
-                kelly_wager_pct=float(kelly_fraction),
+                kelly_wager_pct=float(kelly),
                 quantity=qty,
                 confidence_rationale=f"SNIPER ALERT: {rationale}",
                 implied_volatility=float(chain_iv),
