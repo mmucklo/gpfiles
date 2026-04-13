@@ -1,9 +1,12 @@
 """
 TSLA Alpha Engine: Real-Time Options Chain Ingestion
-Fetches the TSLA options chain via yfinance and provides strike selection
-anchored to real market data with liquidity filtering.
+Fetches the TSLA options chain and provides strike selection anchored to real
+market data with liquidity filtering.
 
-Source priority: IBKR (paper account) → TradingView → yfinance
+Source priority:
+  - OFF-HOURS + IBKR connected: IBKR (paper account) — OI/bid/ask available 24h
+  - IN-HOURS or IBKR unavailable: yfinance (reliable during market hours)
+
 Cache TTL: 60s — balances freshness vs. rate-limit safety.
 """
 import time
@@ -13,6 +16,23 @@ from typing import Optional
 import yfinance as yf
 
 logger = logging.getLogger("OptionsChain")
+
+
+# ── market-hours helper ───────────────────────────────────────────────────────
+
+def _is_us_market_hours() -> bool:
+    """Return True if current time is within US market hours (9:30–16:00 ET Mon–Fri)."""
+    import datetime
+    import zoneinfo
+    try:
+        tz = zoneinfo.ZoneInfo("America/New_York")
+    except Exception:
+        return True  # If we can't determine tz, default to "in-hours" (safer)
+    now = datetime.datetime.now(tz)
+    if now.weekday() >= 5:  # Saturday=5, Sunday=6
+        return False
+    t = now.hour * 60 + now.minute
+    return 570 <= t < 960  # 9:30 (570) – 16:00 (960)
 
 
 def round_to_chain_increment(price: float, increment: float = 5.0) -> float:
@@ -77,6 +97,76 @@ class OptionsChainCache:
             logger.warning(f"Failed to fetch expiry list: {e}")
         return self._expiry_list
 
+    # ── IBKR chain (off-hours, 24h data from paper account) ──────────────────
+
+    def _fetch_chain_ibkr(self, expiry: str) -> list[OptionRow]:
+        """
+        Fetch option chain via IBKR paper account.
+        Preferred off-hours: OI + bid/ask available around the clock.
+        Returns an empty list on any failure (yfinance fallback applies).
+        """
+        try:
+            from ingestion.ibkr_feed import get_ibkr_feed
+            from ib_insync import Option
+        except ImportError:
+            return []
+
+        try:
+            feed = get_ibkr_feed()
+            if not feed.is_connected():
+                return []
+            ib = feed._ib  # access underlying IB instance
+
+            expiry_ib = expiry.replace("-", "")
+
+            # Get the valid strikes for this expiry from IBKR
+            params_list = ib.reqSecDefOptParams(self.ticker, "", "STK", 0)
+            ib.sleep(2.0)
+
+            strikes: set = set()
+            for p in params_list:
+                if p.exchange == "SMART" and expiry_ib in p.expirations:
+                    strikes.update(p.strikes)
+
+            if not strikes:
+                logger.debug("IBKR chain: no strikes found for %s %s", self.ticker, expiry)
+                return []
+
+            rows: list[OptionRow] = []
+            # Limit to a reasonable number of strikes to avoid flooding IBKR
+            sorted_strikes = sorted(strikes)
+
+            for right_chr, opt_type in [("C", "CALL"), ("P", "PUT")]:
+                for strike_val in sorted_strikes:
+                    contract = Option(self.ticker, expiry_ib, strike_val, right_chr, "SMART")
+                    ticker_data = ib.reqMktData(contract, "", True, False)  # snapshot
+                    ib.sleep(0.2)
+
+                    bid  = float(ticker_data.bid  or 0)
+                    ask  = float(ticker_data.ask  or 0)
+                    last = float(ticker_data.last or ticker_data.close or 0)
+                    oi   = int(ticker_data.volume or 0)  # volume as OI proxy off-hours
+                    iv   = float(getattr(ticker_data, "impliedVol", 0) or 0)
+
+                    rows.append(OptionRow(
+                        strike=strike_val,
+                        option_type=opt_type,
+                        expiration_date=expiry,
+                        implied_volatility=iv,
+                        open_interest=oi,
+                        bid=bid,
+                        ask=ask,
+                        last_price=last,
+                    ))
+
+            logger.info("IBKR chain: %d contracts loaded for %s %s (source=ibkr)",
+                        len(rows), self.ticker, expiry)
+            return rows
+
+        except Exception as exc:
+            logger.debug("IBKR chain fetch failed (will fall back to yfinance): %s", exc)
+            return []
+
     # ── chain for one expiry ──────────────────────────────────────────────────
 
     def _fetch_chain(self, expiry: str) -> list[OptionRow]:
@@ -103,19 +193,40 @@ class OptionsChainCache:
         return rows
 
     def get_chain(self, expiry: str) -> list[OptionRow]:
-        """Return cached (or fresh) option rows for `expiry`."""
+        """
+        Return cached (or fresh) option rows for `expiry`.
+
+        Source selection:
+          - Off-hours + IBKR connected → IBKR snapshot (bid/ask available 24h)
+          - In-hours or IBKR unavailable → yfinance
+        """
         now = time.time()
         cached = self._cache.get(expiry)
         if cached and now - cached[0] < self.CACHE_TTL:
             return cached[1]
-        try:
-            rows = self._fetch_chain(expiry)
-            self._cache[expiry] = (now, rows)
-            logger.info(f"Options chain loaded: {expiry} — {len(rows)} contracts")
-            return rows
-        except Exception as e:
-            logger.warning(f"Chain fetch failed for {expiry}: {e}")
-            return cached[1] if cached else []
+
+        rows: list[OptionRow] = []
+        source = "yfinance"
+
+        # Prefer IBKR when off-hours: yfinance returns stale/zero OI off-hours
+        if not _is_us_market_hours():
+            ibkr_rows = self._fetch_chain_ibkr(expiry)
+            if ibkr_rows:
+                rows  = ibkr_rows
+                source = "ibkr"
+
+        if not rows:
+            # In-hours or IBKR unavailable: use yfinance
+            try:
+                rows = self._fetch_chain(expiry)
+                source = "yfinance"
+            except Exception as e:
+                logger.warning(f"Chain fetch failed for {expiry}: {e}")
+                return cached[1] if cached else []
+
+        self._cache[expiry] = (now, rows)
+        logger.info("Options chain loaded: %s — %d contracts (source=%s)", expiry, len(rows), source)
+        return rows
 
     # ── public API ────────────────────────────────────────────────────────────
 

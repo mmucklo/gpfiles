@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { isUSMarketHours, nextMarketOpenLabel } from '../lib/market_hours';
 import './IntegrityStatus.css';
 
 // ============================================================
@@ -41,21 +42,12 @@ function priceStatus(data: IntegrityData['price']): TrafficLight {
 }
 
 function chainStatus(data: IntegrityData['chain']): TrafficLight {
-  // Only flag stale during market hours
-  const now = new Date();
-  const fmt = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York',
-    hour: 'numeric',
-    minute: 'numeric',
-    hour12: false,
-  });
-  const parts = fmt.formatToParts(now);
-  const h = parseInt(parts.find(p => p.type === 'hour')?.value ?? '0', 10);
-  const m = parseInt(parts.find(p => p.type === 'minute')?.value ?? '0', 10);
-  const t = h * 60 + m;
-  const marketHours = t >= 570 && t < 960;
-
-  if (data.entry_count === 0) return 'red';
+  const marketHours = isUSMarketHours(new Date());
+  // Empty chain: RED during market hours (data should always be present),
+  //              AMBER off-hours (market closed — stale chain is expected).
+  if (data.entry_count === 0 && marketHours)  return 'red';
+  if (data.entry_count === 0 && !marketHours) return 'amber';
+  // Stale chain is only an error during market hours
   if (marketHours && data.age_sec > 300) return 'red';
   if (marketHours && data.age_sec > 120) return 'amber';
   return 'green';
@@ -222,6 +214,11 @@ const IntegrityPanel = ({ data, loading, onClose, openSection }: PanelProps) => 
                 </tbody>
               </table>
               <p className="integrity-rule">Rule: chain data &gt;5 min stale during market hours turns this panel RED.</p>
+              {cStatus === 'amber' && data.chain.entry_count === 0 && !isUSMarketHours() && (
+                <p className="integrity-rule" style={{ color: '#e6a200' }}>
+                  Chain data empty — market closed. Fresh chain arrives {nextMarketOpenLabel()}.
+                </p>
+              )}
             </div>
           )}
 

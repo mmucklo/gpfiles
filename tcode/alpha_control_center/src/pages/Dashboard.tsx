@@ -1729,6 +1729,30 @@ function fillWindowLabel(): string {
     return 'fills next Monday 9:30 AM ET';
 }
 
+/** Returns today's date as YYYY-MM-DD in Eastern Time for expiry comparison. */
+function todayET(): string {
+    const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York',
+        year: 'numeric', month: '2-digit', day: '2-digit',
+    }).formatToParts(new Date());
+    const y = parts.find(p => p.type === 'year')?.value  ?? '';
+    const mo = parts.find(p => p.type === 'month')?.value ?? '';
+    const d  = parts.find(p => p.type === 'day')?.value   ?? '';
+    return `${y}-${mo}-${d}`;
+}
+
+/** Minutes remaining until 15:30 ET today (negative if already past). */
+function minsUntilExpiryClose(): number {
+    const fmt = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York',
+        hour: 'numeric', minute: 'numeric', hour12: false,
+    });
+    const parts = fmt.formatToParts(new Date());
+    const h = parseInt(parts.find(p => p.type === 'hour')?.value ?? '0', 10);
+    const m = parseInt(parts.find(p => p.type === 'minute')?.value ?? '0', 10);
+    return (15 * 60 + 30) - (h * 60 + m);
+}
+
 const PendingOrderModal = ({ order, onClose }: { order: PendingOrder; onClose: () => void }) => {
     // Approximate rank breakdown for display (mirrors computeRank in subscriber.go).
     const rankBreakdown = order.rank != null ? { total: order.rank } : null;
@@ -1822,6 +1846,21 @@ const PendingOrdersPanel = ({
         ? '#e6a200'
         : '#3fb950';
 
+    // Expiring-today badge
+    const [today, setToday] = useState(todayET());
+    const [minsLeft, setMinsLeft] = useState(minsUntilExpiryClose());
+    useEffect(() => {
+        const id = setInterval(() => {
+            setToday(todayET());
+            setMinsLeft(minsUntilExpiryClose());
+        }, 60_000);
+        return () => clearInterval(id);
+    }, []);
+    const expiringTodayCount = active.filter(o => o.expiry === today).length;
+    const countdownLabel = minsLeft > 0
+        ? `auto-close in ${Math.floor(minsLeft / 60)}h ${minsLeft % 60}m`
+        : 'auto-close window passed';
+
     return (
         <>
             {selectedOrder && (
@@ -1865,6 +1904,17 @@ const PendingOrdersPanel = ({
                         >
                             {active.length}/{cap}
                         </span>
+                        {/* Expiring-today badge — shown when any pending order expires today */}
+                        {expiringTodayCount > 0 && (
+                            <span
+                                className="inline-badge"
+                                aria-label={`${expiringTodayCount} order${expiringTodayCount !== 1 ? 's' : ''} expiring today — ${countdownLabel}`}
+                                title={`${expiringTodayCount} expiring today — ${countdownLabel}`}
+                                style={{ background: 'rgba(248,81,73,0.12)', color: '#f85149', border: '1px solid rgba(248,81,73,0.4)' }}
+                            >
+                                ⚠ {expiringTodayCount} expiring
+                            </span>
+                        )}
                         {source && source !== 'SIMULATION' && (
                             <span className="inline-badge" style={{ background: 'rgba(139,92,246,0.15)', color: '#a371f7' }}>
                                 {source.replace('IBKR_', '')}

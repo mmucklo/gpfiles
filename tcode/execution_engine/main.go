@@ -265,6 +265,19 @@ func main() {
 			ActiveExecutionMode)
 	}
 
+	// ── Phase 9: startup global cancel ──────────────────────────────────────
+	// Clear any orphan pre-bracket naked orders before the first bracket is placed.
+	// Gated: STARTUP_CLEAR_ORPHANS=1 (default) and non-SIMULATION mode.
+	if ActiveExecutionMode != ModeSimulation && envIntOrDefault("STARTUP_CLEAR_ORPHANS", 1) == 1 {
+		log.Println("[STARTUP] Global cancel issued to clear pre-bracket naked orders")
+		count, gcErr := StartupGlobalCancel()
+		if gcErr != nil {
+			log.Printf("[STARTUP] Global cancel failed (non-fatal): %v", gcErr)
+		} else {
+			log.Printf("[STARTUP] %d open orders after global cancel", count)
+		}
+	}
+
 	subscriber.Start()
 	defer subscriber.Close()
 
@@ -273,6 +286,35 @@ func main() {
 		for {
 			executor.Portfolio.UpdatePositions()
 			time.Sleep(5 * time.Second)
+		}
+	}()
+
+	// ── Phase 9: expiry-close scheduler ──────────────────────────────────────
+	// Scans open positions every 60s between 15:25–15:35 ET on weekdays.
+	// Places SELL MARKET TIF=DAY for any position expiring today.
+	go func() {
+		loc, locErr := time.LoadLocation("America/New_York")
+		if locErr != nil {
+			log.Printf("[EXPIRY-CLOSE] Could not load America/New_York timezone: %v", locErr)
+			return
+		}
+		for {
+			time.Sleep(60 * time.Second)
+			if ActiveExecutionMode == ModeSimulation {
+				continue
+			}
+			etNow := time.Now().In(loc)
+			wd    := etNow.Weekday()
+			if wd == time.Saturday || wd == time.Sunday {
+				continue
+			}
+			etMin := etNow.Hour()*60 + etNow.Minute()
+			if etMin >= 15*60+25 && etMin <= 15*60+35 {
+				today := etNow.Format("2006-01-02")
+				log.Printf("[EXPIRY-CLOSE] Window open (ET %02d:%02d) — checking positions expiring %s",
+					etNow.Hour(), etNow.Minute(), today)
+				ExpiryCloseIBKROrders(today)
+			}
 		}
 	}()
 

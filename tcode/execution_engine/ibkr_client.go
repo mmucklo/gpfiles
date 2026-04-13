@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 )
@@ -120,6 +121,155 @@ func CancelIBKROrder(orderID int) error {
 		return fmt.Errorf("ibkr_order cancel: %s", errMsg)
 	}
 	return nil
+}
+
+// BracketOrderResult is the JSON payload returned by ibkr_order.py for a bracket placement.
+type BracketOrderResult struct {
+	ParentOrderID     int    `json:"parent_order_id"`
+	TakeProfitOrderID int    `json:"take_profit_order_id"`
+	StopLossOrderID   int    `json:"stop_loss_order_id"`
+	GroupOCA          string `json:"group_oca"`
+	Status            string `json:"status"`
+	Timestamp         string `json:"timestamp"`
+	Error             string `json:"error,omitempty"`
+}
+
+// PlaceBracketIBKROrder shells out to ibkr_order.py to place a bracket order
+// (parent LIMIT + TP LMT + SL STP LMT in an OCO group).
+//
+// When sig.StopLossUnderlyingPrice > 0 it passes --underlying-stop to condition
+// the SL leg on the underlying stock price instead of option premium.
+// If the underlying stop is 0, a 3% below-spot derived value is used.
+//
+// ANTI-PATTERN: never call PlaceIBKROrder as fallback if this returns an error.
+// A failed bracket = rejected signal, full stop.
+func PlaceBracketIBKROrder(contract OptionContract, sig AlphaSignal, action string, qty int, limitPrice float64) (*BracketOrderResult, error) {
+	mode     := string(ActiveExecutionMode)
+	clientID := AllocateClientID()
+
+	args := []string{
+		"-m", "ingestion.ibkr_order", "place",
+		"--symbol",      contract.Symbol,
+		"--contract",    contract.OptionType,
+		"--strike",      fmt.Sprintf("%g", contract.Strike),
+		"--expiry",      contract.Expiry,
+		"--action",      action,
+		"--quantity",    fmt.Sprintf("%d", qty),
+		"--limit-price", fmt.Sprintf("%g", limitPrice),
+		"--take-profit", fmt.Sprintf("%g", sig.TakeProfitPrice),
+		"--stop-loss",   fmt.Sprintf("%g", sig.StopLossPrice),
+		"--mode",        mode,
+		"--client-id",   fmt.Sprintf("%d", clientID),
+	}
+
+	// Determine underlying stop price: explicit field or 3%-below-spot derivation
+	underlyingStop := sig.StopLossUnderlyingPrice
+	if underlyingStop <= 0 && sig.UnderlyingPrice > 0 {
+		underlyingStop = sig.UnderlyingPrice * 0.97
+		log.Printf("[BRACKET] Derived underlying stop %.2f (spot=%.2f × 0.97)", underlyingStop, sig.UnderlyingPrice)
+	}
+	if underlyingStop > 0 {
+		args = append(args, "--underlying-stop",
+			fmt.Sprintf("%s:%.4f", contract.Symbol, underlyingStop))
+	}
+
+	cmd := exec.Command(pythonBin(), args...)
+	cmd.Dir = "./alpha_engine"
+	cmd.Env = os.Environ()
+
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("bracket ibkr_order subprocess failed: %w (stderr=%s)", err, stderrString(err))
+	}
+
+	var result BracketOrderResult
+	if err := json.Unmarshal(out, &result); err != nil {
+		return nil, fmt.Errorf("bracket ibkr_order JSON parse: %w (raw=%s)", err, string(out))
+	}
+	if result.Error != "" {
+		return nil, fmt.Errorf("bracket ibkr_order error: %s", result.Error)
+	}
+	if result.ParentOrderID <= 0 || result.TakeProfitOrderID <= 0 || result.StopLossOrderID <= 0 {
+		return nil, fmt.Errorf(
+			"bracket returned zero orderId: parent=%d tp=%d sl=%d — rejecting to avoid unprotected leg",
+			result.ParentOrderID, result.TakeProfitOrderID, result.StopLossOrderID,
+		)
+	}
+	return &result, nil
+}
+
+// StartupGlobalCancel issues reqGlobalCancel() via ibkr_order.py to clear any
+// orphan pre-Phase-9 naked orders at engine startup.
+// Gated in main.go behind STARTUP_CLEAR_ORPHANS=1 (default 1).
+func StartupGlobalCancel() (int, error) {
+	clientID := AllocateClientID()
+	args := []string{
+		"-m", "ingestion.ibkr_order", "global_cancel",
+		"--mode",      string(ActiveExecutionMode),
+		"--client-id", fmt.Sprintf("%d", clientID),
+	}
+
+	cmd := exec.Command(pythonBin(), args...)
+	cmd.Dir = "./alpha_engine"
+	cmd.Env = os.Environ()
+
+	out, err := cmd.Output()
+	if err != nil {
+		return 0, fmt.Errorf("global_cancel failed: %w (stderr=%s)", err, stderrString(err))
+	}
+
+	var result struct {
+		OpenOrdersAfter int    `json:"open_orders_after"`
+		Error           string `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(out, &result); err != nil {
+		return 0, fmt.Errorf("global_cancel JSON: %w", err)
+	}
+	if result.Error != "" {
+		return 0, fmt.Errorf("global_cancel: %s", result.Error)
+	}
+	return result.OpenOrdersAfter, nil
+}
+
+// ExpiryCloseIBKROrders market-sells all open option positions expiring on expiryDate.
+// Called from the expiry-close scheduler goroutine between 15:25–15:35 ET.
+func ExpiryCloseIBKROrders(expiryDate string) {
+	clientID := AllocateClientID()
+	args := []string{
+		"-m", "ingestion.ibkr_order", "expiry_close",
+		"--expiry-date", expiryDate,
+		"--mode",        string(ActiveExecutionMode),
+		"--client-id",   fmt.Sprintf("%d", clientID),
+	}
+
+	cmd := exec.Command(pythonBin(), args...)
+	cmd.Dir = "./alpha_engine"
+	cmd.Env = os.Environ()
+
+	out, err := cmd.Output()
+	if err != nil {
+		log.Printf("[EXPIRY-CLOSE] subprocess failed: %v (stderr=%s)", err, stderrString(err))
+		return
+	}
+
+	var result struct {
+		ClosedCount int    `json:"closed_count"`
+		OrderIDs    []int  `json:"order_ids"`
+		Error       string `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(out, &result); err != nil {
+		log.Printf("[EXPIRY-CLOSE] JSON parse failed: %v (raw=%s)", err, string(out))
+		return
+	}
+	if result.Error != "" {
+		log.Printf("[EXPIRY-CLOSE] error: %s", result.Error)
+		return
+	}
+	for _, oid := range result.OrderIDs {
+		log.Printf("[EXPIRY-CLOSE] orderId=%d", oid)
+		removePendingOrder(oid)
+	}
+	log.Printf("[EXPIRY-CLOSE] closed %d expiring positions for %s", result.ClosedCount, expiryDate)
 }
 
 // OpenIBKROrders returns the list of currently open orders from IBKR.

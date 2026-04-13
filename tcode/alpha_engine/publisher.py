@@ -185,6 +185,7 @@ class SignalPublisher:
             "target_limit_price": signal.target_limit_price,
             "take_profit_price": signal.take_profit_price,
             "stop_loss_price": signal.stop_loss_price,
+            "stop_loss_underlying_price": getattr(signal, "stop_loss_underlying_price", 0.0),
             "kelly_wager_pct": signal.kelly_wager_pct,
             "quantity": signal.quantity,
             "confidence_rationale": signal.confidence_rationale,

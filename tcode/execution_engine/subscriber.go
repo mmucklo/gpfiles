@@ -30,9 +30,10 @@ type AlphaSignal struct {
 	Action            string  `json:"action"`
 	ExpirationDate    string  `json:"expiration_date"`
 	TargetLimitPrice  float64 `json:"target_limit_price"`
-	TakeProfitPrice   float64 `json:"take_profit_price"`
-	StopLossPrice     float64 `json:"stop_loss_price"`
-	KellyWagerPct     float64 `json:"kelly_wager_pct"`
+	TakeProfitPrice            float64 `json:"take_profit_price"`
+	StopLossPrice              float64 `json:"stop_loss_price"`
+	StopLossUnderlyingPrice    float64 `json:"stop_loss_underlying_price,omitempty"`
+	KellyWagerPct              float64 `json:"kelly_wager_pct"`
 	Quantity          int     `json:"quantity"`
 	ConfidenceRationale string                 `json:"confidence_rationale"`
 	ImpliedVolatility   float64                `json:"implied_volatility"`
@@ -438,35 +439,57 @@ func (s *SignalSubscriber) Start() {
 				})
 			}
 
-			result, err := PlaceIBKROrder(contract, action, absQty, price)
-			if err != nil {
-				sig.ExecStatus = "failed"
-				sig.ExecError = err.Error()
-				// Clear the tentative dedup entry so the fingerprint can retry.
-				updateOrderState(fp, orderState{})
-				AddSignal(sig)
-				log.Printf("IBKR ORDER FAILED: %s %dx %s strike=%.2f expiry=%s price=%.4f — %v",
-					action, absQty, ticker, strike, sig.ExpirationDate, price, err)
-				return
+			// ── Route to bracket (TP+SL both set) or single-leg ──────────────
+			var placedOrderID int
+			var placedStatus  string
+
+			if sig.TakeProfitPrice > 0 && sig.StopLossPrice > 0 {
+				// Bracket path: parent LIMIT + TP LMT + SL STP LMT (OCO group).
+				// NEVER fall back to single-leg if bracket fails.
+				bracketResult, bracketErr := PlaceBracketIBKROrder(contract, sig, action, absQty, price)
+				if bracketErr != nil {
+					log.Printf("[BRACKET-REJECT] signal=%s reason=%s", fp, bracketErr.Error())
+					sig.ExecStatus = "failed"
+					sig.ExecError  = bracketErr.Error()
+					updateOrderState(fp, orderState{})
+					AddSignal(sig)
+					break
+				}
+				placedOrderID = bracketResult.ParentOrderID
+				placedStatus  = bracketResult.Status
+				log.Printf("IBKR BRACKET PLACED: parentId=%d tpId=%d slId=%d oca=%s status=%s symbol=%s strike=%.2f rank=%.3f",
+					bracketResult.ParentOrderID, bracketResult.TakeProfitOrderID, bracketResult.StopLossOrderID,
+					bracketResult.GroupOCA, placedStatus, ticker, strike, incomingRank)
+			} else {
+				// Single-leg limit order path (no TP/SL provided).
+				result, err := PlaceIBKROrder(contract, action, absQty, price)
+				if err != nil {
+					sig.ExecStatus = "failed"
+					sig.ExecError  = err.Error()
+					updateOrderState(fp, orderState{})
+					AddSignal(sig)
+					log.Printf("IBKR ORDER FAILED: %s %dx %s strike=%.2f expiry=%s price=%.4f — %v",
+						action, absQty, ticker, strike, sig.ExpirationDate, price, err)
+					return
+				}
+				placedOrderID = result.OrderID
+				placedStatus  = result.Status
+				if prev.Status == "" || prev.Status != result.Status {
+					log.Printf("IBKR ORDER PLACED: orderId=%d status=%s symbol=%s strike=%.2f expiry=%s price=%.4f qty=%d rank=%.3f",
+						result.OrderID, result.Status, ticker, strike, sig.ExpirationDate, price, absQty, incomingRank)
+				}
 			}
 
 			// Commit the real broker state to the dedup map.
-			updateOrderState(fp, orderState{OrderID: result.OrderID, Status: result.Status})
+			updateOrderState(fp, orderState{OrderID: placedOrderID, Status: placedStatus})
 
-			// Track in pending cap map.
+			// Track parent order in pending cap map.
 			sig.SignalRank = incomingRank
-			addPendingOrder(result.OrderID, incomingRank, sig)
+			addPendingOrder(placedOrderID, incomingRank, sig)
 
-			sig.IBKROrderID = result.OrderID
-			sig.ExecStatus = "submitted"
+			sig.IBKROrderID = placedOrderID
+			sig.ExecStatus  = "submitted"
 			AddSignal(sig)
-
-			// Log only on genuine new orders (not status repeats).
-			// prev was captured by checkAndMarkOrder before we marked this fp.
-			if prev.Status == "" || prev.Status != result.Status {
-				log.Printf("IBKR ORDER PLACED: orderId=%d status=%s symbol=%s strike=%.2f expiry=%s price=%.4f qty=%d rank=%.3f",
-					result.OrderID, result.Status, ticker, strike, sig.ExpirationDate, price, absQty, incomingRank)
-			}
 
 			// Record in trade log as a real broker order (not a simulated fill).
 			cost := float64(absQty) * price * 100

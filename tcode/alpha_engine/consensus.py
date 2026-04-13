@@ -60,6 +60,7 @@ class ModelSignal:
     target_limit_price: float = 0.0
     take_profit_price: float = 0.0
     stop_loss_price: float = 0.0
+    stop_loss_underlying_price: float = 0.0  # Phase 9: underlying stop for option SL leg (0 = derive from spot)
     kelly_wager_pct: float = 0.0
     quantity: int = 0
     confidence_rationale: str = "No rationale provided."
