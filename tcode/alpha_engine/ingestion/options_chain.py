@@ -81,13 +81,78 @@ class OptionRow:
         return (self.ask - self.bid) / mid
 
 
+def _enrich_greeks_vectorized(rows, spot, ttm_years, rate):
+    """
+    Vectorized Black-Scholes greeks using numpy (~10x faster than per-row loop).
+    Mutates rows in-place.  Rows with greeks_source=="ibkr" are skipped.
+    Returns number of unavailable rows.
+    """
+    import numpy as np
+
+    # Split into numpy-eligible vs already-set
+    eligible = [r for r in rows if r.greeks_source != "ibkr" and r.implied_volatility and r.implied_volatility > 0]
+    unavail_rows = [r for r in rows if r.greeks_source != "ibkr" and not (r.implied_volatility and r.implied_volatility > 0)]
+
+    for r in unavail_rows:
+        r.greeks_source = "unavailable"
+
+    if not eligible:
+        return len(unavail_rows)
+
+    K = np.array([r.strike for r in eligible], dtype=np.float64)
+    iv = np.array([r.implied_volatility for r in eligible], dtype=np.float64)
+    is_put = np.array([r.option_type == "PUT" for r in eligible], dtype=bool)
+
+    sqrt_T = np.sqrt(ttm_years) if ttm_years > 0 else 0.0
+
+    if ttm_years <= 0 or sqrt_T == 0:
+        # At/past expiry: delta is intrinsic, other greeks zero
+        for i, r in enumerate(eligible):
+            itm = (not is_put[i] and spot >= K[i]) or (is_put[i] and spot <= K[i])
+            r.delta = (1.0 if not is_put[i] else -1.0) if itm else 0.0
+            r.gamma = 0.0
+            r.theta = 0.0
+            r.vega = 0.0
+            r.greeks_source = "computed_bs"
+        return len(unavail_rows)
+
+    S = float(spot)
+    r_rate = float(rate)
+
+    d1 = (np.log(S / K) + (r_rate + 0.5 * iv * iv) * ttm_years) / (iv * sqrt_T)
+    d2 = d1 - iv * sqrt_T
+
+    # Vectorized normal CDF/PDF
+    from scipy.special import ndtr as _ndtr  # type: ignore
+    N_d1 = _ndtr(d1)
+    N_d2 = _ndtr(d2)
+    pdf_d1 = np.exp(-0.5 * d1 * d1) / np.sqrt(2.0 * np.pi)
+
+    delta = np.where(is_put, N_d1 - 1.0, N_d1)
+    gamma = pdf_d1 / (S * iv * sqrt_T)
+    disc = np.exp(-r_rate * ttm_years)
+    theta_call = -(S * pdf_d1 * iv) / (2 * sqrt_T) - r_rate * K * disc * N_d2
+    theta = np.where(is_put, theta_call + r_rate * K * disc, theta_call) / 365.0
+    vega = S * sqrt_T * pdf_d1
+
+    for i, r in enumerate(eligible):
+        r.delta = float(round(delta[i], 6))
+        r.gamma = float(round(gamma[i], 8))
+        r.theta = float(round(theta[i], 6))
+        r.vega = float(round(vega[i], 6))
+        r.greeks_source = "computed_bs"
+
+    return len(unavail_rows)
+
+
 def enrich_greeks(rows: list["OptionRow"], spot: float, ttm_years: float) -> None:
     """
     Mutate each OptionRow in-place: fill delta/gamma/theta/vega/greeks_source.
 
     Priority:
       1. IBKR modelGreeks already set on the row (greeks_source == "ibkr") — skip.
-      2. BS-compute from IV when IV > 0.
+      2. BS-compute from IV when IV > 0.  Vectorized via numpy+scipy when available;
+         falls back to per-row scalar loop.
       3. Mark greeks_source="unavailable" and leave None values.
 
     Also tracks degradation: logs WARNING if >50% of rows end up unavailable.
@@ -95,10 +160,33 @@ def enrich_greeks(rows: list["OptionRow"], spot: float, ttm_years: float) -> Non
     try:
         import sys as _sys
         _sys.path.insert(0, "/home/builder/src/gpfiles/tcode/alpha_engine")
-        from pricing.greeks import compute_bs_greeks, get_risk_free_rate
+        from pricing.greeks import get_risk_free_rate
         rate = get_risk_free_rate()
     except Exception as exc:
         logger.warning("enrich_greeks: cannot import greeks module: %s", exc)
+        return
+
+    # Try vectorized path first (numpy+scipy available)
+    try:
+        unavail_count = _enrich_greeks_vectorized(rows, spot, ttm_years, rate)
+        total = len(rows)
+        if total > 0 and unavail_count / total > 0.5:
+            logger.warning(
+                "Greeks data degraded: %d/%d strikes missing greeks. "
+                "Strike selector will skip unavailable rows.",
+                unavail_count, total,
+            )
+        return
+    except ImportError:
+        logger.debug("enrich_greeks: numpy/scipy unavailable, falling back to scalar loop")
+    except Exception as exc:
+        logger.warning("enrich_greeks: vectorized path failed (%s), falling back to scalar loop", exc)
+
+    # Scalar fallback: per-row loop
+    try:
+        from pricing.greeks import compute_bs_greeks
+    except Exception as exc:
+        logger.warning("enrich_greeks: cannot import compute_bs_greeks: %s", exc)
         return
 
     unavail_count = 0
@@ -108,13 +196,22 @@ def enrich_greeks(rows: list["OptionRow"], spot: float, ttm_years: float) -> Non
             continue
         iv = row.implied_volatility
         if iv and iv > 0:
-            g = compute_bs_greeks(spot, row.strike, ttm_years, rate, iv, row.option_type)
-            row.delta = g["delta"]
-            row.gamma = g["gamma"]
-            row.theta = g["theta"]
-            row.vega = g["vega"]
-            row.greeks_source = g["greeks_source"]
-            if g["greeks_source"] == "unavailable":
+            try:
+                g = compute_bs_greeks(spot, row.strike, ttm_years, rate, iv, row.option_type)
+                row.delta = g["delta"]
+                row.gamma = g["gamma"]
+                row.theta = g["theta"]
+                row.vega = g["vega"]
+                row.greeks_source = g["greeks_source"]
+                if g["greeks_source"] == "unavailable":
+                    unavail_count += 1
+            except Exception as exc:
+                # Per-row failure must not abort the entire chain enrichment loop.
+                logger.warning(
+                    "[GREEKS-ENRICH-FAIL] strike=%.1f iv=%.4f reason=%s",
+                    row.strike, iv, exc,
+                )
+                row.greeks_source = "unavailable"
                 unavail_count += 1
         else:
             row.greeks_source = "unavailable"
@@ -196,50 +293,95 @@ class OptionsChainCache:
                 return []
 
             rows: list[OptionRow] = []
-            # Limit to a reasonable number of strikes to avoid flooding IBKR
+            # Limit to a reasonable number of strikes to avoid flooding IBKR.
+            # Cap at 40 strikes centred around ATM to keep request volume manageable.
             sorted_strikes = sorted(strikes)
+            if len(sorted_strikes) > 40:
+                # Trim to 40 strikes nearest to the middle of the range
+                mid_idx = len(sorted_strikes) // 2
+                half = 20
+                sorted_strikes = sorted_strikes[max(0, mid_idx - half): mid_idx + half]
 
+            # ── Batch-qualify all contracts before reqMktData ─────────────────
+            # IBKR Error 321 ("Invalid contract id") fires when reqMktData receives
+            # an unqualified contract (conId == 0).  qualifyContracts fills conIds
+            # via reqContractDetails in one round-trip per batch.
+            all_contracts = []
+            contract_meta = []
             for right_chr, opt_type in [("C", "CALL"), ("P", "PUT")]:
                 for strike_val in sorted_strikes:
-                    contract = Option(self.ticker, expiry_ib, strike_val, right_chr, "SMART")
-                    ticker_data = ib.reqMktData(contract, "", True, False)  # snapshot
-                    ib.sleep(0.2)
+                    c = Option(self.ticker, expiry_ib, strike_val, right_chr, "SMART")
+                    all_contracts.append(c)
+                    contract_meta.append((opt_type, strike_val))
 
-                    bid  = float(ticker_data.bid  or 0)
-                    ask  = float(ticker_data.ask  or 0)
-                    last = float(ticker_data.last or ticker_data.close or 0)
-                    oi   = int(ticker_data.volume or 0)  # volume as OI proxy off-hours
-                    iv   = float(getattr(ticker_data, "impliedVol", 0) or 0)
-                    vol_today = int(getattr(ticker_data, "volume", 0) or 0)
+            try:
+                qualified = ib.qualifyContracts(*all_contracts)
+                ib.sleep(1.0)  # allow qualification responses to arrive
+            except Exception as qe:
+                logger.warning("IBKR chain: qualifyContracts failed for %s %s: %s",
+                               self.ticker, expiry, qe)
+                return []
 
-                    row = OptionRow(
-                        strike=strike_val,
-                        option_type=opt_type,
-                        expiration_date=expiry,
-                        implied_volatility=iv,
-                        open_interest=oi,
-                        bid=bid,
-                        ask=ask,
-                        last_price=last,
-                        volume=vol_today,
+            # Build a map from (right, strike) → qualified contract for fast lookup
+            qual_map: dict[tuple, object] = {}
+            for qc in qualified:
+                if qc is not None and getattr(qc, "conId", 0) > 0:
+                    qual_map[(qc.right, qc.strike)] = qc
+
+            for (opt_type, strike_val), contract in zip(contract_meta, all_contracts):
+                right_chr = "C" if opt_type == "CALL" else "P"
+                qc = qual_map.get((right_chr, float(strike_val)))
+                if qc is None:
+                    # Contract not qualified — skip rather than trigger Error 321
+                    logger.debug(
+                        "[CONTRACT-QUAL-FAIL] %s %s %s %s — skipped",
+                        self.ticker, expiry_ib, strike_val, right_chr,
                     )
+                    continue
 
-                    # IBKR modelGreeks — prefer native greeks when available
-                    model_greeks = getattr(ticker_data, "modelGreeks", None)
-                    if model_greeks is not None:
-                        try:
-                            row.delta = float(model_greeks.delta or 0)
-                            row.gamma = float(model_greeks.gamma or 0)
-                            row.theta = float(model_greeks.theta or 0)
-                            row.vega  = float(model_greeks.vega or 0)
-                            row.greeks_source = "ibkr"
-                        except Exception:
-                            pass  # fall through to BS-compute
+                ticker_data = ib.reqMktData(qc, "", True, False)  # snapshot
+                ib.sleep(0.15)
 
-                    rows.append(row)
+                bid  = float(ticker_data.bid  or 0)
+                ask  = float(ticker_data.ask  or 0)
+                last = float(ticker_data.last or ticker_data.close or 0)
+                oi   = int(getattr(ticker_data, "openInterest", 0) or 0)
+                if oi == 0:
+                    # fall back to volume as OI proxy off-hours
+                    oi = int(getattr(ticker_data, "volume", 0) or 0)
+                iv   = float(getattr(ticker_data, "impliedVol", 0) or 0)
+                vol_today = int(getattr(ticker_data, "volume", 0) or 0)
 
-            logger.info("IBKR chain: %d contracts loaded for %s %s (source=ibkr)",
-                        len(rows), self.ticker, expiry)
+                row = OptionRow(
+                    strike=strike_val,
+                    option_type=opt_type,
+                    expiration_date=expiry,
+                    implied_volatility=iv,
+                    open_interest=oi,
+                    bid=bid,
+                    ask=ask,
+                    last_price=last,
+                    volume=vol_today,
+                )
+
+                # IBKR modelGreeks — prefer native greeks when available
+                model_greeks = getattr(ticker_data, "modelGreeks", None)
+                if model_greeks is not None:
+                    try:
+                        row.delta = float(model_greeks.delta or 0)
+                        row.gamma = float(model_greeks.gamma or 0)
+                        row.theta = float(model_greeks.theta or 0)
+                        row.vega  = float(model_greeks.vega or 0)
+                        row.greeks_source = "ibkr"
+                    except Exception:
+                        pass  # fall through to BS-compute
+
+                rows.append(row)
+
+            logger.info(
+                "IBKR chain: %d contracts loaded for %s %s (source=ibkr, qualified=%d/%d)",
+                len(rows), self.ticker, expiry, len(qual_map), len(all_contracts),
+            )
             return rows
 
         except Exception as exc:
@@ -317,7 +459,10 @@ class OptionsChainCache:
                 _spot, _ = get_spot_with_fallback(self.ticker)
             except Exception:
                 _spot = 0.0
-            enrich_greeks(rows, spot=_spot, ttm_years=ttm)
+            try:
+                enrich_greeks(rows, spot=_spot, ttm_years=ttm)
+            except Exception as _ge:
+                logger.warning("enrich_greeks call failed for %s: %s", expiry, _ge)
 
         self._cache[expiry] = (now, rows)
         logger.info("Options chain loaded: %s — %d contracts (source=%s)", expiry, len(rows), source)

@@ -21,7 +21,7 @@ from ingestion.ibkr_feed import get_ibkr_feed
 from data.logger import DataLogger
 from config.archetypes import get_archetype, MODEL_ARCHETYPE_MAP, ARCHETYPES
 from strike_selector import select_strike, StrikeSelection
-from heartbeat import emit_heartbeat_async, set_nats_conn
+from heartbeat import emit_heartbeat_async, set_nats_conn, emit_rejection
 
 # ── Notional account size: NEVER use portfolio NAV for sizing. ───────────────
 # Default $25k represents the small-account discipline target for live trading.
@@ -770,16 +770,26 @@ async def broadcast_loop():
                 if strike_meta is None:
                     print(f"[STRIKE-REJECT] {model.name} {opt_type} {archetype_name}: "
                           f"no strike passed all filters (expiry={chain_expiry})")
+                    emit_rejection(
+                        model=model.name, opt_type=opt_type, archetype=archetype_name,
+                        reason="no_strike_passed_filters", expiry=chain_expiry,
+                    )
                     continue
                 strike = strike_meta.strike
                 chain_iv = strike_meta.iv
             except Exception as _se:
-                # Chain unavailable — moneyness fallback with warning
-                moneyness = 1.0 + (target_delta - 0.5) * 0.2
-                strike = round(spot * moneyness / 5.0) * 5.0
-                chain_iv = 0.0
-                print(f"[WARN] strike_selector failed ({_se}), using moneyness fallback "
-                      f"strike=${strike:.0f}")
+                # Chain unavailable — log [STRIKE-SELECT-FAIL] and DROP the signal.
+                # Per Phase 14 mandate: never emit a signal with an unvalidated strike.
+                # The old moneyness fallback path is intentionally removed.
+                print(
+                    f"[STRIKE-SELECT-FAIL] {model.name} {opt_type} {archetype_name}: "
+                    f"strike_selector raised exception (expiry={chain_expiry}): {_se}"
+                )
+                emit_rejection(
+                    model=model.name, opt_type=opt_type, archetype=archetype_name,
+                    reason=f"strike_selector_exception:{_se}", expiry=chain_expiry,
+                )
+                continue
 
             # ── MANDATE: Never sell naked. All SELL actions → credit spread ──
             if action == "SELL":

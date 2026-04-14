@@ -2735,6 +2735,29 @@ func (h *ConfigHandler) ServeSystemAlerts(w http.ResponseWriter, r *http.Request
 	w.Write(out)
 }
 
+// ServeSignalRejections handles GET /api/signals/rejections — dropped signals in the last hour.
+func (h *ConfigHandler) ServeSignalRejections(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	hours := r.URL.Query().Get("hours")
+	if hours == "" {
+		hours = "1"
+	}
+
+	cmd := exec.Command("./alpha_engine/venv/bin/python",
+		"alpha_engine/heartbeat_query.py", "rejections", hours)
+	cmd.Dir = "/home/builder/src/gpfiles/tcode"
+	cmd.Env = os.Environ()
+
+	out, err := cmd.Output()
+	if err != nil {
+		w.Write([]byte(`{"count":0,"items":[]}`))
+		return
+	}
+	w.Write(out)
+}
+
 func RequestLoggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
