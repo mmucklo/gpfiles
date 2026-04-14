@@ -20,6 +20,7 @@ from ingestion.tv_feed import validate_spot_price, get_tv_cache, TVFeedError
 from ingestion.ibkr_feed import get_ibkr_feed
 from data.logger import DataLogger
 from config.archetypes import get_archetype, MODEL_ARCHETYPE_MAP, ARCHETYPES
+from strike_selector import select_strike, StrikeSelection
 from heartbeat import emit_heartbeat_async, set_nats_conn
 
 # ── Notional account size: NEVER use portfolio NAV for sizing. ───────────────
@@ -30,6 +31,33 @@ NOTIONAL: int = int(os.getenv("NOTIONAL_ACCOUNT_SIZE", "25000"))
 # Gross outstanding cap: total option premium outstanding must not exceed this
 # fraction of notional. Prevents over-allocation during fast-firing periods.
 _GROSS_OUTSTANDING_CAP_PCT = 0.06  # 6% of notional
+
+# ── Phase 14: Liquidity floor env vars ───────────────────────────────────────
+# Runtime-configurable — override in .tsla-alpha.env without redeploy.
+# Publisher uses these for Layer-1 gate inside strike_selector.
+_LIQ_MIN_OI    = int(os.getenv("MIN_OPTION_OPEN_INTEREST", "500"))
+_LIQ_MIN_VOL   = int(os.getenv("MIN_OPTION_VOLUME_TODAY",  "50"))
+_LIQ_MAX_SPR   = float(os.getenv("MAX_BID_ASK_PCT",         "0.15"))
+_LIQ_MIN_BID   = float(os.getenv("MIN_ABSOLUTE_BID",        "0.10"))
+
+# ── Phase 14: Chop gating — per-archetype multipliers ─────────────────────
+# CHOPPY archetypes that block long-premium:
+_CHOP_BLOCK_ARCHETYPES = {
+    "DIRECTIONAL_STRONG", "DIRECTIONAL_STD", "MEAN_REVERT", "SCALP_0DTE",
+}
+# MIXED confidence multipliers:
+_CHOP_MIXED_MULT = {
+    "DIRECTIONAL_STRONG": 0.7,
+    "DIRECTIONAL_STD": 0.7,
+    "MEAN_REVERT": 0.7,
+    "SCALP_0DTE": 0.6,
+    "VOL_PLAY": 1.1,  # vega benefits from compression
+}
+
+# Chop regime cache (publisher fetches once per signal-gen cycle, cached 60s)
+_chop_cache_ts: float = 0.0
+_chop_cache_val: dict = {"regime": "TRENDING", "score": 0.0}
+_CHOP_CACHE_TTL = 60
 
 STALENESS_MAX_SECONDS = 300  # 5 minutes
 DIVERGENCE_MAX_PCT = 0.5     # 0.5% max IBKR vs TV divergence
@@ -305,6 +333,7 @@ class SignalPublisher:
             "confidence_rationale": signal.confidence_rationale,
             "implied_volatility": signal.implied_volatility,
             "spot_sources": spot_sources or {},
+            "strike_selection_meta": getattr(signal, "strike_selection_meta", None),
         }
         
         await self.nc.publish("tsla.alpha.signals", json.dumps(payload).encode())
@@ -639,6 +668,11 @@ async def broadcast_loop():
             archetype_risk_pct = archetype_cfg["risk_pct"]
             archetype_rr = archetype_cfg["rr"]
             archetype_expiry_str = archetype_cfg["expiry"]
+            archetype_name = next(
+                k for k, v in ARCHETYPES.items() if v is archetype_cfg
+            ) if archetype_cfg in ARCHETYPES.values() else "DIRECTIONAL_STD"
+            # Resolve archetype name from MODEL_ARCHETYPE_MAP
+            archetype_name = MODEL_ARCHETYPE_MAP.get(model.name, "DIRECTIONAL_STD")
 
             # ── Correlation regime confidence adjustment ──────────────────────
             # IDIOSYNCRATIC: TSLA decoupled from index → amplify SENTIMENT/CONTRARIAN,
@@ -663,6 +697,39 @@ async def broadcast_loop():
                 congress_mult = intel.get("congress", {}).get("sentiment_multiplier", 1.0)
                 confidence = min(0.95, confidence * congress_mult)
 
+            # ── Phase 14: Chop regime gating ─────────────────────────────────
+            global _chop_cache_ts, _chop_cache_val
+            now_ts_chop = time.time()
+            if now_ts_chop - _chop_cache_ts > _CHOP_CACHE_TTL:
+                try:
+                    _chop_cache_val = intel.get("chop_regime", {"regime": "TRENDING", "score": 0.0})
+                    _chop_cache_ts = now_ts_chop
+                except Exception:
+                    pass
+            chop_regime_result = _chop_cache_val
+            chop_label = chop_regime_result.get("regime", "TRENDING")
+            chop_score = chop_regime_result.get("score", 0.0)
+            rv_iv_ratio = chop_regime_result.get("components", {}).get("rv_iv_ratio", 1.0) or 1.0
+
+            if chop_label == "CHOPPY":
+                if archetype_name in _CHOP_BLOCK_ARCHETYPES:
+                    print(f"[CHOP-BLOCK] archetype={archetype_name} model={model.name} "
+                          f"chop_score={chop_score:.2f}")
+                    continue
+                if archetype_name == "VOL_PLAY" and rv_iv_ratio < 0.7:
+                    print(f"[CHOP-BLOCK] archetype=VOL_PLAY model={model.name} "
+                          f"rv_iv_ratio={rv_iv_ratio:.3f}<0.7 chop_score={chop_score:.2f}")
+                    continue
+            elif chop_label == "MIXED":
+                mult = _CHOP_MIXED_MULT.get(archetype_name, 0.7)
+                if mult < 1.0:
+                    print(f"[CHOP-DOWNWEIGHT] archetype={archetype_name} model={model.name} "
+                          f"confidence {confidence:.3f} × {mult:.1f} chop_score={chop_score:.2f}")
+                elif mult > 1.0:
+                    print(f"[CHOP-BOOST] archetype={archetype_name} model={model.name} "
+                          f"confidence {confidence:.3f} × {mult:.1f} chop_score={chop_score:.2f}")
+                confidence = min(0.95, confidence * mult)
+
             # ── Strike selection ──
             opt_type = "CALL" if direction == SignalDirection.BULLISH else "PUT"
 
@@ -672,28 +739,46 @@ async def broadcast_loop():
                     vix_now = intel.get("macro_regime", {}).get("vix_spot", 20) or 20
                     action = "SELL" if vix_now > 25 and confidence > 0.8 else "BUY"
 
-            # ── Delta-targeted strike selection ──────────────────────────────
-            # Use snap_strike_by_delta; fall back to moneyness if chain is cold.
+            # ── Phase 14: Greeks-aware strike selection ──────────────────────
             chain_expiry = compute_expiry(archetype_expiry_str)
+            strike_meta: StrikeSelection | None = None
+            chain_iv = 0.0
+            strike = 0.0
+
             try:
-                # Nearest liquid expiry that matches archetype DTE
                 _nearest = get_chain_cache().nearest_expiry_with_liquidity(min_dte=0)
                 if _nearest:
                     chain_expiry = _nearest
-                strike, chain_iv, chain_expiry = get_chain_cache().snap_strike_by_delta(
-                    spot, opt_type, target_delta, expiry=chain_expiry
+                chain_rows = get_chain_cache().get_chain(chain_expiry)
+                sel_direction = (
+                    "LONG_CALL" if opt_type == "CALL" and action == "BUY"
+                    else "SHORT_CALL" if opt_type == "CALL" and action == "SELL"
+                    else "LONG_PUT" if opt_type == "PUT" and action == "BUY"
+                    else "SHORT_PUT"
                 )
-                if strike < 0:
-                    # No strike within ±5 delta of target — reject signal
-                    print(f"[REJECT] delta-miss: no {opt_type} strike within 5 delta of "
-                          f"{target_delta:.2f} for {model.name} (expiry={chain_expiry})")
+                strike_meta = select_strike(
+                    chain_rows=chain_rows,
+                    archetype_name=archetype_name,
+                    spot=spot,
+                    direction=sel_direction,
+                    expiry=chain_expiry,
+                    min_open_interest=_LIQ_MIN_OI,
+                    min_volume_today=_LIQ_MIN_VOL,
+                    max_bid_ask_pct=_LIQ_MAX_SPR,
+                    min_absolute_bid=_LIQ_MIN_BID,
+                )
+                if strike_meta is None:
+                    print(f"[STRIKE-REJECT] {model.name} {opt_type} {archetype_name}: "
+                          f"no strike passed all filters (expiry={chain_expiry})")
                     continue
+                strike = strike_meta.strike
+                chain_iv = strike_meta.iv
             except Exception as _se:
-                # Chain unavailable — moneyness fallback
+                # Chain unavailable — moneyness fallback with warning
                 moneyness = 1.0 + (target_delta - 0.5) * 0.2
                 strike = round(spot * moneyness / 5.0) * 5.0
                 chain_iv = 0.0
-                print(f"[WARN] delta-snap failed ({_se}), using moneyness fallback "
+                print(f"[WARN] strike_selector failed ({_se}), using moneyness fallback "
                       f"strike=${strike:.0f}")
 
             # ── MANDATE: Never sell naked. All SELL actions → credit spread ──
@@ -858,6 +943,12 @@ async def broadcast_loop():
                 confidence_rationale=f"SNIPER ALERT: {rationale}",
                 implied_volatility=float(chain_iv),
             )
+            # Phase 14: attach strike selection meta for UI drill-down + attribution
+            if strike_meta is not None:
+                import dataclasses as _dc
+                scan_sig.strike_selection_meta = _dc.asdict(strike_meta)
+            # Tag signal with chop regime so logger can persist it for attribution
+            scan_sig.chop_label = chop_label
 
             # ── Commission viability gate ─────────────────────────────────────
             if scan_sig.quantity > 0 and scan_sig.take_profit_price > 0:
