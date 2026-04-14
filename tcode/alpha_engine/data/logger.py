@@ -132,6 +132,31 @@ class DataLogger:
         """Persist a Kelly sizing decision to fills_audit for post-trade attribution."""
         await self._queue.put(("fills_audit", audit))
 
+    async def log_heartbeat(self, component: str, status: str = "ok",
+                            detail: str | None = None,
+                            pid: int | None = None,
+                            uptime_sec: int | None = None) -> None:
+        """Persist a process heartbeat row (non-blocking, queued)."""
+        payload = {
+            "component":  component,
+            "ts":         _isotime(time.time()),
+            "status":     status,
+            "detail":     detail,
+            "pid":        pid,
+            "uptime_sec": uptime_sec,
+        }
+        await self._queue.put(("heartbeat", payload))
+
+    async def log_system_alert(self, component: str, status: str, message: str) -> None:
+        """Persist a system alert when a component goes RED."""
+        payload = {
+            "ts":        _isotime(time.time()),
+            "component": component,
+            "status":    status,
+            "message":   message,
+        }
+        await self._queue.put(("system_alert", payload))
+
     async def log_options_snapshot(self, chain: list):
         """Persist a list of options chain rows."""
         ts = _isotime(time.time())
@@ -221,6 +246,19 @@ class DataLogger:
                        (ts,ticker,strike,expiration_date,option_type,iv,bid,ask,oi,delta)
                        VALUES (:ts,:ticker,:strike,:expiration_date,:option_type,
                                :iv,:bid,:ask,:oi,:delta)""",
+                    payload,
+                )
+            elif kind == "heartbeat":
+                c.execute(
+                    """INSERT INTO process_heartbeats
+                       (component,ts,status,detail,pid,uptime_sec)
+                       VALUES (:component,:ts,:status,:detail,:pid,:uptime_sec)""",
+                    payload,
+                )
+            elif kind == "system_alert":
+                c.execute(
+                    """INSERT INTO system_alerts (ts,component,status,message)
+                       VALUES (:ts,:component,:status,:message)""",
                     payload,
                 )
             c.commit()
