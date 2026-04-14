@@ -34,7 +34,7 @@ def main():
     puts.sort(key=lambda r: r.strike)
 
     def row_to_dict(r):
-        return {
+        d = {
             "strike": r.strike,
             "option_type": r.option_type,
             "expiration_date": r.expiration_date,
@@ -44,8 +44,21 @@ def main():
             "last": round(r.last_price, 2),
             "iv": round(r.implied_volatility * 100, 1),
             "oi": r.open_interest,
+            "volume": r.volume,
             "spread_pct": round(r.spread_pct * 100, 1),
+            "greeks_source": r.greeks_source,
         }
+        if r.delta is not None:
+            d["delta"] = round(r.delta, 4)
+            d["gamma"] = round(r.gamma, 6) if r.gamma is not None else None
+            d["theta"] = round(r.theta, 6) if r.theta is not None else None
+            d["vega"]  = round(r.vega,  6) if r.vega  is not None else None
+        else:
+            d["delta"] = None
+            d["gamma"] = None
+            d["theta"] = None
+            d["vega"]  = None
+        return d
 
     result = {
         "expiry": expiry,
