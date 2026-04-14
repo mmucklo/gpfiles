@@ -54,6 +54,9 @@ class DataLogger:
     async def log_signal(self, signal: "ModelSignal") -> str:
         """Persist a ModelSignal. Returns the generated UUID."""
         sid = str(uuid.uuid4())
+        # Phase 14: extract strike-selection score and chop regime if set on the signal
+        strike_meta = getattr(signal, "strike_selection_meta", None) or {}
+        selection_score = strike_meta.get("score") if isinstance(strike_meta, dict) else None
         payload = {
             "id":                sid,
             "ts":                _isotime(signal.timestamp),
@@ -70,6 +73,8 @@ class DataLogger:
             "kelly_wager_pct":   getattr(signal, "kelly_wager_pct", 0.0),
             "quantity":          getattr(signal, "quantity", 0),
             "strategy_code":     getattr(signal, "strategy_code", ""),
+            "selection_score":   selection_score,
+            "chop_regime":       getattr(signal, "chop_label", None),
             "raw_json":          None,
         }
         # Store full signal as raw_json
@@ -198,11 +203,13 @@ class DataLogger:
                     """INSERT OR IGNORE INTO signals
                        (id,ts,model_id,direction,confidence,ticker,underlying_price,
                         price_source,strike,option_type,expiration_date,
-                        implied_volatility,kelly_wager_pct,quantity,strategy_code,raw_json)
+                        implied_volatility,kelly_wager_pct,quantity,strategy_code,
+                        selection_score,chop_regime,raw_json)
                        VALUES (:id,:ts,:model_id,:direction,:confidence,:ticker,
                                :underlying_price,:price_source,:strike,:option_type,
                                :expiration_date,:implied_volatility,:kelly_wager_pct,
-                               :quantity,:strategy_code,:raw_json)""",
+                               :quantity,:strategy_code,
+                               :selection_score,:chop_regime,:raw_json)""",
                     payload,
                 )
             elif kind == "fill":

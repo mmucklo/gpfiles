@@ -36,6 +36,8 @@ CREATE TABLE IF NOT EXISTS signals (
   kelly_wager_pct FLOAT,
   quantity INT,
   strategy_code VARCHAR(64),
+  selection_score REAL,      -- Phase 14: strike-selector composite score (0–1)
+  chop_regime TEXT,          -- Phase 14: TRENDING / MIXED / CHOPPY at emission time
   raw_json TEXT
 );
 
