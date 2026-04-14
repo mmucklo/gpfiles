@@ -6,6 +6,7 @@ import SystemMonitor from '../components/SystemMonitor';
 import { SkeletonCard, SkeletonTable } from '../components/SkeletonLoader';
 import { computeEconomics, formatRR, rrColorClass } from '../lib/signal_economics';
 import TermLabel from '../components/TermLabel';
+import SystemHealthPanel, { type HealthSummary } from '../components/SystemHealthPanel';
 
 // ============================================================
 //  Types
@@ -4649,7 +4650,7 @@ const CollapsiblePanel = ({
 //  Main Dashboard Component
 // ============================================================
 
-const Dashboard = ({ brokerStatus, integrityRed = false }: { brokerStatus: BrokerStatus | null; integrityRed?: boolean }) => {
+const Dashboard = ({ brokerStatus, integrityRed = false, onHealthChange }: { brokerStatus: BrokerStatus | null; integrityRed?: boolean; onHealthChange?: (s: HealthSummary) => void }) => {
     const [signals, setSignals] = useState<Signal[]>([]);
     const [trades, setTrades] = useState<Trade[]>([]);
     const [portfolio, setPortfolio] = useState<Portfolio>({
@@ -5000,6 +5001,8 @@ const Dashboard = ({ brokerStatus, integrityRed = false }: { brokerStatus: Broke
 
             {/* Zone 2: 4-Column Trading Grid */}
             <div className="dashboard-grid">
+                {/* Phase 13.6 — System Health panel: topmost, above Pending Orders */}
+                <SystemHealthPanel onHealthChange={onHealthChange} />
                 <SignalCommand
                     signals={signals}
                     newTimestamps={newTimestamps}
