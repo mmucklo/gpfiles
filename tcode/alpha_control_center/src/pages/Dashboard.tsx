@@ -1813,6 +1813,280 @@ function minsUntilExpiryClose(): number {
     return (15 * 60 + 30) - (h * 60 + m);
 }
 
+/** True when US regular session is open (Mon–Fri 9:30–16:00 ET). */
+function isMarketOpen(): boolean {
+    const fmt = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York',
+        hour: 'numeric', minute: 'numeric', hour12: false, weekday: 'short',
+    });
+    const parts = fmt.formatToParts(new Date());
+    const h  = parseInt(parts.find(p => p.type === 'hour')?.value ?? '0', 10);
+    const m  = parseInt(parts.find(p => p.type === 'minute')?.value ?? '0', 10);
+    const wd = parts.find(p => p.type === 'weekday')?.value ?? '';
+    if (['Sat', 'Sun'].includes(wd)) return false;
+    const t = h * 60 + m;
+    return t >= 570 && t < 960; // 9:30–16:00 ET
+}
+
+/**
+ * Human-readable label for when the next OPG order will execute.
+ * Returns the ET weekday + "9:30 AM ET" for the next trading day.
+ */
+function nextMarketOpenLabel(): string {
+    const now = new Date();
+    // Advance to next trading day
+    const candidate = new Date(now);
+    candidate.setUTCDate(candidate.getUTCDate() + 1);
+    // Find next Mon–Fri (in UTC approximation is fine for labelling)
+    while ([0, 6].includes(candidate.getDay())) {
+        candidate.setUTCDate(candidate.getUTCDate() + 1);
+    }
+    const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    return `${days[candidate.getDay()]} 9:30 AM ET`;
+}
+
+// ── Shared toast ──────────────────────────────────────────────────────────────
+
+interface ActionToast {
+    id: number;
+    message: string;
+    kind: 'success' | 'error';
+}
+
+let _toastSeq = 0;
+function makeToast(message: string, kind: ActionToast['kind']): ActionToast {
+    return { id: ++_toastSeq, message, kind };
+}
+
+const ActionToastDisplay = ({ toasts, onRemove }: { toasts: ActionToast[]; onRemove: (id: number) => void }) => (
+    <div style={{ position: 'fixed', bottom: 80, right: 24, zIndex: 10000, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {toasts.map(t => (
+            <div
+                key={t.id}
+                role="status"
+                aria-live="polite"
+                style={{
+                    background: t.kind === 'success' ? 'rgba(63,185,80,0.15)' : 'rgba(248,81,73,0.15)',
+                    border: `1px solid ${t.kind === 'success' ? 'rgba(63,185,80,0.5)' : 'rgba(248,81,73,0.5)'}`,
+                    borderRadius: 8, padding: '10px 16px',
+                    fontSize: '0.78rem', color: '#c9d1d9', maxWidth: 340,
+                    cursor: 'pointer',
+                }}
+                onClick={() => onRemove(t.id)}
+                title="Click to dismiss"
+            >
+                {t.kind === 'success' ? '✓ ' : '⚠ '}{t.message}
+            </div>
+        ))}
+    </div>
+);
+
+// ── Cancel Order confirm modal ────────────────────────────────────────────────
+
+const CancelOrderModal = ({
+    order,
+    onConfirm,
+    onClose,
+    isLive,
+}: {
+    order: PendingOrder;
+    onConfirm: () => void;
+    onClose: () => void;
+    isLive: boolean;
+}) => {
+    const [countdown, setCountdown] = useState(isLive ? 3 : 0);
+    const [confirming, setConfirming] = useState(false);
+
+    // 3-second live-mode countdown
+    useEffect(() => {
+        if (!isLive || countdown <= 0) return;
+        const id = setTimeout(() => setCountdown(c => c - 1), 1000);
+        return () => clearTimeout(id);
+    }, [isLive, countdown]);
+
+    const handleConfirm = async () => {
+        setConfirming(true);
+        onConfirm();
+    };
+
+    const label = `${order.action} ${orderLabel(order)} × ${order.qty}`;
+    const canConfirm = !isLive || countdown === 0;
+
+    return (
+        <div className="modal-overlay" onClick={onClose} role="dialog" aria-modal="true"
+             aria-label={`Confirm cancel order #${order.orderId}`}>
+            <div className="modal-card fill-drill" onClick={e => e.stopPropagation()} style={{ maxWidth: 420 }}>
+                <div className="modal-header">
+                    <span className="modal-title">Cancel Order #{order.orderId}</span>
+                    <button className="modal-close" onClick={onClose} aria-label="Close cancel dialog">✕</button>
+                </div>
+                <div className="fill-drill-body" style={{ padding: '16px 20px', gap: 12 }}>
+                    <div style={{
+                        background: 'rgba(230,162,0,0.1)', border: '1px solid rgba(230,162,0,0.4)',
+                        borderRadius: 6, padding: '10px 14px', fontSize: '0.85rem', color: '#e6a200',
+                    }}>
+                        Cancel order #{order.orderId} ({label})?
+                    </div>
+                    {isLive && (
+                        <div style={{
+                            background: 'rgba(248,81,73,0.12)', border: '1px solid rgba(248,81,73,0.4)',
+                            borderRadius: 6, padding: '8px 12px', fontSize: '0.78rem', color: '#f85149',
+                        }}>
+                            ⚠ LIVE MODE — this will cancel a real order on your live account.
+                        </div>
+                    )}
+                    <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', marginTop: 8 }}>
+                        <button
+                            onClick={onClose}
+                            disabled={confirming}
+                            aria-label="Keep the order — do not cancel"
+                            title="Keep order"
+                            style={{
+                                padding: '7px 18px', borderRadius: 6, border: '1px solid #30363d',
+                                background: 'transparent', color: '#8b949e', cursor: 'pointer', fontSize: '0.82rem',
+                            }}
+                        >
+                            Keep
+                        </button>
+                        <button
+                            onClick={handleConfirm}
+                            disabled={!canConfirm || confirming}
+                            aria-label={canConfirm ? 'Confirm cancel order' : `Wait ${countdown}s`}
+                            title={canConfirm ? 'Confirm cancel' : `Enabled in ${countdown}s`}
+                            data-tooltip={canConfirm ? 'Confirm cancel order' : `Available in ${countdown}s (live-mode safety)`}
+                            style={{
+                                padding: '7px 18px', borderRadius: 6, border: 'none',
+                                background: canConfirm ? 'rgba(230,162,0,0.9)' : 'rgba(230,162,0,0.3)',
+                                color: canConfirm ? '#0d1117' : '#8b949e',
+                                cursor: canConfirm ? 'pointer' : 'not-allowed',
+                                fontSize: '0.82rem', fontWeight: 600, transition: 'all 0.2s',
+                            }}
+                        >
+                            {isLive && countdown > 0 ? `Confirm (${countdown}s)` : 'Confirm Cancel'}
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+// ── Close Position confirm modal ──────────────────────────────────────────────
+
+interface ScheduledClose {
+    orderId: number;
+    scheduledFor: string;  // ISO8601 UTC from API
+}
+
+const ClosePositionModal = ({
+    pos,
+    onConfirm,
+    onClose,
+    isLive,
+}: {
+    pos: IBKRPosition;
+    onConfirm: () => void;
+    onClose: () => void;
+    isLive: boolean;
+}) => {
+    const [marketOpen] = useState(() => isMarketOpen());
+    const [countdown, setCountdown] = useState(isLive ? 3 : 0);
+    const [confirming, setConfirming] = useState(false);
+
+    useEffect(() => {
+        if (!isLive || countdown <= 0) return;
+        const id = setTimeout(() => setCountdown(c => c - 1), 1000);
+        return () => clearTimeout(id);
+    }, [isLive, countdown]);
+
+    const handleConfirm = () => {
+        setConfirming(true);
+        onConfirm();
+    };
+
+    const label = pos.option_type
+        ? `${pos.ticker} $${pos.strike}${pos.option_type[0]} ${pos.expiration}`
+        : pos.ticker;
+    const canConfirm = !isLive || countdown === 0;
+
+    return (
+        <div className="modal-overlay" onClick={onClose} role="dialog" aria-modal="true"
+             aria-label={`Confirm close position ${label}`}>
+            <div className="modal-card fill-drill" onClick={e => e.stopPropagation()} style={{ maxWidth: 440 }}>
+                <div className="modal-header">
+                    <span className="modal-title">Close Position</span>
+                    <button className="modal-close" onClick={onClose} aria-label="Close position dialog">✕</button>
+                </div>
+                <div className="fill-drill-body" style={{ padding: '16px 20px', gap: 12 }}>
+                    <div style={{
+                        background: 'rgba(88,166,255,0.08)', border: '1px solid rgba(88,166,255,0.3)',
+                        borderRadius: 6, padding: '10px 14px', fontSize: '0.85rem', color: '#c9d1d9',
+                    }}>
+                        Close position <strong>{label}</strong> × {pos.qty}?
+                    </div>
+
+                    {/* Market hours warning */}
+                    {marketOpen ? (
+                        <div style={{
+                            background: 'rgba(63,185,80,0.1)', border: '1px solid rgba(63,185,80,0.4)',
+                            borderRadius: 6, padding: '8px 12px', fontSize: '0.78rem', color: '#3fb950',
+                        }}>
+                            <strong>Market open</strong> — Order will execute immediately as MKT DAY.
+                        </div>
+                    ) : (
+                        <div style={{
+                            background: 'rgba(230,162,0,0.1)', border: '1px solid rgba(230,162,0,0.4)',
+                            borderRadius: 6, padding: '8px 12px', fontSize: '0.78rem', color: '#e6a200',
+                        }}>
+                            <strong>Market closed</strong> — Order will queue for {nextMarketOpenLabel()} open (MKT OPG).
+                        </div>
+                    )}
+
+                    {isLive && (
+                        <div style={{
+                            background: 'rgba(248,81,73,0.12)', border: '1px solid rgba(248,81,73,0.4)',
+                            borderRadius: 6, padding: '8px 12px', fontSize: '0.78rem', color: '#f85149',
+                        }}>
+                            ⚠ LIVE MODE — this will close a real position on your live account.
+                        </div>
+                    )}
+
+                    <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', marginTop: 8 }}>
+                        <button
+                            onClick={onClose}
+                            disabled={confirming}
+                            aria-label="Keep position open"
+                            title="Keep position"
+                            style={{
+                                padding: '7px 18px', borderRadius: 6, border: '1px solid #30363d',
+                                background: 'transparent', color: '#8b949e', cursor: 'pointer', fontSize: '0.82rem',
+                            }}
+                        >
+                            Keep
+                        </button>
+                        <button
+                            onClick={handleConfirm}
+                            disabled={!canConfirm || confirming}
+                            aria-label={canConfirm ? 'Confirm close position' : `Wait ${countdown}s`}
+                            title={canConfirm ? 'Confirm close' : `Enabled in ${countdown}s`}
+                            data-tooltip={canConfirm ? 'Confirm close position' : `Available in ${countdown}s (live-mode safety)`}
+                            style={{
+                                padding: '7px 18px', borderRadius: 6, border: 'none',
+                                background: canConfirm ? 'rgba(248,81,73,0.9)' : 'rgba(248,81,73,0.3)',
+                                color: canConfirm ? '#fff' : '#8b949e',
+                                cursor: canConfirm ? 'pointer' : 'not-allowed',
+                                fontSize: '0.82rem', fontWeight: 600, transition: 'all 0.2s',
+                            }}
+                        >
+                            {isLive && countdown > 0 ? `Close (${countdown}s)` : 'Confirm Close'}
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
+
 const PendingOrderModal = ({ order, onClose }: { order: PendingOrder; onClose: () => void }) => {
     // Approximate rank breakdown for display (mirrors computeRank in subscriber.go).
     const rankBreakdown = order.rank != null ? { total: order.rank } : null;
@@ -1884,15 +2158,71 @@ const PendingOrdersPanel = ({
     source,
     capEvents,
     replacementToast,
+    executionMode,
+    onOrderCancelled,
 }: {
     orders: PendingOrdersResponse | null;
     source: string;
     capEvents: CapEvent[];
     replacementToast: CapEvent | null;
+    executionMode: string;
+    onOrderCancelled: () => void;
 }) => {
     const [selectedOrder, setSelectedOrder] = useState<PendingOrder | null>(null);
+    const [cancelModal, setCancelModal] = useState<PendingOrder | null>(null);
+    const [cancellingId, setCancellingId] = useState<number | null>(null);
+    const cancelLastMsRef = useRef<number>(0);
+    const [toasts, setToasts] = useState<ActionToast[]>([]);
     const [cancelledOpen, setCancelledOpen] = useState(false);
     const [eventsOpen, setEventsOpen] = useState(false);
+
+    const isLive = executionMode === 'IBKR_LIVE';
+
+    const removeToast = useCallback((id: number) => {
+        setToasts(ts => ts.filter(t => t.id !== id));
+    }, []);
+
+    const pushToast = useCallback((message: string, kind: ActionToast['kind']) => {
+        const t = makeToast(message, kind);
+        setToasts(ts => [...ts, t]);
+        setTimeout(() => removeToast(t.id), 6000);
+    }, [removeToast]);
+
+    const handleCancelClick = useCallback((order: PendingOrder, e: React.MouseEvent) => {
+        e.stopPropagation();
+        const now = Date.now();
+        if (now - cancelLastMsRef.current < 3000 && cancelLastMsRef.current > 0) {
+            // Double-tap protection: ignore second click within 3s
+            return;
+        }
+        cancelLastMsRef.current = now;
+        setCancelModal(order);
+    }, []);
+
+    const handleCancelConfirm = useCallback(async () => {
+        if (!cancelModal) return;
+        const order = cancelModal;
+        setCancelModal(null);
+        setCancellingId(order.orderId);
+        try {
+            const r = await fetch('/api/orders/cancel', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ order_id: order.orderId }),
+            });
+            const data = await r.json();
+            if (!r.ok || data.error) {
+                pushToast(`Cancel failed: ${data.error ?? r.statusText}`, 'error');
+            } else {
+                pushToast(`Order #${order.orderId} cancelled`, 'success');
+                onOrderCancelled();
+            }
+        } catch (err) {
+            pushToast(`Cancel error: ${String(err)}`, 'error');
+        } finally {
+            setCancellingId(null);
+        }
+    }, [cancelModal, pushToast, onOrderCancelled]);
 
     const active    = orders?.active    ?? [];
     const cancelled = orders?.cancelled ?? [];
@@ -1926,6 +2256,15 @@ const PendingOrdersPanel = ({
             {selectedOrder && (
                 <PendingOrderModal order={selectedOrder} onClose={() => setSelectedOrder(null)} />
             )}
+            {cancelModal && (
+                <CancelOrderModal
+                    order={cancelModal}
+                    onConfirm={handleCancelConfirm}
+                    onClose={() => setCancelModal(null)}
+                    isLive={isLive}
+                />
+            )}
+            <ActionToastDisplay toasts={toasts} onRemove={removeToast} />
 
             {/* Replacement toast */}
             {replacementToast && (
@@ -2022,6 +2361,30 @@ const PendingOrdersPanel = ({
                                         rank: {o.rank.toFixed(2)}
                                     </span>
                                 )}
+                                {/* Cancel button — amber, not red; cancellation is neutral */}
+                                <button
+                                    className="cancel-order-btn"
+                                    aria-label={`Cancel order #${o.orderId} — ${orderLabel(o)}`}
+                                    title="Cancel this pending order"
+                                    data-tooltip={`Cancel order #${o.orderId}`}
+                                    disabled={cancellingId === o.orderId}
+                                    onClick={e => handleCancelClick(o, e)}
+                                    onKeyDown={e => { if (e.key === 'Enter') { e.stopPropagation(); handleCancelClick(o, e as unknown as React.MouseEvent); } }}
+                                    style={{
+                                        marginLeft: 'auto',
+                                        padding: '2px 10px',
+                                        borderRadius: 4,
+                                        border: '1px solid rgba(230,162,0,0.5)',
+                                        background: 'rgba(230,162,0,0.1)',
+                                        color: cancellingId === o.orderId ? '#8b949e' : '#e6a200',
+                                        cursor: cancellingId === o.orderId ? 'not-allowed' : 'pointer',
+                                        fontSize: '0.7rem',
+                                        fontWeight: 600,
+                                        flexShrink: 0,
+                                    }}
+                                >
+                                    {cancellingId === o.orderId ? '…' : '✕ Cancel'}
+                                </button>
                             </div>
                             <div className="pending-order-detail">
                                 <span>×{o.qty}</span>
@@ -2109,14 +2472,94 @@ const TradingFloor = ({  // Column C in 4-col grid
     portfolio,
     ibkrPositions,
     brokerStatus,
+    executionMode,
 }: {
     portfolio: Portfolio;
     ibkrPositions: IBKRPosition[];
     brokerStatus: BrokerStatus | null;
+    executionMode: string;
 }) => {
     const [selectedPos, setSelectedPos] = useState<IBKRPosition | null>(null);
     const prevPnlRef = useRef<Record<string, number>>({});
     const [flipKeys, setFlipKeys] = useState<Set<string>>(new Set());
+
+    // Close position state
+    const [closeModal, setCloseModal] = useState<{ pos: IBKRPosition; key: string } | null>(null);
+    const [closingKey, setClosingKey] = useState<string | null>(null);
+    const closeLastMsRef = useRef<number>(0);
+    const [scheduledCloses, setScheduledCloses] = useState<Record<string, ScheduledClose>>({});
+    const [closeToasts, setCloseToasts] = useState<ActionToast[]>([]);
+
+    const isLive = executionMode === 'IBKR_LIVE';
+
+    const removeCloseToast = useCallback((id: number) => setCloseToasts(ts => ts.filter(t => t.id !== id)), []);
+    const pushCloseToast = useCallback((message: string, kind: ActionToast['kind']) => {
+        const t = makeToast(message, kind);
+        setCloseToasts(ts => [...ts, t]);
+        setTimeout(() => removeCloseToast(t.id), 7000);
+    }, [removeCloseToast]);
+
+    const handleCloseClick = useCallback((pos: IBKRPosition, key: string, e: React.MouseEvent) => {
+        e.stopPropagation();
+        const now = Date.now();
+        if (now - closeLastMsRef.current < 3000 && closeLastMsRef.current > 0) return; // double-tap guard
+        closeLastMsRef.current = now;
+        setCloseModal({ pos, key });
+    }, []);
+
+    const handleCloseConfirm = useCallback(async () => {
+        if (!closeModal) return;
+        const { pos, key } = closeModal;
+        setCloseModal(null);
+        setClosingKey(key);
+        // contract_key: SYMBOL_OPTIONTYPE_EXPIRY_STRIKE
+        const contractKey = `${pos.ticker}_${pos.option_type}_${pos.expiration}_${pos.strike}`;
+        try {
+            const r = await fetch('/api/positions/close', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    contract_key: contractKey,
+                    quantity: pos.qty,
+                    market_open_if_closed: true,
+                }),
+            });
+            const data: { order_id?: number; status?: string; scheduled_for?: string | null; error?: string } = await r.json();
+            if (!r.ok || data.error) {
+                pushCloseToast(`Close failed: ${data.error ?? r.statusText}`, 'error');
+            } else if (data.scheduled_for) {
+                // OPG-scheduled: record the badge
+                setScheduledCloses(sc => ({ ...sc, [key]: { orderId: data.order_id!, scheduledFor: data.scheduled_for! } }));
+                pushCloseToast(`Close scheduled for ${nextMarketOpenLabel()} (order #${data.order_id})`, 'success');
+            } else {
+                pushCloseToast(`Position close submitted (order #${data.order_id})`, 'success');
+            }
+        } catch (err) {
+            pushCloseToast(`Close error: ${String(err)}`, 'error');
+        } finally {
+            setClosingKey(null);
+        }
+    }, [closeModal, pushCloseToast]);
+
+    const handleCancelSchedule = useCallback(async (key: string, sc: ScheduledClose, e: React.MouseEvent) => {
+        e.stopPropagation();
+        try {
+            const r = await fetch('/api/orders/cancel', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ order_id: sc.orderId }),
+            });
+            const data = await r.json();
+            if (!r.ok || data.error) {
+                pushCloseToast(`Cancel schedule failed: ${data.error ?? r.statusText}`, 'error');
+            } else {
+                setScheduledCloses(sc2 => { const n = { ...sc2 }; delete n[key]; return n; });
+                pushCloseToast(`Scheduled close #${sc.orderId} cancelled`, 'success');
+            }
+        } catch (err) {
+            pushCloseToast(`Cancel schedule error: ${String(err)}`, 'error');
+        }
+    }, [pushCloseToast]);
 
     const useIBKR = ibkrPositions.length > 0;
     // Show sim positions when no IBKR positions (IBKR client is a stub, sim positions are the real activity)
@@ -2151,6 +2594,15 @@ const TradingFloor = ({  // Column C in 4-col grid
     return (
         <>
             {selectedPos && <PositionModal pos={selectedPos} onClose={() => setSelectedPos(null)} />}
+            {closeModal && (
+                <ClosePositionModal
+                    pos={closeModal.pos}
+                    onConfirm={handleCloseConfirm}
+                    onClose={() => setCloseModal(null)}
+                    isLive={isLive}
+                />
+            )}
+            <ActionToastDisplay toasts={closeToasts} onRemove={removeCloseToast} />
             <div className="dash-col card" role="region" aria-label="Trading Floor — open positions">
                 <div className="section-header">
                     <Tooltip text="Open positions from live IBKR paper account. Click any card for drill-down.">
@@ -2180,6 +2632,8 @@ const TradingFloor = ({  // Column C in 4-col grid
                             const pnlPct = pos.avg_cost > 0
                                 ? ((pos.current_price - pos.avg_cost) / pos.avg_cost * 100)
                                 : 0;
+                            const isClosing = closingKey === key;
+                            const sc = scheduledCloses[key];
                             return (
                                 <div
                                     key={key}
@@ -2198,6 +2652,28 @@ const TradingFloor = ({  // Column C in 4-col grid
                                         <Tooltip text={`${pos.qty} contract${Math.abs(pos.qty) !== 1 ? 's' : ''} held`}>
                                             <span className="qty-badge">×{pos.qty}</span>
                                         </Tooltip>
+                                        {/* Close position button */}
+                                        <button
+                                            className="close-position-btn"
+                                            aria-label={`Close position ${label} × ${pos.qty}`}
+                                            title="Close this position"
+                                            data-tooltip={`Close position — ${isMarketOpen() ? 'MKT DAY immediate' : 'schedules OPG for next open'}`}
+                                            disabled={isClosing || !!sc}
+                                            onClick={e => handleCloseClick(pos, key, e)}
+                                            onKeyDown={e => { if (e.key === 'Enter') { e.stopPropagation(); handleCloseClick(pos, key, e as unknown as React.MouseEvent); } }}
+                                            style={{
+                                                marginLeft: 'auto',
+                                                padding: '2px 10px',
+                                                borderRadius: 4,
+                                                border: '1px solid rgba(248,81,73,0.4)',
+                                                background: 'rgba(248,81,73,0.1)',
+                                                color: (isClosing || !!sc) ? '#8b949e' : '#f85149',
+                                                cursor: (isClosing || !!sc) ? 'not-allowed' : 'pointer',
+                                                fontSize: '0.7rem', fontWeight: 600, flexShrink: 0,
+                                            }}
+                                        >
+                                            {isClosing ? '…' : '× Close'}
+                                        </button>
                                     </div>
                                     <div className="position-stats">
                                         <div className="pos-stat">
@@ -2225,6 +2701,37 @@ const TradingFloor = ({  // Column C in 4-col grid
                                             </span>
                                         </Tooltip>
                                     </div>
+                                    {/* Scheduled-close badge — shown when an OPG close is queued */}
+                                    {sc && (
+                                        <div
+                                            style={{
+                                                display: 'flex', alignItems: 'center', gap: 6,
+                                                marginTop: 4, padding: '4px 8px',
+                                                background: 'rgba(230,162,0,0.1)',
+                                                border: '1px solid rgba(230,162,0,0.4)',
+                                                borderRadius: 4, fontSize: '0.7rem', color: '#e6a200',
+                                            }}
+                                            aria-label={`Scheduled close: ${nextMarketOpenLabel()} order #${sc.orderId}`}
+                                        >
+                                            <Tooltip text={`OPG order #${sc.orderId} scheduled for ${nextMarketOpenLabel()} opening auction`}>
+                                                <span>⏰ Scheduled close: {nextMarketOpenLabel()} (#{sc.orderId})</span>
+                                            </Tooltip>
+                                            <button
+                                                aria-label={`Cancel scheduled close order #${sc.orderId}`}
+                                                title="Cancel the scheduled close order"
+                                                data-tooltip={`Cancel scheduled close #${sc.orderId}`}
+                                                onClick={e => handleCancelSchedule(key, sc, e)}
+                                                style={{
+                                                    marginLeft: 'auto', padding: '1px 7px', borderRadius: 3,
+                                                    border: '1px solid rgba(230,162,0,0.5)',
+                                                    background: 'transparent', color: '#e6a200',
+                                                    cursor: 'pointer', fontSize: '0.68rem',
+                                                }}
+                                            >
+                                                ✕
+                                            </button>
+                                        </div>
+                                    )}
                                     {pos.catalyst && (
                                         <div className="position-catalyst">
                                             <span className="catalyst-model">{pos.model_id}</span>
@@ -3872,8 +4379,15 @@ const Dashboard = ({ brokerStatus, integrityRed = false }: { brokerStatus: Broke
                     source={pendingOrders?.source ?? ''}
                     capEvents={capEvents}
                     replacementToast={replacementToast}
+                    executionMode={brokerStatus?.mode ?? pendingOrders?.source ?? 'IBKR_PAPER'}
+                    onOrderCancelled={fetchPendingOrders}
                 />
-                <TradingFloor portfolio={portfolio} ibkrPositions={ibkrPositions} brokerStatus={brokerStatus} />
+                <TradingFloor
+                    portfolio={portfolio}
+                    ibkrPositions={ibkrPositions}
+                    brokerStatus={brokerStatus}
+                    executionMode={brokerStatus?.mode ?? pendingOrders?.source ?? 'IBKR_PAPER'}
+                />
                 <ExecutionLog trades={trades} brokerStatus={brokerStatus} lossSummary={lossSummary} simMode={simMode} />
             </div>
 

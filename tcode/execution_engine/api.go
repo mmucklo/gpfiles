@@ -1733,6 +1733,144 @@ func (h *ConfigHandler) ServeOrdersPending(w http.ResponseWriter, r *http.Reques
 	})
 }
 
+// auditLog emits a structured audit record to the process log.
+// Every cancel/close action is recorded with timestamp, endpoint, request
+// body, mode, and result so the dashboard event feed can replay it.
+func auditLog(endpoint, mode string, reqBody, result interface{}) {
+	reqJSON, _ := json.Marshal(reqBody)
+	resJSON, _ := json.Marshal(result)
+	log.Printf("[AUDIT] endpoint=%s mode=%s request=%s response=%s",
+		endpoint, mode, reqJSON, resJSON)
+}
+
+// ServeOrdersCancel handles POST /api/orders/cancel.
+//
+// Body: {"order_id": N}
+// Returns: CancelOrderResult JSON from ibkr_order cancel_order subprocess.
+//
+// Rejects with 400 if mode is SIMULATION, order_id is missing/zero, or the
+// request method is not POST.  Logs an [AUDIT] entry for every attempt.
+func (h *ConfigHandler) ServeOrdersCancel(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	if r.Method != "POST" {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	if ActiveExecutionMode == ModeSimulation {
+		http.Error(w, `{"error":"SIMULATION mode — cancel requires a real broker"}`, http.StatusBadRequest)
+		return
+	}
+
+	var body struct {
+		OrderID int `json:"order_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, `{"error":"invalid JSON body"}`, http.StatusBadRequest)
+		return
+	}
+	if body.OrderID <= 0 {
+		http.Error(w, `{"error":"order_id is required and must be > 0"}`, http.StatusBadRequest)
+		return
+	}
+
+	result, err := CancelOrderUI(body.OrderID)
+	if err != nil {
+		errPayload := map[string]string{"error": err.Error()}
+		auditLog("/api/orders/cancel", string(ActiveExecutionMode), body, errPayload)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(errPayload)
+		return
+	}
+
+	// Remove from internal pending cap tracker so rank state is consistent
+	removePendingOrder(body.OrderID)
+
+	auditLog("/api/orders/cancel", string(ActiveExecutionMode), body, result)
+	json.NewEncoder(w).Encode(result)
+}
+
+// parseContractKey splits "TSLA_CALL_2026-04-13_365" into its four components.
+// Expected format: {SYMBOL}_{CONTRACT_TYPE}_{EXPIRY}_{STRIKE}
+// e.g. "TSLA_CALL_2026-04-13_365.0"
+func parseContractKey(key string) (symbol, contractType, expiry string, strike float64, err error) {
+	// Use SplitN 4 to handle symbols that might embed underscores (future-proof)
+	parts := strings.SplitN(key, "_", 4)
+	if len(parts) != 4 {
+		err = fmt.Errorf("contract_key must be SYMBOL_TYPE_EXPIRY_STRIKE, got %q", key)
+		return
+	}
+	symbol       = parts[0]
+	contractType = parts[1]
+	expiry       = parts[2]
+	strike, err  = strconv.ParseFloat(parts[3], 64)
+	if err != nil {
+		err = fmt.Errorf("invalid strike in contract_key %q: %w", key, err)
+	}
+	return
+}
+
+// ServePositionsClose handles POST /api/positions/close.
+//
+// Body: {"contract_key": "TSLA_CALL_2026-04-13_365", "quantity": 10, "market_open_if_closed": true}
+// Returns: ClosePositionResult JSON from ibkr_order close_position subprocess.
+//
+// When market_open_if_closed is true (default), close_position auto-schedules
+// an OPG order if the market is currently closed.  The response includes a
+// non-empty scheduled_for field in that case.
+func (h *ConfigHandler) ServePositionsClose(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	if r.Method != "POST" {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	if ActiveExecutionMode == ModeSimulation {
+		http.Error(w, `{"error":"SIMULATION mode — close requires a real broker"}`, http.StatusBadRequest)
+		return
+	}
+
+	var body struct {
+		ContractKey        string `json:"contract_key"`
+		Quantity           int    `json:"quantity"`
+		MarketOpenIfClosed bool   `json:"market_open_if_closed"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, `{"error":"invalid JSON body"}`, http.StatusBadRequest)
+		return
+	}
+	if body.ContractKey == "" {
+		http.Error(w, `{"error":"contract_key is required"}`, http.StatusBadRequest)
+		return
+	}
+	if body.Quantity <= 0 {
+		http.Error(w, `{"error":"quantity must be > 0"}`, http.StatusBadRequest)
+		return
+	}
+
+	symbol, contractType, expiry, strike, err := parseContractKey(body.ContractKey)
+	if err != nil {
+		errPayload := map[string]string{"error": err.Error()}
+		auditLog("/api/positions/close", string(ActiveExecutionMode), body, errPayload)
+		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadRequest)
+		return
+	}
+
+	result, err := ClosePositionIBKR(symbol, contractType, strike, expiry, body.Quantity)
+	if err != nil {
+		errPayload := map[string]string{"error": err.Error()}
+		auditLog("/api/positions/close", string(ActiveExecutionMode), body, errPayload)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(errPayload)
+		return
+	}
+
+	auditLog("/api/positions/close", string(ActiveExecutionMode), body, result)
+	json.NewEncoder(w).Encode(result)
+}
+
 // ServeCapEvents returns the last 10 [REPLACE] / [REJECT-CAP] events for the UI feed.
 func (h *ConfigHandler) ServeCapEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")

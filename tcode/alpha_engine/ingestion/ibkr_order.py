@@ -596,6 +596,274 @@ def expiry_close(host: str, port: int, client_id: int, expiry_date: str = "") ->
         _disconnect(ib)
 
 
+def cancel_order_with_verify(host: str, port: int, client_id: int, order_id: int) -> dict:
+    """
+    Cancel an open IBKR order by ID and verify OCO sibling cancellation.
+
+    After issuing cancelOrder(), re-queries open_orders to confirm the parent
+    and any bracket siblings (TP/SL via OCO) have transitioned to Cancelled.
+
+    Returns:
+        {order_id, status, oca_cancelled: [sibling_ids], timestamp}
+    """
+    logger.info("cancel_order_with_verify: orderId=%d clientId=%d", order_id, client_id)
+
+    ib = _connect(host, port, client_id)
+    try:
+        ib.reqAllOpenOrders()
+        ib.sleep(1.0)
+
+        open_trades = ib.trades()
+        trade = next((t for t in open_trades if t.order.orderId == order_id), None)
+        if trade is None:
+            raise ValueError(f"Order {order_id} not found in open orders")
+
+        oca_group = trade.order.ocaGroup or ""
+        siblings_before = [
+            t.order.orderId
+            for t in open_trades
+            if t.order.ocaGroup == oca_group
+            and t.order.orderId != order_id
+            and oca_group
+        ]
+
+        ib.cancelOrder(trade.order)
+        ib.sleep(1.5)
+
+        # Independent verification: re-fetch open orders and confirm cancellation
+        ib.reqAllOpenOrders()
+        ib.sleep(1.0)
+
+        terminal = {"Cancelled", "Filled", "Inactive"}
+        post_trades = {t.order.orderId: t for t in ib.trades()}
+        target_status = (post_trades[order_id].orderStatus.status or "Unknown") if order_id in post_trades else "Cancelled"
+
+        oca_cancelled = []
+        for sid in siblings_before:
+            if sid in post_trades:
+                st = post_trades[sid].orderStatus.status or ""
+                if st in terminal:
+                    oca_cancelled.append(sid)
+            else:
+                # Not in open orders anymore → treated as cancelled
+                oca_cancelled.append(sid)
+
+        result = {
+            "order_id":      order_id,
+            "status":        target_status if target_status in terminal else "CancelPending",
+            "oca_cancelled": oca_cancelled,
+            "timestamp":     _now_iso(),
+        }
+        logger.info("cancel_order_with_verify result: %s", json.dumps(result))
+        return result
+    finally:
+        _disconnect(ib)
+
+
+def _is_market_hours() -> bool:
+    """
+    Return True if current UTC time falls within US regular session
+    (Mon–Fri 9:30–16:00 America/New_York).
+
+    Uses UTC offset approximation: ET is UTC-5 (EST) / UTC-4 (EDT).
+    We use pytz when available; otherwise fall back to a fixed UTC-4 offset
+    (EDT) which is correct for April–October, the primary trading season.
+    """
+    from datetime import datetime, timezone, timedelta
+
+    utc_now = datetime.now(timezone.utc)
+    # Weekday check: Mon=0 … Fri=4
+    try:
+        import zoneinfo
+        et = zoneinfo.ZoneInfo("America/New_York")
+        et_now = utc_now.astimezone(et)
+    except Exception:
+        # Fallback: EDT = UTC-4
+        et_now = utc_now.astimezone(timezone(timedelta(hours=-4)))
+
+    if et_now.weekday() >= 5:  # Saturday, Sunday
+        return False
+
+    t = et_now.hour * 60 + et_now.minute
+    return 9 * 60 + 30 <= t < 16 * 60  # 9:30 AM – 4:00 PM ET
+
+
+def _next_market_open_utc() -> "datetime":
+    """
+    Return the UTC datetime of the next regular-session open (9:30 AM ET Mon–Fri).
+    If we're before open today, returns today's open.
+    If past close or weekend, returns the next weekday's open.
+    """
+    from datetime import datetime, timezone, timedelta
+
+    utc_now = datetime.now(timezone.utc)
+    try:
+        import zoneinfo
+        et = zoneinfo.ZoneInfo("America/New_York")
+        et_now = utc_now.astimezone(et)
+    except Exception:
+        et_now = utc_now.astimezone(timezone(timedelta(hours=-4)))
+
+    # Candidate: today's open in ET
+    candidate = et_now.replace(hour=9, minute=30, second=0, microsecond=0)
+    t = et_now.hour * 60 + et_now.minute
+    is_weekday = et_now.weekday() < 5
+    before_open = t < 9 * 60 + 30
+
+    if is_weekday and before_open:
+        # Today's open hasn't happened yet
+        pass
+    else:
+        # Advance to next weekday
+        candidate += timedelta(days=1)
+        while candidate.weekday() >= 5:
+            candidate += timedelta(days=1)
+
+    return candidate.astimezone(timezone.utc)
+
+
+def close_position(
+    host: str,
+    port: int,
+    client_id: int,
+    symbol: str,
+    contract_type: str,
+    strike: float,
+    expiry: str,
+    quantity: int,
+) -> dict:
+    """
+    Close an open option position.
+
+    Auto-detects market hours:
+      - In-hours  → MKT DAY sell submitted immediately.
+      - Out-of-hours → schedule_close() with TIF=OPG for next session open.
+
+    Returns:
+        {order_id, status, scheduled_for, timestamp}
+        scheduled_for is null when the order executes immediately.
+    """
+    if _is_market_hours():
+        logger.info(
+            "close_position: market OPEN — submitting MKT DAY for %s %s %.2f %s x%d",
+            symbol, contract_type, strike, expiry, quantity,
+        )
+        return _close_position_mkt(host, port, client_id, symbol, contract_type, strike, expiry, quantity)
+    else:
+        logger.info(
+            "close_position: market CLOSED — scheduling OPG close for %s %s %.2f %s x%d",
+            symbol, contract_type, strike, expiry, quantity,
+        )
+        return schedule_close(host, port, client_id, symbol, contract_type, strike, expiry, quantity)
+
+
+def _close_position_mkt(
+    host: str,
+    port: int,
+    client_id: int,
+    symbol: str,
+    contract_type: str,
+    strike: float,
+    expiry: str,
+    quantity: int,
+) -> dict:
+    """Submit an immediate MKT DAY SELL to close the option position."""
+    from ib_insync import Option, MarketOrder
+
+    expiry_ib = _expiry_to_ib(expiry)
+    right = _right(contract_type)
+
+    logger.info(
+        "_close_position_mkt: SELL %dx %s %s %.2f %s MKT DAY clientId=%d",
+        quantity, symbol, contract_type, strike, expiry, client_id,
+    )
+
+    ib = _connect(host, port, client_id)
+    try:
+        contract = Option(symbol, expiry_ib, strike, right, "SMART")
+        qualified = ib.qualifyContracts(contract)
+        if not qualified:
+            raise ValueError(
+                f"Could not qualify contract: {symbol} {contract_type} "
+                f"strike={strike} expiry={expiry}"
+            )
+        contract = qualified[0]
+
+        order = MarketOrder("SELL", quantity, tif="DAY")
+        trade = ib.placeOrder(contract, order)
+        ib.sleep(ORDER_WAIT_SEC)
+
+        result = {
+            "order_id":      trade.order.orderId,
+            "status":        trade.orderStatus.status or "Submitted",
+            "scheduled_for": None,
+            "timestamp":     _now_iso(),
+        }
+        logger.info("[CLOSE-MKT] orderId=%d status=%s", result["order_id"], result["status"])
+        return result
+    finally:
+        _disconnect(ib)
+
+
+def schedule_close(
+    host: str,
+    port: int,
+    client_id: int,
+    symbol: str,
+    contract_type: str,
+    strike: float,
+    expiry: str,
+    quantity: int,
+) -> dict:
+    """
+    Schedule a position close for the next market open using TIF=OPG.
+
+    OPG (Opening) orders fill during the opening auction at 9:30 AM ET.
+    This is the correct mechanism for after-hours close requests.
+
+    Returns:
+        {order_id, status, scheduled_for (ISO8601 UTC), timestamp}
+    """
+    from ib_insync import Option, MarketOrder
+
+    expiry_ib = _expiry_to_ib(expiry)
+    right = _right(contract_type)
+    next_open = _next_market_open_utc()
+    next_open_iso = next_open.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    logger.info(
+        "schedule_close: OPG SELL %dx %s %s %.2f %s → %s clientId=%d",
+        quantity, symbol, contract_type, strike, expiry, next_open_iso, client_id,
+    )
+
+    ib = _connect(host, port, client_id)
+    try:
+        contract = Option(symbol, expiry_ib, strike, right, "SMART")
+        qualified = ib.qualifyContracts(contract)
+        if not qualified:
+            raise ValueError(
+                f"Could not qualify contract: {symbol} {contract_type} "
+                f"strike={strike} expiry={expiry}"
+            )
+        contract = qualified[0]
+
+        # OPG TIF = fills during opening auction only; cancelled if not filled at open
+        order = MarketOrder("SELL", quantity, tif="OPG")
+        trade = ib.placeOrder(contract, order)
+        ib.sleep(ORDER_WAIT_SEC)
+
+        result = {
+            "order_id":      trade.order.orderId,
+            "status":        trade.orderStatus.status or "PendingSubmit",
+            "scheduled_for": next_open_iso,
+            "timestamp":     _now_iso(),
+        }
+        logger.info("[SCHEDULE-CLOSE] orderId=%d scheduledFor=%s", result["order_id"], next_open_iso)
+        return result
+    finally:
+        _disconnect(ib)
+
+
 def global_cancel(host: str, port: int, client_id: int) -> dict:
     """
     Issue reqGlobalCancel() to clear all open orders at startup.
@@ -643,7 +911,11 @@ def main() -> None:
     )
     parser.add_argument(
         "command",
-        choices=["place", "cancel", "status", "open_orders", "expiry_close", "global_cancel"],
+        choices=[
+            "place", "cancel", "cancel_order", "status", "open_orders",
+            "expiry_close", "global_cancel",
+            "close_position", "schedule_close",
+        ],
     )
     parser.add_argument("--symbol",         default="TSLA")
     parser.add_argument("--contract",       default="CALL", help="CALL or PUT")
@@ -755,6 +1027,42 @@ def main() -> None:
             if args.order_id <= 0:
                 raise ValueError("--order-id is required and must be > 0")
             result = cancel_order(host, port, client_id, args.order_id)
+
+        elif args.command == "cancel_order":
+            # UI-facing cancel: verifies OCO sibling cancellation after the cancel
+            if args.order_id <= 0:
+                raise ValueError("--order-id is required and must be > 0")
+            result = cancel_order_with_verify(host, port, client_id, args.order_id)
+
+        elif args.command == "close_position":
+            # Close a position: MKT DAY if market open, OPG-scheduled if not
+            for field, val in [("--symbol", args.symbol), ("--strike", args.strike),
+                                ("--expiry", args.expiry), ("--quantity", args.quantity)]:
+                if not val:
+                    raise ValueError(f"{field} is required for close_position")
+            if args.strike <= 0:
+                raise ValueError("--strike must be > 0")
+            if args.quantity <= 0:
+                raise ValueError("--quantity must be > 0")
+            result = close_position(
+                host, port, client_id,
+                args.symbol, args.contract, args.strike, args.expiry, args.quantity,
+            )
+
+        elif args.command == "schedule_close":
+            # Explicitly schedule an OPG close for next market open
+            for field, val in [("--symbol", args.symbol), ("--strike", args.strike),
+                                ("--expiry", args.expiry), ("--quantity", args.quantity)]:
+                if not val:
+                    raise ValueError(f"{field} is required for schedule_close")
+            if args.strike <= 0:
+                raise ValueError("--strike must be > 0")
+            if args.quantity <= 0:
+                raise ValueError("--quantity must be > 0")
+            result = schedule_close(
+                host, port, client_id,
+                args.symbol, args.contract, args.strike, args.expiry, args.quantity,
+            )
 
         elif args.command == "status":
             if args.order_id <= 0:

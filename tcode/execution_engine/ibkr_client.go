@@ -272,6 +272,90 @@ func ExpiryCloseIBKROrders(expiryDate string) {
 	log.Printf("[EXPIRY-CLOSE] closed %d expiring positions for %s", result.ClosedCount, expiryDate)
 }
 
+// CancelOrderResult is the JSON payload returned by ibkr_order.py cancel_order.
+type CancelOrderResult struct {
+	OrderID      int    `json:"order_id"`
+	Status       string `json:"status"`
+	OcaCancelled []int  `json:"oca_cancelled"` // sibling IDs cancelled via OCO
+	Timestamp    string `json:"timestamp"`
+	Error        string `json:"error,omitempty"`
+}
+
+// CancelOrderUI shells out to ibkr_order cancel_order — the UI-facing cancel path.
+// Unlike the engine-internal CancelIBKROrder, it re-queries open_orders afterward
+// to confirm bracket OCO siblings were also cancelled, and returns the verification result.
+func CancelOrderUI(orderID int) (*CancelOrderResult, error) {
+	clientID := AllocateClientID()
+	args := []string{
+		"-m", "ingestion.ibkr_order", "cancel_order",
+		"--order-id", fmt.Sprintf("%d", orderID),
+		"--mode",     string(ActiveExecutionMode),
+		"--client-id", fmt.Sprintf("%d", clientID),
+	}
+
+	cmd := exec.Command(pythonBin(), args...)
+	cmd.Dir = "./alpha_engine"
+	cmd.Env = os.Environ()
+
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("ibkr_order cancel_order failed: %w (stderr=%s)", err, stderrString(err))
+	}
+
+	var result CancelOrderResult
+	if err := json.Unmarshal(out, &result); err != nil {
+		return nil, fmt.Errorf("ibkr_order cancel_order JSON: %w (raw=%s)", err, string(out))
+	}
+	if result.Error != "" {
+		return nil, fmt.Errorf("ibkr_order cancel_order: %s", result.Error)
+	}
+	return &result, nil
+}
+
+// ClosePositionResult is the JSON payload returned by ibkr_order.py close_position.
+type ClosePositionResult struct {
+	OrderID      int    `json:"order_id"`
+	Status       string `json:"status"`
+	ScheduledFor string `json:"scheduled_for"` // empty string → immediate; ISO8601 UTC → OPG-scheduled
+	Timestamp    string `json:"timestamp"`
+	Error        string `json:"error,omitempty"`
+}
+
+// ClosePositionIBKR shells out to ibkr_order close_position.
+// The Python subprocess auto-detects market hours and either submits MKT DAY
+// or schedules a TIF=OPG order for the next session open.
+func ClosePositionIBKR(symbol, contractType string, strike float64, expiry string, qty int) (*ClosePositionResult, error) {
+	clientID := AllocateClientID()
+	args := []string{
+		"-m", "ingestion.ibkr_order", "close_position",
+		"--symbol",   symbol,
+		"--contract", contractType,
+		"--strike",   fmt.Sprintf("%g", strike),
+		"--expiry",   expiry,
+		"--quantity", fmt.Sprintf("%d", qty),
+		"--mode",     string(ActiveExecutionMode),
+		"--client-id", fmt.Sprintf("%d", clientID),
+	}
+
+	cmd := exec.Command(pythonBin(), args...)
+	cmd.Dir = "./alpha_engine"
+	cmd.Env = os.Environ()
+
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("ibkr_order close_position failed: %w (stderr=%s)", err, stderrString(err))
+	}
+
+	var result ClosePositionResult
+	if err := json.Unmarshal(out, &result); err != nil {
+		return nil, fmt.Errorf("ibkr_order close_position JSON: %w (raw=%s)", err, string(out))
+	}
+	if result.Error != "" {
+		return nil, fmt.Errorf("ibkr_order close_position: %s", result.Error)
+	}
+	return &result, nil
+}
+
 // OpenIBKROrders returns the list of currently open orders from IBKR.
 // Used by the reconciler to sync internal state with the broker.
 func OpenIBKROrders() ([]OrderResult, error) {
