@@ -4,6 +4,7 @@ import './SystemMonitor.css';
 import Tooltip from './Tooltip';
 
 import { useDataFetching } from '../hooks';
+import { parseBreakdownByModel } from '../lib/breakdown_parser';
 
 // Collapsible Panel Component
 const Panel = ({ title, icon, storageKey, children }: { title: string, icon: React.ReactNode, storageKey: string, children: React.ReactNode }) => {
@@ -281,9 +282,16 @@ const SignalPanel = () => {
                         ))}
                     </div>
                     <div className="vitals-grid" style={{marginTop: '1rem'}}>
-                        {Object.entries(breakdown).map(([strategy, count]) => (
-                            <VitalsCard key={strategy} label={strategy} value={count as number} />
-                        ))}
+                        {(() => {
+                            const byModel = parseBreakdownByModel(breakdown);
+                            const entries = Object.entries(byModel);
+                            if (entries.length === 0) {
+                                return <VitalsCard label="Signals 30d" value={0} />;
+                            }
+                            return entries.map(([modelName, count]) => (
+                                <VitalsCard key={modelName} label={modelName} value={count} />
+                            ));
+                        })()}
                     </div>
                 </>
             )}
