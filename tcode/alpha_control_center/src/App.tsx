@@ -5,6 +5,7 @@ import './components/Tooltip.css';
 import Tooltip from './components/Tooltip';
 import IntegrityStatus from './components/IntegrityStatus';
 import HelpPanel from './components/HelpPanel';
+import { SystemHealthBadge, type HealthSummary } from './components/SystemHealthPanel';
 import { Shield, Menu, Home, Share2, Map, HelpCircle } from 'lucide-react';
 import Dashboard from './pages/Dashboard';
 import Architecture from './pages/Architecture';
@@ -23,6 +24,7 @@ function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const [integrityRed, setIntegrityRed] = useState(false);
+  const [healthSummary, setHealthSummary] = useState<HealthSummary | null>(null);
 
   // Notional account size state
   const [notional, setNotional] = useState<number>(25000);
@@ -321,6 +323,11 @@ function App() {
             {/* Integrity Status — three traffic lights */}
             <IntegrityStatus onStatusChange={handleIntegrityChange} />
 
+            {/* System health badge — Phase 13.6: always visible, goes red on component outage */}
+            <SystemHealthBadge
+              summary={healthSummary}
+            />
+
             {/* Execution mode banner — always visible, never hidden.
                 Maps the EXECUTION_MODE enum (IBKR_PAPER / IBKR_LIVE / SIMULATION)
                 to colour-coded labels with a disconnected warning overlay. */}
@@ -409,7 +416,7 @@ function App() {
 
       <main className="main-content" role="main">
         <Routes>
-          <Route path="/" element={<Dashboard brokerStatus={brokerStatus} integrityRed={integrityRed} />} />
+          <Route path="/" element={<Dashboard brokerStatus={brokerStatus} integrityRed={integrityRed} onHealthChange={setHealthSummary} />} />
           <Route path="/architecture" element={<Architecture />} />
           <Route path="/gastown" element={<Gastown />} />
         </Routes>

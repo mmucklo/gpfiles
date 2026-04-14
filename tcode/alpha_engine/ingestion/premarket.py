@@ -19,6 +19,13 @@ from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger("PreMarket")
 
+try:
+    import sys as _sys
+    _sys.path.insert(0, "/home/builder/src/gpfiles/tcode/alpha_engine")
+    from heartbeat import emit_heartbeat as _hb
+except Exception:
+    def _hb(component, status="ok", detail=None, **_kw): pass  # type: ignore
+
 _premarket_cache: Optional[dict] = None
 _premarket_cache_ts: float = 0.0
 _PREMARKET_TTL = 60  # 1 minute — needs freshness during pre-market window
@@ -250,6 +257,11 @@ def get_premarket_intel() -> dict:
     if _premarket_cache is None or now - _premarket_cache_ts > _PREMARKET_TTL:
         _premarket_cache = _fetch_premarket()
         _premarket_cache_ts = now
+        # Heartbeat: ok if in premarket window; skipped:off-hours otherwise (NOT red)
+        if _is_premarket_window():
+            _hb("premarket", status="ok")
+        else:
+            _hb("premarket", status="ok", detail="skipped:off-hours")
 
     return _premarket_cache
 

@@ -17,6 +17,13 @@ from typing import Optional
 
 logger = logging.getLogger("MacroRegime")
 
+try:
+    import sys as _sys
+    _sys.path.insert(0, "/home/builder/src/gpfiles/tcode/alpha_engine")
+    from heartbeat import emit_heartbeat as _hb
+except Exception:
+    def _hb(component, status="ok", detail=None, **_kw): pass  # type: ignore
+
 _macro_cache: Optional[dict] = None
 _macro_cache_ts: float = 0.0
 _MACRO_TTL = 3600  # 1 hour for macro data
@@ -309,6 +316,7 @@ def get_macro_regime() -> dict:
     # Cached at VIX frequency (5 min) since it's similarly latency-tolerant
     macro["tsla_realized_vol"] = _fetch_tsla_realized_vol()
 
+    _hb("macro_regime", status="ok", detail=f"regime:{macro.get('regime','NEUTRAL')} vix:{macro.get('vix_spot',0):.1f}")
     return macro
 
 

@@ -130,3 +130,27 @@ CREATE TABLE IF NOT EXISTS signal_feedback (
 CREATE INDEX IF NOT EXISTS idx_signal_feedback_ts     ON signal_feedback(ts_feedback);
 CREATE INDEX IF NOT EXISTS idx_signal_feedback_tag    ON signal_feedback(tag);
 CREATE INDEX IF NOT EXISTS idx_signal_feedback_action ON signal_feedback(action);
+
+-- process_heartbeats: liveness pulses from every long-running component.
+-- Each component writes one row per cycle; the API reads the latest per component.
+CREATE TABLE IF NOT EXISTS process_heartbeats (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    component   TEXT    NOT NULL,   -- "publisher" | "intel_refresh" | "options_chain_api" | ...
+    ts          TEXT    NOT NULL,   -- ISO 8601 UTC
+    status      TEXT    NOT NULL,   -- "ok" | "degraded" | "error"
+    detail      TEXT,               -- last error / note, nullable
+    pid         INTEGER,
+    uptime_sec  INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_process_heartbeats_component_ts
+    ON process_heartbeats(component, ts DESC);
+
+-- system_alerts: written when any component transitions to RED status.
+-- Surfaced in the dashboard event feed.
+CREATE TABLE IF NOT EXISTS system_alerts (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts        TEXT    NOT NULL,   -- ISO 8601 UTC
+    component TEXT    NOT NULL,
+    status    TEXT    NOT NULL,   -- "error" | "degraded"
+    message   TEXT    NOT NULL
+);

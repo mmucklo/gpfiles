@@ -31,6 +31,13 @@ from typing import Optional
 
 logger = logging.getLogger("CorrelationRegime")
 
+try:
+    import sys as _sys
+    _sys.path.insert(0, "/home/builder/src/gpfiles/tcode/alpha_engine")
+    from heartbeat import emit_heartbeat as _hb
+except Exception:
+    def _hb(component, status="ok", detail=None, **_kw): pass  # type: ignore
+
 _CORR_CACHE: Optional[dict] = None
 _CORR_CACHE_TS: float = 0.0
 _CORR_TTL = 3600  # 1 hour; daily closes don't need sub-minute freshness
@@ -209,6 +216,11 @@ def get_correlation_regime() -> dict:
         return _CORR_CACHE
     _CORR_CACHE = _fetch_correlation_regime()
     _CORR_CACHE_TS = now
+    regime = _CORR_CACHE.get("regime", "NORMAL")
+    err = _CORR_CACHE.get("error")
+    _hb("correlation_regime",
+        status="ok" if not err else "degraded",
+        detail=f"regime:{regime}" + (f" err:{err}" if err else ""))
     return _CORR_CACHE
 
 

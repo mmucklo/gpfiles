@@ -803,6 +803,166 @@ Replaced with \`reqContractDetails()\`, which returns explicit contract details.
     related: ["PRICE_CONDITION"],
     phase_note: "Added in Phase 13.5.",
   },
+
+  // ── Phase 13.6 — System health / heartbeat terms ────────────────────────
+
+  HEARTBEAT: {
+    term: "HEARTBEAT",
+    display: "Heartbeat",
+    short: "A periodic liveness pulse emitted by each platform component — absence of a heartbeat means the process is dead or stuck.",
+    long: `**Heartbeat** is a lightweight row written to SQLite (and published to NATS \`system.heartbeat\`) after every operational cycle of a component.
+
+**Why heartbeats, not flags?**
+A startup flag set to \`connected = true\` stays true even if the process crashes. A heartbeat is fresh only if the process is actually executing. If the publisher dies (bad service unit path, OOM, permissions), heartbeats stop — the indicator goes amber within one cadence window, then red.
+
+**The 2026-04-13 incident:** publisher.service pointed at an abandoned path. Process exited 203/EXEC on every restart. Integrity dashboard showed engine/NATS/IBKR all green — because none measured publisher liveness. No signals generated all day. Phase 13.6 makes that failure impossible to miss.`,
+    formula: "ok: age ≤ expected_max; degraded: expected_max < age ≤ 3×; error: age > 3× or never seen",
+    source: "SQLite ~/tsla_alpha.db · NATS system.heartbeat",
+    trading_impact: "Publisher heartbeat RED = no signals. Other components affect data quality.",
+    related: ["PUBLISHER", "EXPECTED_CADENCE", "FLAPPING"],
+    phase_note: "Added in Phase 13.6.",
+  },
+
+  EXPECTED_CADENCE: {
+    term: "EXPECTED_CADENCE",
+    display: "Expected Cadence",
+    short: "The maximum healthy interval between heartbeats for a component — e.g. publisher: 30s, congress_trades: 3600s.",
+    long: `**Expected Cadence** is the maximum interval between heartbeats for each component when running normally.
+
+| Component | Max age (ok) |
+|---|---|
+| publisher | 30s |
+| intel_refresh | 300s |
+| options_chain_api | 120s |
+| premarket | 120s (4:00–9:30 ET only) |
+| congress_trades | 3600s |
+| correlation_regime | 3600s |
+| macro_regime | 300s |
+| engine_subscriber | 90s |
+| engine_ibkr_status | 180s |
+
+**Thresholds:** age ≤ max → ok; max < age ≤ 3× → degraded; age > 3× → error.
+
+**premarket off-hours exception:** outside 04:00–09:30 ET, premarket always shows ok with detail "skipped:off-hours".`,
+    formula: "ok: age ≤ max; degraded: max < age ≤ 3×max; error: age > 3×max",
+    trading_impact: "Stale intel_refresh or options_chain_api degrades signal quality. Publisher error = no new signals.",
+    related: ["HEARTBEAT", "FLAPPING"],
+    phase_note: "Added in Phase 13.6.",
+  },
+
+  FLAPPING: {
+    term: "FLAPPING",
+    display: "Flapping",
+    short: "A component that rapidly oscillates between ok and error/degraded — indicates an unstable process, not a clean outage.",
+    long: `**Flapping** occurs when a component repeatedly transitions between ok and error/degraded in a short window.
+
+**How to detect:** Open the drill-down popover for any component and look at the sparkline (last 10 heartbeats). A healthy component shows consistent green dots. A flapping component shows alternating colors.
+
+**Common causes:**
+- Rate limiting: the source API throttles, the component backs off, retries, gets throttled again.
+- OOM cycle: process killed and auto-restarted repeatedly.
+- Network instability: intermittent IBKR or NATS connectivity.
+- Cache TTL shorter than fetch latency: constant refetch failures.
+
+**vs. clean outage:** Clean outage = long run of red dots after a gap. Flapping = alternating pattern.`,
+    trading_impact: "Flapping components produce unreliable signals — confidence scores may reflect stale data despite occasional ok heartbeats.",
+    related: ["HEARTBEAT", "EXPECTED_CADENCE"],
+    phase_note: "Added in Phase 13.6.",
+  },
+
+  PUBLISHER: {
+    term: "PUBLISHER",
+    display: "Publisher",
+    short: "The Python process (publisher.py) that runs signal-generation models and broadcasts TSLA options signals to the Go execution engine via NATS.",
+    long: `**Publisher** is the Alpha Engine's primary signal-generation process (\`alpha_engine/publisher.py\`).
+
+**Responsibilities:** runs SENTIMENT, OPTIONS_FLOW, MACRO, VOLATILITY, CONTRARIAN, EV_SECTOR, PREMARKET models; applies data-quality gates; sizes positions via Kelly; publishes to NATS \`tsla.alpha.signals\`; emits heartbeat after every cycle.
+
+**Service unit:** \`publisher.service\`
+
+**The 2026-04-13 incident:** Unit file pointed at an abandoned path (\`/home/builder/src/gemini/...\`). Process exited 203/EXEC on every restart. No signals generated all day.`,
+    source: "alpha_engine/publisher.py · publisher.service",
+    trading_impact: "Publisher dead = zero signals = no new positions opened.",
+    related: ["HEARTBEAT", "EXPECTED_CADENCE"],
+    phase_note: "Added in Phase 13.6.",
+  },
+
+  INTEL_REFRESH: {
+    term: "INTEL_REFRESH",
+    display: "Intel Refresh",
+    short: "The intelligence aggregator (intel.py) that fetches news, VIX, SPY, options flow, macro, premarket, congress, and correlation data every 5 minutes.",
+    long: `**Intel Refresh** aggregates all external data sources into the \`intel\` dict consumed by signal models.
+
+**Sources:** news sentiment, VIX, SPY trend, earnings calendar, options flow (P/C ratio), catalyst (Musk + analysts), institutional flow, EV sector, macro regime, premarket, congress trades, correlation regime.
+
+**Cache TTL:** 5 minutes. Heartbeat emitted after each full fetch (not cache hits).`,
+    source: "alpha_engine/ingestion/intel.py",
+    trading_impact: "Stale intel = models operate on old data. Expected cadence: 300s.",
+    related: ["HEARTBEAT", "EXPECTED_CADENCE", "MACRO_REGIME"],
+    phase_note: "Added in Phase 13.6.",
+  },
+
+  OPTIONS_CHAIN_API: {
+    term: "OPTIONS_CHAIN_API",
+    display: "Options Chain API",
+    short: "The options chain cache that fetches TSLA strike/IV/OI data from yfinance or IBKR every 60s.",
+    long: `**Options Chain API** fetches and caches the TSLA options chain.
+
+**Source priority:** Off-hours + IBKR → IBKR snapshot; in-hours or IBKR unavailable → yfinance.
+
+**Cache TTL:** 60s. Heartbeat emitted on each fresh fetch.
+
+An empty or stale chain means the publisher cannot price strikes and will suppress signals.`,
+    source: "alpha_engine/ingestion/options_chain.py",
+    trading_impact: "Empty or stale chain = no priced strikes = no signals.",
+    related: ["HEARTBEAT", "EXPECTED_CADENCE"],
+    phase_note: "Added in Phase 13.6.",
+  },
+
+  ENGINE_SUBSCRIBER: {
+    term: "ENGINE_SUBSCRIBER",
+    display: "Engine Subscriber",
+    short: "The Go execution engine's NATS subscriber goroutine — listens on tsla.alpha.signals and routes signals to IBKR or simulation.",
+    long: `**Engine Subscriber** is the Go execution engine's primary signal-consumption loop (executor.service).
+
+Subscribes to \`tsla.alpha.signals\`; applies confidence gate (> 0.8), dedup, rank cap, gross-outstanding cap; routes to IBKR subprocess or PaperPortfolio.
+
+**Heartbeat:** 30s ticker goroutine writes to SQLite to prove the engine process is alive.`,
+    source: "execution_engine/subscriber.go · executor.service",
+    trading_impact: "Engine subscriber down = signals received but never executed.",
+    related: ["HEARTBEAT", "IBKR_GATEWAY"],
+    phase_note: "Added in Phase 13.6.",
+  },
+
+  IBKR_GATEWAY: {
+    term: "IBKR_GATEWAY",
+    display: "IBKR Gateway",
+    short: "IBKR API Gateway liveness — measured by whether open_orders() roundtrips succeed within the engine's 60s poll cycle.",
+    long: `**IBKR Gateway** tracks liveness of the connection to IBKR API Gateway (TWS or IB Gateway).
+
+A 60s ticker goroutine calls \`OpenIBKROrders()\` (shells \`ingestion/ibkr_order.py open_orders\`). Success → ok; failure → degraded + error detail stored.
+
+**Error codes to watch:** 1100 (connection lost), 1102 (connection restored after data loss).`,
+    source: "execution_engine/ibkr_client.go · ingestion/ibkr_order.py",
+    trading_impact: "IBKR gateway degraded = orders queue but cannot be submitted to broker.",
+    related: ["HEARTBEAT", "ENGINE_SUBSCRIBER"],
+    phase_note: "Added in Phase 13.6.",
+  },
+
+  NATS: {
+    term: "NATS",
+    display: "NATS",
+    short: "NATS messaging server (127.0.0.1:4222) — the pub/sub bus between the Python Alpha Engine and Go execution engine.",
+    long: `**NATS** is the lightweight pub/sub message broker connecting publisher to execution engine.
+
+**Subjects:** \`tsla.alpha.signals\` (signals), \`tsla.alpha.sim\` (mode toggle), \`system.heartbeat\` (liveness pulses, Phase 13.6).
+
+NATS runs 24/7 as a local process. If NATS goes down, the publisher retries connection on every cycle.`,
+    source: "nats-server (local) · github.com/nats-io/nats.go",
+    trading_impact: "NATS down = signals never reach execution engine = no order placement.",
+    related: ["PUBLISHER", "ENGINE_SUBSCRIBER", "HEARTBEAT"],
+    phase_note: "Added in Phase 13.6.",
+  },
 };
 
 /**

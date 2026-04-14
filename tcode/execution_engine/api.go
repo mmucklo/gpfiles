@@ -2582,6 +2582,137 @@ func (h *ConfigHandler) ServeSignalFeedbackResolve(w http.ResponseWriter, r *htt
 	json.NewEncoder(w).Encode(result)
 }
 
+// ── /api/system/heartbeats ────────────────────────────────────────────────────
+
+// ServeSystemHeartbeats handles GET /api/system/heartbeats.
+// Queries process_heartbeats via Python subprocess and returns per-component status.
+func (h *ConfigHandler) ServeSystemHeartbeats(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	cmd := exec.Command("./alpha_engine/venv/bin/python",
+		"alpha_engine/heartbeat_query.py", "heartbeats")
+	cmd.Dir = "/home/builder/src/gpfiles/tcode"
+	cmd.Env = os.Environ()
+
+	out, err := cmd.Output()
+	if err != nil {
+		http.Error(w, `{"error":"heartbeat query failed"}`, http.StatusInternalServerError)
+		return
+	}
+	w.Write(out)
+}
+
+// ServeSystemHeartbeatSparkline handles GET /api/system/heartbeats/{component}/sparkline.
+func (h *ConfigHandler) ServeSystemHeartbeatSparkline(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	// Extract component from path: /api/system/heartbeats/{component}/sparkline
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/system/heartbeats/"), "/")
+	if len(parts) < 1 || parts[0] == "" {
+		http.Error(w, `{"error":"component required"}`, http.StatusBadRequest)
+		return
+	}
+	component := parts[0]
+
+	cmd := exec.Command("./alpha_engine/venv/bin/python",
+		"alpha_engine/heartbeat_query.py", "sparkline", component)
+	cmd.Dir = "/home/builder/src/gpfiles/tcode"
+	cmd.Env = os.Environ()
+
+	out, err := cmd.Output()
+	if err != nil {
+		w.Write([]byte("[]"))
+		return
+	}
+	w.Write(out)
+}
+
+// ServeSystemHeartbeatRestart handles POST /api/system/heartbeats/{component}/restart.
+// Shells out `systemctl --user restart <unit>` — localhost-only requests only.
+// The component-to-unit map is a static allow-list; no user-supplied unit names.
+func (h *ConfigHandler) ServeSystemHeartbeatRestart(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	if r.Method == "OPTIONS" {
+		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		return
+	}
+	if r.Method != "POST" {
+		http.Error(w, `{"error":"POST required"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Restrict to localhost — restart is a privileged action.
+	host, _, splitErr := net.SplitHostPort(r.RemoteAddr)
+	if splitErr != nil {
+		host = r.RemoteAddr
+	}
+	if host != "127.0.0.1" && host != "::1" {
+		http.Error(w, `{"error":"restart only allowed from localhost"}`, http.StatusForbidden)
+		return
+	}
+
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/system/heartbeats/"), "/")
+	if len(parts) < 1 {
+		http.Error(w, `{"error":"component required"}`, http.StatusBadRequest)
+		return
+	}
+	component := parts[0]
+
+	// Static allow-list — never exec a user-supplied unit name.
+	componentToUnit := map[string]string{
+		"publisher":          "publisher.service",
+		"engine_subscriber":  "executor.service",
+		"engine_ibkr_status": "executor.service",
+	}
+	unit, ok := componentToUnit[component]
+	if !ok {
+		http.Error(w, `{"error":"unknown component — cannot restart"}`, http.StatusBadRequest)
+		return
+	}
+
+	out, err := exec.Command("systemctl", "--user", "restart", unit).CombinedOutput()
+	if err != nil {
+		resp := map[string]interface{}{
+			"ok":      false,
+			"unit":    unit,
+			"error":   err.Error(),
+			"output":  string(out),
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"ok":   true,
+		"unit": unit,
+		"msg":  fmt.Sprintf("systemctl --user restart %s succeeded", unit),
+	})
+}
+
+// ServeSystemAlerts handles GET /api/system/alerts — recent system alert rows.
+func (h *ConfigHandler) ServeSystemAlerts(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	cmd := exec.Command("./alpha_engine/venv/bin/python",
+		"alpha_engine/heartbeat_query.py", "alerts")
+	cmd.Dir = "/home/builder/src/gpfiles/tcode"
+	cmd.Env = os.Environ()
+
+	out, err := cmd.Output()
+	if err != nil {
+		w.Write([]byte("[]"))
+		return
+	}
+	w.Write(out)
+}
+
 func RequestLoggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()

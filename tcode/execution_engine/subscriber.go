@@ -628,6 +628,34 @@ func (s *SignalSubscriber) Start() {
 	if err != nil {
 		log.Fatalf("Subscription Error: %v", err)
 	}
+
+	// Engine subscriber heartbeat: tick every 30s to signal this process is alive.
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			emitEngineHeartbeat("engine_subscriber", "ok", "")
+		}
+	}()
+}
+
+// emitEngineHeartbeat writes a heartbeat row via the Python heartbeat_writer subprocess.
+// Non-blocking on errors — a failed heartbeat write must never crash the engine.
+func emitEngineHeartbeat(component, status, detail string) {
+	args := []string{
+		"alpha_engine/venv/bin/python",
+		"alpha_engine/heartbeat_writer.py",
+		"--component", component,
+		"--status", status,
+	}
+	if detail != "" {
+		args = append(args, "--detail", detail)
+	}
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Dir = "/home/builder/src/gpfiles/tcode"
+	if err := cmd.Run(); err != nil {
+		log.Printf("[HEARTBEAT] write failed for %s: %v", component, err)
+	}
 }
 
 func (s *SignalSubscriber) Close() {
