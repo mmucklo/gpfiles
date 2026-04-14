@@ -17,6 +17,13 @@ import yfinance as yf
 
 logger = logging.getLogger("OptionsChain")
 
+try:
+    import sys as _sys
+    _sys.path.insert(0, "/home/builder/src/gpfiles/tcode/alpha_engine")
+    from heartbeat import emit_heartbeat as _hb
+except Exception:
+    def _hb(component, status="ok", detail=None, **_kw): pass  # type: ignore
+
 
 # ── market-hours helper ───────────────────────────────────────────────────────
 
@@ -226,6 +233,7 @@ class OptionsChainCache:
 
         self._cache[expiry] = (now, rows)
         logger.info("Options chain loaded: %s — %d contracts (source=%s)", expiry, len(rows), source)
+        _hb("options_chain_api", status="ok", detail=f"expiry:{expiry} contracts:{len(rows)} source:{source}")
         return rows
 
     # ── public API ────────────────────────────────────────────────────────────

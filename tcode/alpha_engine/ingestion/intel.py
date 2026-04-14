@@ -11,6 +11,13 @@ import json
 import time
 from typing import Any
 
+try:
+    import sys as _sys
+    _sys.path.insert(0, "/home/builder/src/gpfiles/tcode/alpha_engine")
+    from heartbeat import emit_heartbeat as _hb
+except Exception:
+    def _hb(component, status="ok", detail=None, **_kw): pass  # type: ignore
+
 # Module-level cache: {"data": ..., "ts": float}
 _cache: dict[str, Any] = {}
 _CACHE_TTL = 300  # 5 minutes
@@ -280,6 +287,7 @@ def get_intel() -> dict:
     result = _sanitize(result)
 
     _cache = {"data": result, "ts": now}
+    _hb("intel_refresh", status="ok", detail=f"sources:news,vix,spy,earnings,options_flow,catalyst,institutional,ev_sector,macro_regime,premarket,congress,correlation_regime")
     return result
 
 

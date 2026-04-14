@@ -42,6 +42,13 @@ import requests
 
 logger = logging.getLogger("CongressTrades")
 
+try:
+    import sys as _sys
+    _sys.path.insert(0, "/home/builder/src/gpfiles/tcode/alpha_engine")
+    from heartbeat import emit_heartbeat as _hb
+except Exception:
+    def _hb(component, status="ok", detail=None, **_kw): pass  # type: ignore
+
 _CACHE: Optional[dict] = None
 _CACHE_TS: float = 0.0
 _CACHE_TTL = 3600  # 1 hour — disclosures trickle in; no need to hammer gov servers
@@ -508,6 +515,9 @@ def get_congress_trades() -> dict:
     }
     _CACHE = result
     _CACHE_TS = now
+    senate_status = result.get("senate", {}).get("status", "unknown")
+    _hb("congress_trades", status="ok" if senate_status == "ok" else "degraded",
+        detail=f"senate:{senate_status} trades:{len(all_trades)}")
     return result
 
 

@@ -20,6 +20,7 @@ from ingestion.tv_feed import validate_spot_price, get_tv_cache, TVFeedError
 from ingestion.ibkr_feed import get_ibkr_feed
 from data.logger import DataLogger
 from config.archetypes import get_archetype, MODEL_ARCHETYPE_MAP, ARCHETYPES
+from heartbeat import emit_heartbeat_async, set_nats_conn
 
 # ── Notional account size: NEVER use portfolio NAV for sizing. ───────────────
 # Default $25k represents the small-account discipline target for live trading.
@@ -259,6 +260,7 @@ class SignalPublisher:
         """Establishing high-speed connection to the NATS broker."""
         print(f"Connecting to NATS at {self.nats_url}...")
         self.nc = await nats.connect(self.nats_url)
+        set_nats_conn(self.nc)
         print("Connected to NATS.")
 
     async def publish_signal(self, signal: ModelSignal, spot_sources: dict = None):
@@ -433,6 +435,7 @@ async def broadcast_loop():
             ok, reason = check_data_gates(spot_sources)
             if not ok:
                 print(f"[GATE BLOCKED] {reason}")
+                await emit_heartbeat_async("publisher", status="degraded", detail=f"gate_blocked:{reason}", logger=_logger)
                 await asyncio.sleep(random.uniform(10, 20))
                 continue
         except Exception as _exc:
@@ -446,6 +449,7 @@ async def broadcast_loop():
             intel = get_intel()
         except Exception as _ie:
             print(f"[INTEL] Fetch failed: {_ie}")
+            await emit_heartbeat_async("publisher", status="error", detail=f"intel_fetch_failed:{_ie}", logger=_logger)
             await asyncio.sleep(random.uniform(10, 20))
             continue
 
@@ -898,19 +902,9 @@ async def broadcast_loop():
                 await asyncio.sleep(5)
                 await publisher.connect()
 
-        # Heartbeat (always, even when no model fires)
-        heartbeat = ModelSignal(
-            model_id=ModelType.MACRO,
-            direction=SignalDirection.NEUTRAL,
-            confidence=0.5,
-            timestamp=time.time(),
-            ticker="TSLA",
-            underlying_price=spot,
-            price_source="HEARTBEAT",
-            strategy_code="IDLE_SCAN",
-            confidence_rationale="Scanning market for high-conviction patterns..."
-        )
-        await publisher.publish_signal(heartbeat)
+        # Process heartbeat — always emitted, even when no model fires.
+        # This is a liveness pulse to SQLite + NATS; NOT a trading signal.
+        await emit_heartbeat_async("publisher", status="ok", logger=_logger)
 
         # Scan interval: 10-20 seconds between full model sweeps
         await asyncio.sleep(random.uniform(10, 20))
