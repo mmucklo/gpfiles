@@ -735,9 +735,31 @@ func (h *ConfigHandler) ServeLatencyMetrics(w http.ResponseWriter, r *http.Reque
 
 func (h *ConfigHandler) ServeSignalBreakdown(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	// In-memory per-strategy counts (runtime)
 	GlobalMetrics.mu.RLock()
-	defer GlobalMetrics.mu.RUnlock()
-	json.NewEncoder(w).Encode(GlobalMetrics.SignalBreakdown)
+	byStrategy := GlobalMetrics.SignalBreakdown
+	GlobalMetrics.mu.RUnlock()
+
+	// Phase 14: attribution data from SQLite (30/60/90-day windows)
+	var attribution interface{}
+	cmd := exec.Command("./alpha_engine/venv/bin/python",
+		"alpha_engine/attribution.py", "selection_breakdown")
+	cmd.Dir = "/home/builder/src/gpfiles/tcode"
+	cmd.Env = os.Environ()
+	if out, err := cmd.Output(); err == nil {
+		if jsonErr := json.Unmarshal(out, &attribution); jsonErr != nil {
+			attribution = map[string]string{"error": "json_parse: " + jsonErr.Error()}
+		}
+	} else {
+		attribution = map[string]string{"error": "script: " + err.Error()}
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"by_strategy": byStrategy,
+		"attribution": attribution,
+	})
 }
 
 type NatsHealth struct {
