@@ -1,8 +1,53 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, Component, type ReactNode, type ErrorInfo } from 'react';
 import { Routes, Route, Link } from 'react-router-dom';
 import './App.css';
 import './components/Tooltip.css';
 import Tooltip from './components/Tooltip';
+
+// ── Root ErrorBoundary — catches any render crash and shows a red banner ─────
+// Without this, a single panel crash blanks the entire dashboard (React default).
+interface EBState { hasError: boolean; error: string | null }
+export class RootErrorBoundary extends Component<{ children: ReactNode }, EBState> {
+  constructor(props: { children: ReactNode }) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+  static getDerivedStateFromError(err: Error): EBState {
+    return { hasError: true, error: err?.message ?? String(err) };
+  }
+  componentDidCatch(err: Error, info: ErrorInfo) {
+    console.error('[RootErrorBoundary] render crash:', err, info);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{
+          padding: '2rem', background: '#0d1117', minHeight: '100vh',
+          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+        }}>
+          <div style={{
+            background: '#6e1919', border: '2px solid #f85149', borderRadius: '8px',
+            padding: '1.5rem 2rem', maxWidth: '640px', width: '100%',
+          }}>
+            <div style={{ color: '#f85149', fontWeight: 800, fontSize: '16px', marginBottom: '8px' }}>
+              Dashboard render error — click to reload
+            </div>
+            <div style={{ color: '#ffa657', fontFamily: 'monospace', fontSize: '12px', marginBottom: '16px' }}>
+              {this.state.error}
+            </div>
+            <button
+              style={{ background: '#f85149', border: 'none', color: 'white', padding: '8px 20px', borderRadius: '4px', cursor: 'pointer', fontWeight: 700 }}
+              onClick={() => window.location.reload()}
+            >
+              Reload
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 import IntegrityStatus from './components/IntegrityStatus';
 import HelpPanel from './components/HelpPanel';
 import { SystemHealthBadge, type HealthSummary } from './components/SystemHealthPanel';

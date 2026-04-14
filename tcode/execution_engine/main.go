@@ -234,6 +234,7 @@ func main() {
 	mux.HandleFunc("/api/signals/feedback/resolve", configHandler.ServeSignalFeedbackResolve)
 	mux.HandleFunc("/api/signals/feedback", configHandler.ServeSignalFeedback)
 	mux.HandleFunc("/api/signals/cancel", configHandler.ServeSignalCancel)
+	mux.HandleFunc("/api/signals/rejections", configHandler.ServeSignalRejections)
 
 	// System heartbeats (Phase 13.6)
 	mux.HandleFunc("/api/system/heartbeats", configHandler.ServeSystemHeartbeats)

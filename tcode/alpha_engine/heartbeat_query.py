@@ -199,6 +199,43 @@ def query_recent_alerts(limit: int = 5) -> list[dict]:
         return []
 
 
+def query_rejections(hours: int = 1, limit: int = 100) -> dict:
+    """Return signal rejections from the last `hours` hours.
+
+    Returns:
+        {"count": int, "items": [{"ts", "model", "opt_type", "archetype", "reason", "expiry"}, ...]}
+    """
+    if not os.path.exists(DB_PATH):
+        return {"count": 0, "items": []}
+    try:
+        cutoff = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        # Compute cutoff as UTC string hours ago
+        import datetime as _dt
+        cutoff_dt = datetime.now(timezone.utc) - _dt.timedelta(hours=hours)
+        cutoff_str = cutoff_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+        conn = sqlite3.connect(DB_PATH, timeout=5)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        try:
+            rows = conn.execute(
+                """SELECT ts, model, opt_type, archetype, reason, expiry
+                   FROM signal_rejections
+                   WHERE ts >= ?
+                   ORDER BY id DESC LIMIT ?""",
+                (cutoff_str, limit),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            # Table doesn't exist yet (no rejections ever written)
+            return {"count": 0, "items": []}
+        finally:
+            conn.close()
+        items = [dict(r) for r in rows]
+        return {"count": len(items), "items": items}
+    except Exception as e:
+        return {"count": 0, "items": [], "error": str(e)}
+
+
 if __name__ == "__main__":
     import sys
     mode = sys.argv[1] if len(sys.argv) > 1 else "heartbeats"
@@ -206,5 +243,8 @@ if __name__ == "__main__":
         print(json.dumps(query_sparkline(sys.argv[2])))
     elif mode == "alerts":
         print(json.dumps(query_recent_alerts()))
+    elif mode == "rejections":
+        hours = int(sys.argv[2]) if len(sys.argv) > 2 else 1
+        print(json.dumps(query_rejections(hours=hours)))
     else:
         print(json.dumps(query_heartbeats()))

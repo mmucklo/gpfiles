@@ -164,3 +164,49 @@ async def emit_heartbeat_async(
             await _nats_conn.publish("system.heartbeat", payload)
         except Exception:
             pass  # NATS publish is best-effort
+
+
+# ── Signal rejection tracking ─────────────────────────────────────────────────
+
+def emit_rejection(
+    model: str,
+    opt_type: str,
+    archetype: str,
+    reason: str,
+    expiry: str | None = None,
+    db_path: str = DB_PATH,
+) -> None:
+    """Record a dropped signal to the signal_rejections table.
+
+    Schema is created on first write.  Called at [STRIKE-REJECT] and
+    [STRIKE-SELECT-FAIL] sites in publisher.py.  Silently swallows all
+    exceptions — a failed rejection write must never crash the publisher.
+    """
+    try:
+        conn = sqlite3.connect(db_path, timeout=5)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS signal_rejections (
+                id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts      TEXT NOT NULL,
+                model   TEXT NOT NULL,
+                opt_type TEXT NOT NULL,
+                archetype TEXT NOT NULL,
+                reason  TEXT NOT NULL,
+                expiry  TEXT
+            )"""
+        )
+        conn.execute(
+            """INSERT INTO signal_rejections (ts, model, opt_type, archetype, reason, expiry)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (_isotime(), model, opt_type, archetype, reason, expiry or ""),
+        )
+        # Trim table to last 500 rows to prevent unbounded growth
+        conn.execute(
+            """DELETE FROM signal_rejections
+               WHERE id NOT IN (SELECT id FROM signal_rejections ORDER BY id DESC LIMIT 500)"""
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass  # rejection writes must never crash the publisher

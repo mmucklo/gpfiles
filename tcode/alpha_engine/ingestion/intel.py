@@ -264,7 +264,15 @@ def get_intel() -> dict:
         from ingestion.chop_regime import get_chop_regime
         chop_regime = get_chop_regime()
     except Exception as e:
-        chop_regime = {"regime": "TRENDING", "score": 0.0, "error": str(e)}
+        chop_regime = {
+            "regime": "TRENDING",
+            "score": 0.0,
+            "components": {"range_ratio": None, "adx": None, "bb_squeeze": None, "rv_iv_ratio": None},
+            "thresholds_hit": [],
+            "ts": None,
+            "source": "fallback",
+            "error": str(e),
+        }
 
     result = {
         "fetch_timestamp": now,

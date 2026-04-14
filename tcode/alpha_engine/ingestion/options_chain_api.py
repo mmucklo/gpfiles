@@ -22,7 +22,21 @@ def main():
     expiry = args.expiry or cache.nearest_expiry_with_liquidity(min_dte=1)
 
     if not expiry:
-        print(json.dumps({"error": "no liquid expiry found", "expiries": []}))
+        # Fallback: use the nearest expiry from the list even without liquidity check
+        expiry_list = cache._get_expiry_list()
+        from datetime import date, timedelta
+        today = date.today()
+        cutoff = today + timedelta(days=1)
+        for exp in expiry_list:
+            try:
+                if date.fromisoformat(exp) >= cutoff:
+                    expiry = exp
+                    break
+            except ValueError:
+                continue
+
+    if not expiry:
+        print(json.dumps({"error": "no liquid expiry found", "expiries": cache._get_expiry_list()[:8]}))
         return
 
     rows = cache.get_chain(expiry)
