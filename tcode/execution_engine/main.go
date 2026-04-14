@@ -227,6 +227,13 @@ func main() {
 	mux.HandleFunc("/api/positions/close", configHandler.ServePositionsClose)
 	mux.HandleFunc("/api/config/notional", configHandler.ServeNotionalConfig)
 
+	// Signal feedback & cancel (Phase 13)
+	mux.HandleFunc("/api/signals/feedback/recent", configHandler.ServeSignalFeedbackRecent)
+	mux.HandleFunc("/api/signals/feedback/digest", configHandler.ServeSignalFeedbackDigest)
+	mux.HandleFunc("/api/signals/feedback/resolve", configHandler.ServeSignalFeedbackResolve)
+	mux.HandleFunc("/api/signals/feedback", configHandler.ServeSignalFeedback)
+	mux.HandleFunc("/api/signals/cancel", configHandler.ServeSignalCancel)
+
 	// Live Reload WebSocket (Task: Auto-Refresh)
 	mux.Handle("/dev/ws", GlobalReloader)
 	mux.HandleFunc("/dev/reload", TriggerReloadHandler)
@@ -283,6 +290,9 @@ func main() {
 
 	subscriber.Start()
 	defer subscriber.Close()
+
+	// Phase 13: keep cancelled-signal cache current (10s refresh from DB)
+	StartCancelRefreshLoop()
 
 	// Periodic Portfolio Revaluation (Task: Real-time NAV & Unrealized PnL)
 	go func() {

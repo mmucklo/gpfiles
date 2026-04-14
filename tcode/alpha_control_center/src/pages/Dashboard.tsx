@@ -5,6 +5,7 @@ import TradingViewWidget from '../components/TradingViewWidget';
 import SystemMonitor from '../components/SystemMonitor';
 import { SkeletonCard, SkeletonTable } from '../components/SkeletonLoader';
 import { computeEconomics, formatRR, rrColorClass } from '../lib/signal_economics';
+import TermLabel from '../components/TermLabel';
 
 // ============================================================
 //  Types
@@ -505,6 +506,39 @@ function contractExplanation(s: Signal): string {
 // ============================================================
 //  Signal Detail Modal (with chain drill-down)
 // ============================================================
+// Compute the signal fingerprint (matches subscriber.go signalFingerprint)
+function signalFingerprint(s: Signal): string {
+    const ticker = s.ticker || 'TSLA';
+    const strike = (s.recommended_strike ?? 0).toFixed(2);
+    const qty = s.quantity ?? 1;
+    const action = s.action || 'BUY';
+    return `${ticker}_${s.option_type}_${s.expiration_date ?? ''}_${action}_${strike}_${qty}`;
+}
+
+const FEEDBACK_TAGS = [
+    { value: '', label: '— none —' },
+    { value: 'bad_entry', label: 'bad_entry — entry price was off' },
+    { value: 'bad_strike', label: 'bad_strike — wrong strike for setup' },
+    { value: 'wrong_direction', label: 'wrong_direction — signal fired wrong side' },
+    { value: 'right_idea_wrong_size', label: 'right_idea_wrong_size — direction ok, qty wrong' },
+    { value: 'expired_worthless', label: 'expired_worthless — let expire instead of exiting' },
+    { value: 'late_signal', label: 'late_signal — emitted after the move ran' },
+    { value: 'commission_dominated', label: 'commission_dominated — profit eaten by fees' },
+    { value: 'good_signal', label: 'good_signal — positive annotation' },
+    { value: 'other', label: 'other — see comment' },
+];
+
+interface FeedbackRow {
+    id: number;
+    signal_id: string;
+    ts_feedback: string;
+    user_comment: string;
+    tag: string | null;
+    action: string;
+    reviewer: string;
+    resolved_by: string | null;
+}
+
 const SignalModal = ({ signal, onClose }: { signal: Signal; onClose: () => void }) => {
     const isBull = signal.direction === 'BULLISH';
     const [auditData, setAuditData] = useState<DataAudit | null>(null);
@@ -514,6 +548,74 @@ const SignalModal = ({ signal, onClose }: { signal: Signal; onClose: () => void 
     const [chainTab, setChainTab] = useState<'calls' | 'puts'>(signal.option_type === 'PUT' ? 'puts' : 'calls');
     const chainScrollRef = useRef<HTMLDivElement>(null);
     const highlightRef = useRef<HTMLTableRowElement>(null);
+
+    // ── Feedback state ─────────────────────────────────────────────────────
+    const [feedbackRows, setFeedbackRows] = useState<FeedbackRow[]>([]);
+    const [feedbackComment, setFeedbackComment] = useState('');
+    const [feedbackTag, setFeedbackTag] = useState('');
+    const [feedbackSaving, setFeedbackSaving] = useState(false);
+    const [feedbackError, setFeedbackError] = useState<string | null>(null);
+    const [cancelConfirm, setCancelConfirm] = useState(false);
+    const [cancelComment, setCancelComment] = useState('');
+    const [isCancelled, setIsCancelled] = useState(false);
+    const signalId = signalFingerprint(signal);
+
+    const fetchFeedback = useCallback(async () => {
+        try {
+            const r = await fetch(`/api/signals/feedback?signal_id=${encodeURIComponent(signalId)}`);
+            if (r.ok) {
+                const data = await r.json();
+                const rows: FeedbackRow[] = Array.isArray(data.rows) ? data.rows : (Array.isArray(data) ? data : []);
+                setFeedbackRows(rows);
+                setIsCancelled(rows.some(row => row.action === 'CANCEL'));
+            }
+        } catch { /* ignore */ }
+    }, [signalId]);
+
+    const saveFeedback = async (action: string) => {
+        const comment = action === 'CANCEL' ? cancelComment : feedbackComment;
+        if (!comment.trim()) {
+            setFeedbackError('Comment is required');
+            return;
+        }
+        setFeedbackSaving(true);
+        setFeedbackError(null);
+        try {
+            const body: Record<string, unknown> = {
+                signal_id: signalId,
+                user_comment: comment,
+                action,
+                signal_snapshot: signal,
+            };
+            if (action !== 'CANCEL' && feedbackTag) {
+                body.tag = feedbackTag;
+            }
+            const endpoint = action === 'CANCEL' ? '/api/signals/cancel' : '/api/signals/feedback';
+            const r = await fetch(endpoint, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            if (!r.ok) {
+                const err = await r.json().catch(() => ({ error: r.statusText }));
+                setFeedbackError(err.error ?? 'Save failed');
+            } else {
+                if (action === 'CANCEL') {
+                    setIsCancelled(true);
+                    setCancelConfirm(false);
+                    setCancelComment('');
+                } else {
+                    setFeedbackComment('');
+                    setFeedbackTag('');
+                }
+                await fetchFeedback();
+            }
+        } catch (e: any) {
+            setFeedbackError(e.message ?? 'Network error');
+        } finally {
+            setFeedbackSaving(false);
+        }
+    };
 
     const fetchChain = async () => {
         setChainLoading(true);
@@ -525,10 +627,11 @@ const SignalModal = ({ signal, onClose }: { signal: Signal; onClose: () => void 
         setChainLoading(false);
     };
 
-    // Auto-fetch chain on open
+    // Auto-fetch chain and feedback on open
     useEffect(() => {
         fetchChain();
-    }, []);
+        fetchFeedback();
+    }, [fetchFeedback]);
 
     // Scroll to highlighted strike row when chain data loads or tab changes
     useEffect(() => {
@@ -698,13 +801,17 @@ const SignalModal = ({ signal, onClose }: { signal: Signal; onClose: () => void 
                     {signal.strategy_code && (
                         <div className="modal-row">
                             <span className="modal-key">Strategy</span>
-                            <span className="modal-val">{signal.strategy_code}</span>
+                            <span className="modal-val">
+                                <TermLabel term={signal.strategy_code} />
+                            </span>
                         </div>
                     )}
                     {signal.model_id && (
                         <div className="modal-row">
                             <span className="modal-key">Model</span>
-                            <span className="modal-val">{signal.model_id}</span>
+                            <span className="modal-val">
+                                <TermLabel term={signal.model_id} />
+                            </span>
                         </div>
                     )}
                     {signal.expiration_date && (
@@ -1103,6 +1210,280 @@ const SignalModal = ({ signal, onClose }: { signal: Signal; onClose: () => void 
                     )}
                 </div>
             </div>
+
+                {/* ── Signal Feedback section ──────────────────────── */}
+                <div className="modal-provenance" data-testid="signal-feedback-section">
+                    <div className="modal-provenance-title">
+                        💬 YOUR FEEDBACK
+                        {isCancelled && (
+                            <span style={{ marginLeft: 10, color: '#f85149', fontWeight: 700, fontSize: 11 }}>
+                                ⛔ CANCELLED BY USER
+                            </span>
+                        )}
+                    </div>
+
+                    {/* Existing feedback rows */}
+                    {feedbackRows.length > 0 && (
+                        <div style={{ marginBottom: 12 }}>
+                            {feedbackRows.map(row => (
+                                <div key={row.id} style={{
+                                    borderBottom: '1px solid #21262d',
+                                    padding: '6px 0',
+                                    fontSize: 11,
+                                }}>
+                                    <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
+                                        <span style={{
+                                            background: row.action === 'CANCEL' ? 'rgba(248,81,73,0.15)' :
+                                                        row.action === 'MARK_WINNER' ? 'rgba(63,185,80,0.15)' :
+                                                        row.action === 'MARK_LOSER' ? 'rgba(248,81,73,0.10)' :
+                                                        'rgba(56,139,253,0.10)',
+                                            border: `1px solid ${row.action === 'CANCEL' ? 'rgba(248,81,73,0.4)' :
+                                                                  row.action === 'MARK_WINNER' ? 'rgba(63,185,80,0.4)' :
+                                                                  row.action === 'MARK_LOSER' ? 'rgba(248,81,73,0.3)' :
+                                                                  'rgba(56,139,253,0.3)'}`,
+                                            borderRadius: 3,
+                                            padding: '1px 6px',
+                                            color: row.action === 'CANCEL' ? '#f85149' :
+                                                   row.action === 'MARK_WINNER' ? '#3fb950' :
+                                                   row.action === 'MARK_LOSER' ? '#f85149' : '#58a6ff',
+                                            fontWeight: 600,
+                                        }}>{row.action}</span>
+                                        {row.tag && (
+                                            <span style={{
+                                                background: '#21262d',
+                                                border: '1px solid #30363d',
+                                                borderRadius: 3,
+                                                padding: '1px 6px',
+                                                color: '#f0883e',
+                                            }}>{row.tag}</span>
+                                        )}
+                                        <span style={{ color: '#6e7681', marginLeft: 'auto' }}>
+                                            {new Date(row.ts_feedback).toLocaleString()}
+                                        </span>
+                                        {row.resolved_by && (
+                                            <span style={{ color: '#3fb950' }}>✓ {row.resolved_by}</span>
+                                        )}
+                                    </div>
+                                    <div style={{ color: '#c9d1d9', marginTop: 3, lineHeight: 1.4 }}>
+                                        {row.user_comment}
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+
+                    {feedbackRows.length === 0 && (
+                        <div style={{ color: '#6e7681', fontSize: 11, marginBottom: 10 }}>No feedback yet.</div>
+                    )}
+
+                    {/* New feedback form */}
+                    {!cancelConfirm && (
+                        <div>
+                            <textarea
+                                data-testid="feedback-comment-input"
+                                value={feedbackComment}
+                                onChange={e => setFeedbackComment(e.target.value)}
+                                placeholder="Add a comment about this signal…"
+                                style={{
+                                    width: '100%',
+                                    background: '#0d1117',
+                                    border: '1px solid #30363d',
+                                    borderRadius: 4,
+                                    color: '#e6edf3',
+                                    fontSize: 12,
+                                    padding: '6px 8px',
+                                    resize: 'vertical',
+                                    minHeight: 60,
+                                    boxSizing: 'border-box',
+                                }}
+                            />
+                            <select
+                                data-testid="feedback-tag-select"
+                                value={feedbackTag}
+                                onChange={e => setFeedbackTag(e.target.value)}
+                                style={{
+                                    marginTop: 6,
+                                    width: '100%',
+                                    background: '#0d1117',
+                                    border: '1px solid #30363d',
+                                    borderRadius: 4,
+                                    color: '#c9d1d9',
+                                    fontSize: 11,
+                                    padding: '4px 6px',
+                                }}
+                            >
+                                {FEEDBACK_TAGS.map(t => (
+                                    <option key={t.value} value={t.value}>{t.label}</option>
+                                ))}
+                            </select>
+                            {feedbackError && (
+                                <div style={{ color: '#f85149', fontSize: 11, marginTop: 4 }}>{feedbackError}</div>
+                            )}
+                            <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
+                                <button
+                                    data-testid="btn-save-comment"
+                                    onClick={() => saveFeedback('COMMENT')}
+                                    disabled={feedbackSaving}
+                                    style={{
+                                        background: '#21262d',
+                                        border: '1px solid #30363d',
+                                        borderRadius: 4,
+                                        color: '#c9d1d9',
+                                        fontSize: 11,
+                                        padding: '4px 12px',
+                                        cursor: 'pointer',
+                                    }}
+                                >
+                                    Save Comment
+                                </button>
+                                <button
+                                    data-testid="btn-mark-winner"
+                                    onClick={() => saveFeedback('MARK_WINNER')}
+                                    disabled={feedbackSaving}
+                                    style={{
+                                        background: 'rgba(63,185,80,0.1)',
+                                        border: '1px solid rgba(63,185,80,0.4)',
+                                        borderRadius: 4,
+                                        color: '#3fb950',
+                                        fontSize: 11,
+                                        padding: '4px 12px',
+                                        cursor: 'pointer',
+                                    }}
+                                >
+                                    Mark Winner
+                                </button>
+                                <button
+                                    data-testid="btn-mark-loser"
+                                    onClick={() => saveFeedback('MARK_LOSER')}
+                                    disabled={feedbackSaving}
+                                    style={{
+                                        background: 'rgba(248,81,73,0.1)',
+                                        border: '1px solid rgba(248,81,73,0.4)',
+                                        borderRadius: 4,
+                                        color: '#f85149',
+                                        fontSize: 11,
+                                        padding: '4px 12px',
+                                        cursor: 'pointer',
+                                    }}
+                                >
+                                    Mark Loser
+                                </button>
+                                {!isCancelled && (
+                                    <button
+                                        data-testid="btn-cancel-signal"
+                                        onClick={() => setCancelConfirm(true)}
+                                        style={{
+                                            background: 'rgba(248,81,73,0.08)',
+                                            border: '1px solid rgba(248,81,73,0.5)',
+                                            borderRadius: 4,
+                                            color: '#f85149',
+                                            fontSize: 11,
+                                            padding: '4px 12px',
+                                            cursor: 'pointer',
+                                            marginLeft: 'auto',
+                                        }}
+                                    >
+                                        Cancel This Signal
+                                    </button>
+                                )}
+                                {isCancelled && (
+                                    <button
+                                        data-testid="btn-uncancel-signal"
+                                        onClick={() => {
+                                            setFeedbackComment('Un-cancelling this signal.');
+                                            saveFeedback('COMMENT');
+                                            setIsCancelled(false);
+                                        }}
+                                        style={{
+                                            background: 'rgba(63,185,80,0.08)',
+                                            border: '1px solid rgba(63,185,80,0.3)',
+                                            borderRadius: 4,
+                                            color: '#3fb950',
+                                            fontSize: 11,
+                                            padding: '4px 12px',
+                                            cursor: 'pointer',
+                                            marginLeft: 'auto',
+                                        }}
+                                    >
+                                        Uncancel Signal
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Cancel confirmation form */}
+                    {cancelConfirm && (
+                        <div style={{ background: 'rgba(248,81,73,0.06)', border: '1px solid rgba(248,81,73,0.3)', borderRadius: 6, padding: '10px 12px' }}>
+                            <div style={{ color: '#f85149', fontWeight: 600, fontSize: 12, marginBottom: 6 }}>
+                                Cancel signal {signalId}?
+                            </div>
+                            <div style={{ color: '#8b949e', fontSize: 11, marginBottom: 8, lineHeight: 1.5 }}>
+                                This prevents any pending or future bracket from being placed for this signal fingerprint. Reversible via the Uncancel button.
+                                {signal.ibkr_order_id && signal.ibkr_order_id > 0 && (
+                                    <span style={{ display: 'block', color: '#f0883e', marginTop: 4 }}>
+                                        ⚠ Bracket order #{signal.ibkr_order_id} is still open — cancel separately via the Orders panel if desired.
+                                    </span>
+                                )}
+                            </div>
+                            <textarea
+                                data-testid="cancel-comment-input"
+                                value={cancelComment}
+                                onChange={e => setCancelComment(e.target.value)}
+                                placeholder="Reason for cancelling (required)…"
+                                style={{
+                                    width: '100%',
+                                    background: '#0d1117',
+                                    border: '1px solid #30363d',
+                                    borderRadius: 4,
+                                    color: '#e6edf3',
+                                    fontSize: 12,
+                                    padding: '6px 8px',
+                                    resize: 'vertical',
+                                    minHeight: 48,
+                                    boxSizing: 'border-box',
+                                }}
+                            />
+                            {feedbackError && (
+                                <div style={{ color: '#f85149', fontSize: 11, marginTop: 4 }}>{feedbackError}</div>
+                            )}
+                            <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                                <button
+                                    data-testid="btn-confirm-cancel"
+                                    onClick={() => saveFeedback('CANCEL')}
+                                    disabled={feedbackSaving || !cancelComment.trim()}
+                                    style={{
+                                        background: 'rgba(248,81,73,0.15)',
+                                        border: '1px solid rgba(248,81,73,0.5)',
+                                        borderRadius: 4,
+                                        color: '#f85149',
+                                        fontSize: 11,
+                                        padding: '4px 14px',
+                                        cursor: 'pointer',
+                                        fontWeight: 600,
+                                    }}
+                                >
+                                    {feedbackSaving ? 'Cancelling…' : 'Confirm Cancel'}
+                                </button>
+                                <button
+                                    data-testid="btn-dismiss-cancel"
+                                    onClick={() => { setCancelConfirm(false); setFeedbackError(null); }}
+                                    style={{
+                                        background: '#21262d',
+                                        border: '1px solid #30363d',
+                                        borderRadius: 4,
+                                        color: '#8b949e',
+                                        fontSize: 11,
+                                        padding: '4px 14px',
+                                        cursor: 'pointer',
+                                    }}
+                                >
+                                    Dismiss
+                                </button>
+                            </div>
+                        </div>
+                    )}
+                </div>
         </div>
     );
 };
@@ -3794,9 +4175,9 @@ const IntelPanel = ({ intel, isLoading }: { intel: Intel | null; isLoading?: boo
 
                 {/* Card 6: TSLA↔Mag7 Correlation Regime */}
                 <div className="intel-card" role="region" aria-label="TSLA-Mag7 Correlation Regime" data-testid="correlation-regime-card">
-                    <Tooltip text="TSLA vs QQQ 5-day rolling correlation z-score. IDIOSYNCRATIC (z&lt;-2): TSLA decoupled, amplify SENTIMENT/CONTRARIAN ×1.20. MACRO_LOCKED (z&gt;+2): amplify MACRO ×1.20.">
-                        <div className="intel-card-title">Correlation Regime</div>
-                    </Tooltip>
+                    <div className="intel-card-title">
+                        <TermLabel term="CORRELATION_REGIME" />
+                    </div>
                     {corrRegime ? (
                         <>
                             <div className="intel-row">
@@ -3808,7 +4189,12 @@ const IntelPanel = ({ intel, isLoading }: { intel: Intel | null; isLoading?: boo
                                     fontWeight: 700,
                                     fontSize: '12px',
                                 }}>
-                                    {corrRegime.regime}
+                                    <TermLabel
+                                        term={corrRegime.regime === 'IDIOSYNCRATIC' ? 'IDIOSYNCRATIC'
+                                            : corrRegime.regime === 'MACRO_LOCKED' ? 'MACRO_LOCKED'
+                                            : 'NORMAL'}
+                                        style={{ color: 'inherit', fontWeight: 'inherit' }}
+                                    />
                                 </span>
                             </div>
                             {corrRegime.tsla_qqq_5d_corr !== null && (
@@ -3832,10 +4218,14 @@ const IntelPanel = ({ intel, isLoading }: { intel: Intel | null; isLoading?: boo
                                 </div>
                             )}
                             {corrRegime.regime === 'IDIOSYNCRATIC' && (
-                                <div className="intel-row" style={{fontSize:'10px',color:'#f0883e'}}>SENTIMENT/CONTRARIAN ×1.20 conf</div>
+                                <div className="intel-row" style={{fontSize:'10px',color:'#f0883e'}}>
+                                    <TermLabel term="SENTIMENT" style={{color:'inherit'}} /> / <TermLabel term="CONTRARIAN" style={{color:'inherit'}} /> ×1.20 conf
+                                </div>
                             )}
                             {corrRegime.regime === 'MACRO_LOCKED' && (
-                                <div className="intel-row" style={{fontSize:'10px',color:'#58a6ff'}}>MACRO ×1.20 conf</div>
+                                <div className="intel-row" style={{fontSize:'10px',color:'#58a6ff'}}>
+                                    <TermLabel term="MACRO" style={{color:'inherit'}} /> ×1.20 conf
+                                </div>
                             )}
                             <div className="intel-stale">Cached 1h · yfinance 60d</div>
                         </>
@@ -3844,6 +4234,171 @@ const IntelPanel = ({ intel, isLoading }: { intel: Intel | null; isLoading?: boo
                     )}
                 </div>
             </div>
+        </div>
+    );
+};
+
+// ============================================================
+//  Feedback Inbox Panel
+// ============================================================
+interface FeedbackInboxRow {
+    id: number;
+    signal_id: string;
+    ts_feedback: string;
+    user_comment: string;
+    tag: string | null;
+    action: string;
+    reviewer: string;
+    resolved_by: string | null;
+}
+
+const FeedbackInbox = () => {
+    const [rows, setRows] = useState<FeedbackInboxRow[]>([]);
+    const [total, setTotal] = useState(0);
+    const [unresolved, setUnresolved] = useState(0);
+    const [filterTag, setFilterTag] = useState('');
+    const [filterAction, setFilterAction] = useState('');
+    const [since, setSince] = useState('');
+    const [loading, setLoading] = useState(false);
+    const [selectedSignalId, setSelectedSignalId] = useState<string | null>(null);
+
+    const fetchInbox = useCallback(async () => {
+        setLoading(true);
+        try {
+            const params = new URLSearchParams();
+            if (filterTag) params.set('tag', filterTag);
+            if (filterAction) params.set('action', filterAction);
+            if (since) params.set('since', since);
+            params.set('limit', '50');
+            const r = await fetch(`/api/signals/feedback/recent?${params}`);
+            if (r.ok) {
+                const data = await r.json();
+                setRows(data.rows ?? []);
+                setTotal(data.total ?? 0);
+                setUnresolved(data.unresolved ?? 0);
+            }
+        } catch { /* ignore */ }
+        setLoading(false);
+    }, [filterTag, filterAction, since]);
+
+    useEffect(() => {
+        fetchInbox();
+    }, [fetchInbox]);
+
+    const actionColor = (action: string) => {
+        if (action === 'CANCEL') return '#f85149';
+        if (action === 'MARK_WINNER') return '#3fb950';
+        if (action === 'MARK_LOSER') return '#f85149';
+        return '#58a6ff';
+    };
+
+    return (
+        <div className="dash-col card" role="region" aria-label="Signal Feedback Inbox" data-testid="feedback-inbox">
+            <div className="section-header">
+                <span className="section-title">💬 SIGNAL FEEDBACK INBOX</span>
+                <div className="section-meta">
+                    {unresolved > 0 && (
+                        <span
+                            className="inline-badge"
+                            style={{ background: 'rgba(248,81,73,0.15)', color: '#f85149', border: '1px solid rgba(248,81,73,0.4)' }}
+                            title="Unresolved feedback items"
+                            data-testid="unresolved-count"
+                        >
+                            {unresolved} unresolved
+                        </span>
+                    )}
+                    <span className="inline-badge">{total} total</span>
+                    <button
+                        onClick={fetchInbox}
+                        style={{ background: 'none', border: 'none', color: '#8b949e', cursor: 'pointer', fontSize: 12 }}
+                        title="Refresh"
+                    >↻</button>
+                </div>
+            </div>
+
+            {/* Filters */}
+            <div style={{ display: 'flex', gap: 8, padding: '6px 0', flexWrap: 'wrap' }}>
+                <select
+                    data-testid="inbox-filter-tag"
+                    value={filterTag}
+                    onChange={e => setFilterTag(e.target.value)}
+                    style={{ background: '#0d1117', border: '1px solid #30363d', borderRadius: 4, color: '#c9d1d9', fontSize: 11, padding: '3px 6px' }}
+                >
+                    <option value="">All tags</option>
+                    {['bad_entry','bad_strike','wrong_direction','right_idea_wrong_size',
+                      'expired_worthless','late_signal','commission_dominated','good_signal','other'].map(t => (
+                        <option key={t} value={t}>{t}</option>
+                    ))}
+                </select>
+                <select
+                    data-testid="inbox-filter-action"
+                    value={filterAction}
+                    onChange={e => setFilterAction(e.target.value)}
+                    style={{ background: '#0d1117', border: '1px solid #30363d', borderRadius: 4, color: '#c9d1d9', fontSize: 11, padding: '3px 6px' }}
+                >
+                    <option value="">All actions</option>
+                    {['COMMENT','CANCEL','FOLLOWUP','MARK_WINNER','MARK_LOSER'].map(a => (
+                        <option key={a} value={a}>{a}</option>
+                    ))}
+                </select>
+                <input
+                    data-testid="inbox-filter-since"
+                    type="date"
+                    value={since}
+                    onChange={e => setSince(e.target.value ? new Date(e.target.value).toISOString() : '')}
+                    style={{ background: '#0d1117', border: '1px solid #30363d', borderRadius: 4, color: '#c9d1d9', fontSize: 11, padding: '3px 6px' }}
+                />
+            </div>
+
+            {loading ? (
+                <div style={{ color: '#6e7681', fontSize: 12, padding: '10px 0' }}>Loading…</div>
+            ) : rows.length === 0 ? (
+                <div style={{ color: '#6e7681', fontSize: 12, padding: '10px 0' }}>No feedback found.</div>
+            ) : (
+                <div style={{ overflowY: 'auto', maxHeight: 320 }}>
+                    {rows.map(row => (
+                        <div
+                            key={row.id}
+                            data-testid="feedback-inbox-row"
+                            style={{
+                                borderBottom: '1px solid #21262d',
+                                padding: '7px 0',
+                                fontSize: 11,
+                                cursor: 'pointer',
+                                background: selectedSignalId === row.signal_id ? 'rgba(56,139,253,0.06)' : 'transparent',
+                            }}
+                            onClick={() => setSelectedSignalId(row.signal_id === selectedSignalId ? null : row.signal_id)}
+                            role="button"
+                            tabIndex={0}
+                            aria-label={`Feedback ${row.action} for ${row.signal_id}`}
+                        >
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
+                                <span style={{ color: actionColor(row.action), fontWeight: 600 }}>{row.action}</span>
+                                {row.tag && (
+                                    <span style={{ color: '#f0883e', background: 'rgba(240,136,62,0.1)', borderRadius: 3, padding: '1px 5px' }}>
+                                        {row.tag}
+                                    </span>
+                                )}
+                                <span
+                                    style={{ color: '#58a6ff', cursor: 'pointer', fontFamily: 'monospace', fontSize: 10 }}
+                                    title="Click to filter by this signal"
+                                >
+                                    {row.signal_id.length > 40 ? row.signal_id.slice(0, 40) + '…' : row.signal_id}
+                                </span>
+                                <span style={{ color: '#6e7681', marginLeft: 'auto' }}>
+                                    {new Date(row.ts_feedback).toLocaleDateString()}
+                                </span>
+                                {row.resolved_by && (
+                                    <span style={{ color: '#3fb950' }}>✓</span>
+                                )}
+                            </div>
+                            <div style={{ color: '#c9d1d9', marginTop: 3, lineHeight: 1.4 }}>
+                                {row.user_comment.length > 120 ? row.user_comment.slice(0, 120) + '…' : row.user_comment}
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            )}
         </div>
     );
 };
@@ -4391,7 +4946,15 @@ const Dashboard = ({ brokerStatus, integrityRed = false }: { brokerStatus: Broke
                 <ExecutionLog trades={trades} brokerStatus={brokerStatus} lossSummary={lossSummary} simMode={simMode} />
             </div>
 
-            {/* Zone 3: Chart + Monitor Strip */}
+            {/* Zone 3: Feedback Inbox (collapsible) */}
+            <CollapsiblePanel
+                storageKey="dashboard_feedback_inbox_open"
+                title="💬 SIGNAL FEEDBACK INBOX"
+            >
+                <FeedbackInbox />
+            </CollapsiblePanel>
+
+            {/* Zone 4: Chart + Monitor Strip */}
             <div className="bottom-strip">
                 <CollapsiblePanel
                     storageKey="dashboard_intel_open"

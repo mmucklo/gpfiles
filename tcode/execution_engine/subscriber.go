@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"os/exec"
 	"sync"
 	"time"
 
@@ -91,6 +92,80 @@ var (
 	orderDedupMu sync.RWMutex
 	orderDedup   = map[string]orderState{}
 )
+
+// ── User-cancelled signal cache ───────────────────────────────────────────────
+// Populated by ServeSignalCancel (Phase 13) and refreshed from the DB every 10s.
+// The subscriber checks this set before calling PlaceIBKROrder/PlaceBracketIBKROrder.
+// Using a simple string set — signal_id is the fingerprint.
+var (
+	cancelledSignalsMu   sync.RWMutex
+	cancelledSignals     = map[string]bool{}
+)
+
+// addCancelledSignal registers a signal as user-cancelled immediately
+// (before the 10s refresh cycle fires).
+func addCancelledSignal(signalID string) {
+	cancelledSignalsMu.Lock()
+	defer cancelledSignalsMu.Unlock()
+	cancelledSignals[signalID] = true
+}
+
+// isSignalCancelled returns true if the signal has a CANCEL action in the DB.
+func isSignalCancelled(signalID string) bool {
+	cancelledSignalsMu.RLock()
+	defer cancelledSignalsMu.RUnlock()
+	return cancelledSignals[signalID]
+}
+
+// refreshCancelledSignals shells out to signal_feedback.py get_recent with
+// action=CANCEL and rebuilds the in-memory set.  Called every 10 seconds
+// by a background goroutine launched from StartCancelRefreshLoop.
+func refreshCancelledSignals() {
+	cmd := exec.Command("./alpha_engine/venv/bin/python",
+		"alpha_engine/ingestion/signal_feedback.py",
+		"get_recent",
+		`{"action":"CANCEL","limit":500}`,
+	)
+	cmd.Dir = "/home/builder/src/gpfiles/tcode"
+	out, err := cmd.Output()
+	if err != nil {
+		log.Printf("[CANCEL-REFRESH] error: %v", err)
+		return
+	}
+
+	var payload struct {
+		Rows []struct {
+			SignalID string `json:"signal_id"`
+		} `json:"rows"`
+	}
+	if err := json.Unmarshal(out, &payload); err != nil {
+		log.Printf("[CANCEL-REFRESH] parse error: %v", err)
+		return
+	}
+
+	fresh := make(map[string]bool, len(payload.Rows))
+	for _, row := range payload.Rows {
+		if row.SignalID != "" {
+			fresh[row.SignalID] = true
+		}
+	}
+
+	cancelledSignalsMu.Lock()
+	cancelledSignals = fresh
+	cancelledSignalsMu.Unlock()
+}
+
+// StartCancelRefreshLoop launches the background goroutine that keeps the
+// cancelled-signal cache up to date.  Call once from main().
+func StartCancelRefreshLoop() {
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			refreshCancelledSignals()
+		}
+	}()
+}
 
 // inFlightStatuses extends activeStatuses with an internal sentinel used while
 // the order placement is in progress.  Any goroutine that sees "pending" should
@@ -383,6 +458,16 @@ func (s *SignalSubscriber) Start() {
 
 			// ── Dedup: skip if an order with the same fingerprint is already active ──
 			fp := signalFingerprint(ticker, sig.OptionType, sig.ExpirationDate, action, strike, absQty)
+
+			// ── User-cancel gate (Phase 13): check before any placement ──────────
+			if isSignalCancelled(fp) {
+				log.Printf("[SIGNAL-CANCEL-USER] signal=%s — skipping placement (user-cancelled)", fp)
+				sig.ExecStatus = "rejected"
+				sig.ExecError = "user_cancelled"
+				AddSignal(sig)
+				break
+			}
+
 			// checkAndMarkOrder is atomic (RWMutex-protected) — Bug 2 fix.
 			shouldPlace, prev := checkAndMarkOrder(fp, orderState{OrderID: 0, Status: "pending"})
 			if !shouldPlace {

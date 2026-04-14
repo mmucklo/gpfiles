@@ -109,3 +109,24 @@ CREATE TABLE IF NOT EXISTS closed_trades (
   confidence_at_entry FLOAT,
   exit_reason VARCHAR(64)
 );
+
+-- signal_feedback: human-in-the-loop annotations for signals.
+-- Every cancel, comment, winner/loser tag, and follow-up note lives here.
+-- Rows are IMMUTABLE (never deleted) — use resolved_by/resolved_at to close out.
+CREATE TABLE IF NOT EXISTS signal_feedback (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    signal_id TEXT NOT NULL,              -- fingerprint: ticker_opttype_expiry_action_strike_qty
+    signal_snapshot TEXT NOT NULL,        -- JSON snapshot of the signal at feedback time
+    ts_feedback TEXT NOT NULL,            -- ISO 8601 UTC
+    user_comment TEXT NOT NULL,           -- verbatim; never trim or normalize
+    tag TEXT,                             -- bad_entry|bad_strike|wrong_direction|right_idea_wrong_size|
+                                          -- expired_worthless|late_signal|commission_dominated|good_signal|other
+    action TEXT NOT NULL,                 -- COMMENT|CANCEL|FOLLOWUP|MARK_WINNER|MARK_LOSER
+    reviewer TEXT NOT NULL DEFAULT 'user',
+    resolved_by TEXT,                     -- PR or commit that addressed this (nullable)
+    resolved_at TEXT                      -- ISO 8601 UTC when resolved (nullable)
+);
+
+CREATE INDEX IF NOT EXISTS idx_signal_feedback_ts     ON signal_feedback(ts_feedback);
+CREATE INDEX IF NOT EXISTS idx_signal_feedback_tag    ON signal_feedback(tag);
+CREATE INDEX IF NOT EXISTS idx_signal_feedback_action ON signal_feedback(action);

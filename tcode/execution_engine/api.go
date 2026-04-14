@@ -2284,6 +2284,304 @@ func (h *ConfigHandler) ServeNotionalConfig(w http.ResponseWriter, r *http.Reque
 	})
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+//  Signal Feedback API
+//  All routes delegate to alpha_engine/ingestion/signal_feedback.py via
+//  exec.Command so persistence stays in the same SQLite used by the engine.
+//
+//  Routes:
+//    POST /api/signals/feedback           — add feedback (signal_id in body)
+//    GET  /api/signals/feedback           — get for signal (?signal_id=...)
+//    POST /api/signals/cancel             — cancel a signal (signal_id + comment in body)
+//    GET  /api/signals/feedback/recent    — paginated recent across all signals
+//    GET  /api/signals/feedback/digest    — aggregated digest for mayor consumption
+//    POST /api/signals/feedback/resolve   — mark a feedback row as resolved
+// ═══════════════════════════════════════════════════════════════════════════
+
+// runSignalFeedbackPy calls signal_feedback.py <subcommand> <json_args> and
+// returns the parsed JSON result. All subprocess errors are mapped to a Go error.
+func runSignalFeedbackPy(subcommand string, args map[string]interface{}) (map[string]interface{}, error) {
+	argsJSON, err := json.Marshal(args)
+	if err != nil {
+		return nil, fmt.Errorf("marshal args: %w", err)
+	}
+
+	cmd := exec.Command("./alpha_engine/venv/bin/python",
+		"alpha_engine/ingestion/signal_feedback.py",
+		subcommand,
+		string(argsJSON),
+	)
+	cmd.Dir = "/home/builder/src/gpfiles/tcode"
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("signal_feedback.py %s: %w", subcommand, err)
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(out, &result); err != nil {
+		// Might be a JSON array — wrap it
+		var arr []interface{}
+		if err2 := json.Unmarshal(out, &arr); err2 != nil {
+			return nil, fmt.Errorf("parse output: %w", err)
+		}
+		return map[string]interface{}{"rows": arr}, nil
+	}
+	return result, nil
+}
+
+// setCORSHeaders writes the standard CORS + Content-Type headers used by all
+// signal-feedback endpoints.
+func setCORSHeaders(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+}
+
+// ServeSignalFeedback handles:
+//
+//	POST /api/signals/feedback  — body: {signal_id, signal_snapshot, user_comment, action, tag?}
+//	GET  /api/signals/feedback  — query: signal_id (returns all feedback for that signal)
+func (h *ConfigHandler) ServeSignalFeedback(w http.ResponseWriter, r *http.Request) {
+	setCORSHeaders(w)
+	if r.Method == "OPTIONS" {
+		return
+	}
+
+	switch r.Method {
+	case "POST":
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, `{"error":"invalid JSON body"}`, http.StatusBadRequest)
+			return
+		}
+		result, err := runSignalFeedbackPy("add", body)
+		if err != nil {
+			log.Printf("[FEEDBACK-ADD] error: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		if errMsg, ok := result["error"].(string); ok {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, errMsg), http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(result)
+
+	case "GET":
+		signalID := r.URL.Query().Get("signal_id")
+		if signalID == "" {
+			http.Error(w, `{"error":"signal_id query param required"}`, http.StatusBadRequest)
+			return
+		}
+		result, err := runSignalFeedbackPy("get_for_signal", map[string]interface{}{"signal_id": signalID})
+		if err != nil {
+			log.Printf("[FEEDBACK-GET] error: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		json.NewEncoder(w).Encode(result)
+
+	default:
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+	}
+}
+
+// ServeSignalCancel handles POST /api/signals/cancel.
+//
+// Body: {signal_id, user_comment}
+// Stores action=CANCEL in signal_feedback and registers the signal id in the
+// in-memory cancelled-signal cache used by the subscriber to gate placements.
+// A non-empty user_comment is required — silent cancels are not allowed.
+func (h *ConfigHandler) ServeSignalCancel(w http.ResponseWriter, r *http.Request) {
+	setCORSHeaders(w)
+	if r.Method == "OPTIONS" {
+		return
+	}
+	if r.Method != "POST" {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	var body struct {
+		SignalID      string      `json:"signal_id"`
+		UserComment   string      `json:"user_comment"`
+		Tag           string      `json:"tag"`
+		SignalSnapshot interface{} `json:"signal_snapshot"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, `{"error":"invalid JSON body"}`, http.StatusBadRequest)
+		return
+	}
+	if body.SignalID == "" {
+		http.Error(w, `{"error":"signal_id is required"}`, http.StatusBadRequest)
+		return
+	}
+	// Silent cancels are not allowed — require a comment
+	if body.UserComment == "" {
+		http.Error(w, `{"error":"user_comment is required for signal cancellation"}`, http.StatusBadRequest)
+		return
+	}
+
+	snapshot := body.SignalSnapshot
+	if snapshot == nil {
+		snapshot = map[string]interface{}{}
+	}
+
+	args := map[string]interface{}{
+		"signal_id":       body.SignalID,
+		"user_comment":    body.UserComment,
+		"action":          "CANCEL",
+		"signal_snapshot": snapshot,
+	}
+	if body.Tag != "" {
+		args["tag"] = body.Tag
+	}
+
+	result, err := runSignalFeedbackPy("add", args)
+	if err != nil {
+		log.Printf("[SIGNAL-CANCEL] error: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	if errMsg, ok := result["error"].(string); ok {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, errMsg), http.StatusBadRequest)
+		return
+	}
+
+	// Register in the in-memory cancelled-signal set so the subscriber respects
+	// this cancel immediately (before the 10s cache refresh fires).
+	addCancelledSignal(body.SignalID)
+	log.Printf("[SIGNAL-CANCEL-USER] signal=%s comment=%q tag=%q", body.SignalID, body.UserComment, body.Tag)
+
+	json.NewEncoder(w).Encode(result)
+}
+
+// ServeSignalFeedbackRecent handles GET /api/signals/feedback/recent.
+//
+// Query params: since, tag, action, limit, offset
+func (h *ConfigHandler) ServeSignalFeedbackRecent(w http.ResponseWriter, r *http.Request) {
+	setCORSHeaders(w)
+	if r.Method == "OPTIONS" {
+		return
+	}
+	if r.Method != "GET" {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	q := r.URL.Query()
+	args := map[string]interface{}{}
+	if v := q.Get("since"); v != "" {
+		args["since"] = v
+	}
+	if v := q.Get("tag"); v != "" {
+		args["tag"] = v
+	}
+	if v := q.Get("action"); v != "" {
+		args["action"] = v
+	}
+	if v := q.Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			args["limit"] = n
+		}
+	}
+	if v := q.Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			args["offset"] = n
+		}
+	}
+
+	result, err := runSignalFeedbackPy("get_recent", args)
+	if err != nil {
+		log.Printf("[FEEDBACK-RECENT] error: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	json.NewEncoder(w).Encode(result)
+}
+
+// ServeSignalFeedbackDigest handles GET /api/signals/feedback/digest.
+//
+// Query params: since
+func (h *ConfigHandler) ServeSignalFeedbackDigest(w http.ResponseWriter, r *http.Request) {
+	setCORSHeaders(w)
+	if r.Method == "OPTIONS" {
+		return
+	}
+	if r.Method != "GET" {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	args := map[string]interface{}{}
+	if v := r.URL.Query().Get("since"); v != "" {
+		args["since"] = v
+	}
+
+	result, err := runSignalFeedbackPy("get_digest", args)
+	if err != nil {
+		log.Printf("[FEEDBACK-DIGEST] error: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	json.NewEncoder(w).Encode(result)
+}
+
+// ServeSignalFeedbackResolve handles POST /api/signals/feedback/resolve.
+//
+// Body: {id, resolved_by}
+func (h *ConfigHandler) ServeSignalFeedbackResolve(w http.ResponseWriter, r *http.Request) {
+	setCORSHeaders(w)
+	if r.Method == "OPTIONS" {
+		return
+	}
+	if r.Method != "POST" {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	var body struct {
+		ID         interface{} `json:"id"`
+		ResolvedBy string      `json:"resolved_by"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, `{"error":"invalid JSON body"}`, http.StatusBadRequest)
+		return
+	}
+	if body.ID == nil {
+		http.Error(w, `{"error":"id is required"}`, http.StatusBadRequest)
+		return
+	}
+	if body.ResolvedBy == "" {
+		http.Error(w, `{"error":"resolved_by is required"}`, http.StatusBadRequest)
+		return
+	}
+
+	args := map[string]interface{}{
+		"id":          body.ID,
+		"resolved_by": body.ResolvedBy,
+	}
+
+	result, err := runSignalFeedbackPy("resolve", args)
+	if err != nil {
+		log.Printf("[FEEDBACK-RESOLVE] error: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	if errMsg, ok := result["error"].(string); ok {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, errMsg), http.StatusBadRequest)
+		return
+	}
+	json.NewEncoder(w).Encode(result)
+}
+
 func RequestLoggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()

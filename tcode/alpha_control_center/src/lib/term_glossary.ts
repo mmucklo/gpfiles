@@ -1,0 +1,718 @@
+/**
+ * term_glossary.ts — Canonical domain term definitions for the Alpha Control Center.
+ *
+ * Every arcane term rendered in the UI should use <TermLabel term="KEY" /> so
+ * the user can hover for a tooltip and click for a full drill-down.
+ *
+ * Rules:
+ *   - short: ≤ 120 chars — fits comfortably in a tooltip
+ *   - long:  Markdown ok — rendered in drill-down popover
+ *   - formula: computation / threshold details
+ *   - source: data origin (feed, symbol, TTL)
+ *   - trading_impact: required for regime labels — how it shifts signals
+ *   - related: other GLOSSARY keys linked from drill-down
+ */
+
+export type GlossaryEntry = {
+  term: string;           // canonical key, e.g. "CORRELATION_REGIME"
+  display: string;        // label shown in UI
+  short: string;          // 1-sentence tooltip (~120 chars)
+  long: string;           // multi-paragraph drill-down (markdown ok)
+  formula?: string;       // computation / threshold details
+  source?: string;        // data source
+  trading_impact?: string; // how it shifts signals / sizing
+  related?: string[];     // other glossary keys
+  phase_note?: string;    // e.g. "Added in Phase 14 — values not yet shown"
+};
+
+export const GLOSSARY: Record<string, GlossaryEntry> = {
+
+  // ── Section / card titles ────────────────────────────────────────────────
+
+  CORRELATION_REGIME: {
+    term: "CORRELATION_REGIME",
+    display: "Correlation Regime",
+    short: "TSLA vs QQQ 5-day rolling correlation z-score — measures whether TSLA trades with the market or independently.",
+    long: `**Correlation Regime** classifies whether TSLA is trading in sync with the broad market (QQQ) or moving on its own story.
+
+It is computed every hour from 5-day rolling close-to-close returns for TSLA, QQQ, and the Mag7 basket. The regime label is determined by the z-score of the TSLA↔QQQ correlation relative to its 60-day history.
+
+**Labels:**
+- **IDIOSYNCRATIC** (z < −2): TSLA is decoupled. Company-specific factors dominate. Amplifies SENTIMENT and CONTRARIAN models.
+- **MACRO_LOCKED** (z > +2): TSLA is highly correlated. Macro forces dominate. Amplifies MACRO model.
+- **NORMAL**: No regime adjustment applied.`,
+    formula: "z = (corr_5d − mean_60d) / std_60d",
+    source: "yfinance · TSLA + QQQ + AAPL/MSFT/GOOGL/AMZN/META/NVDA/TSLA · 5-day window · 1h TTL cache",
+    trading_impact: "IDIOSYNCRATIC → SENTIMENT/CONTRARIAN confidence ×1.20, MACRO ×1.00. MACRO_LOCKED → MACRO confidence ×1.20.",
+    related: ["IDIOSYNCRATIC", "MACRO_LOCKED", "NORMAL"],
+  },
+
+  MACRO_REGIME: {
+    term: "MACRO_REGIME",
+    display: "Macro Regime",
+    short: "Overall market risk appetite — RISK_ON, RISK_OFF, or NEUTRAL — derived from VIX and SPY trend.",
+    long: `**Macro Regime** classifies the current market risk environment.
+
+It is derived from VIX level and SPY's 5-day trend direction. The regime feeds into the regime-Kelly multiplier that scales position sizing up or down.`,
+    formula: "RISK_OFF if VIX > 25 or SPY 5d trend < −1%; RISK_ON if VIX < 15 and SPY 5d trend > +1%; else NEUTRAL",
+    source: "VIX spot via yfinance (^VIX) · SPY via yfinance · refreshed with intelligence poll",
+    trading_impact: "RISK_OFF → regime_multiplier = 0.5 (halves Kelly sizing). RISK_ON → regime_multiplier = 1.0.",
+    related: ["RISK_ON", "RISK_OFF", "NEUTRAL", "REGIME_KELLY_MULTIPLIER", "FRACTIONAL_KELLY"],
+  },
+
+  PRE_MARKET_BIAS: {
+    term: "PRE_MARKET_BIAS",
+    display: "Pre-Market Bias",
+    short: "Composite directional bias from Asia/Europe/US-futures before US open — scores −1 (bearish) to +1 (bullish).",
+    long: `**Pre-Market Bias** aggregates overnight index moves into a single directional score before the US cash session opens.
+
+**Weights:**
+- Asia 30%: N225, HSI, SSE
+- Europe 40%: STOXX50E, DAX, FTSE
+- US Futures 30%: ES (S&P 500), NQ (Nasdaq)
+
+FX overrides are applied: a strong USD (DXY +0.5%) dampens the bullish contribution.`,
+    formula: "bias = Σ(weight × index_change_pct) / Σ(weight), clamped to [−1, +1]",
+    source: "yfinance · ^N225 ^HSI 000001.SS ^STOXX50E ^GDAXI ^FTSE ^GSPC=F ^NDX=F DX-Y.NYB · refreshed pre-market",
+    trading_impact: "bias > 0.3 adds +0.05 to SENTIMENT/MACRO confidence; bias < −0.3 subtracts 0.05.",
+    related: ["ASIA_WEIGHT", "EUROPE_WEIGHT", "US_FUTURES_WEIGHT", "FX_OVERRIDE"],
+  },
+
+  INSTITUTIONAL_FLOW: {
+    term: "INSTITUTIONAL_FLOW",
+    display: "Institutional Flow",
+    short: "Put/Call ratio and total open interest on TSLA options — signals institutional positioning.",
+    long: `**Institutional Flow** tracks the put/call ratio and total open interest on TSLA options.
+
+A low P/C ratio (< 0.7) suggests calls dominating — institutions lean bullish. A high P/C (> 1.3) suggests put hedging — bearish lean.`,
+    formula: "pc_ratio = total_put_oi / total_call_oi",
+    source: "yfinance options chain · OI ≥ 100 filter · 60s TTL cache",
+    trading_impact: "pc_ratio < 0.7 → OPTIONS_FLOW signal bullish boost. pc_ratio > 1.3 → bearish signal boost.",
+    related: ["OPTIONS_FLOW"],
+  },
+
+  EV_SECTOR: {
+    term: "EV_SECTOR",
+    display: "EV Sector",
+    short: "TSLA's performance vs. EV peer basket (NIO, RIVN, LCID) — detects sector-wide moves vs. TSLA-specific moves.",
+    long: `**EV Sector** compares TSLA's intraday return against a basket of EV peers.
+
+When TSLA moves with the EV sector, the signal is sector-driven (macro-ish). When TSLA diverges significantly, the move is idiosyncratic.`,
+    source: "yfinance · TSLA NIO RIVN LCID · intraday returns · refreshed with intelligence poll",
+    trading_impact: "Strong EV sector alignment reduces CONTRARIAN signal weight; divergence amplifies it.",
+    related: ["EV_SECTOR", "IDIOSYNCRATIC"],
+  },
+
+  CONGRESS_DISCLOSURE: {
+    term: "CONGRESS_DISCLOSURE",
+    display: "Congress STOCK Act Disclosure",
+    short: "TSLA trades by Congress members filed under the STOCK Act within 48h — committee-weighted for significance.",
+    long: `**Congress STOCK Act Disclosure** ingests congressional equity trade filings for TSLA.
+
+Trades filed within 48h receive the raw signal. Committee members on Senate Commerce or House Energy & Commerce receive a 2× weight multiplier because of their oversight of EV/tech sectors.
+
+**Signal effect:**
+- Net buying (committee-weighted) → SENTIMENT confidence ×1.15
+- Net selling → SENTIMENT confidence ×0.85`,
+    source: "House eFD XML disclosure feed (efts.house.gov) · Senate STOCK Act filings · 48h lag filter",
+    trading_impact: "Bullish congress signal → SENTIMENT confidence ×1.15. Bearish → ×0.85.",
+    related: ["SENTIMENT"],
+  },
+
+  CATALYST_TRACKER: {
+    term: "CATALYST_TRACKER",
+    display: "Catalyst Tracker",
+    short: "Upcoming TSLA earnings date and days until — gates signal aggressiveness near binary events.",
+    long: `**Catalyst Tracker** monitors TSLA's earnings calendar to prevent entering positions just before binary events.
+
+As earnings approach, signal confidence thresholds are raised or positions are avoided entirely to prevent gamma-risk blow-ups from the earnings volatility crush.`,
+    source: "yfinance calendar API · refreshed daily",
+    trading_impact: "Days ≤ 2 before earnings: BULLISH threshold raised to 0.92 (normally 0.80). Alerts shown in UI.",
+    related: ["FRACTIONAL_KELLY"],
+  },
+
+  // ── Regime labels ─────────────────────────────────────────────────────────
+
+  IDIOSYNCRATIC: {
+    term: "IDIOSYNCRATIC",
+    display: "IDIOSYNCRATIC",
+    short: "TSLA is decoupled from QQQ (z-score < −2) — company-specific story dominates. SENTIMENT/CONTRARIAN amplified.",
+    long: `**IDIOSYNCRATIC** is a Correlation Regime label.
+
+It fires when the z-score of the TSLA↔QQQ 5-day rolling correlation drops below −2 standard deviations from its 60-day mean. This means TSLA is moving on its own story rather than tracking the broad market.
+
+During IDIOSYNCRATIC regimes:
+- SENTIMENT model confidence is multiplied by ×1.20
+- CONTRARIAN model confidence is multiplied by ×1.20
+- MACRO model is unchanged (no amplification — macro forces less relevant)`,
+    formula: "z_score < −2.0",
+    source: "yfinance · 5-day rolling correlation of TSLA and QQQ closes · 60d z-score normalization",
+    trading_impact: "SENTIMENT confidence ×1.20, CONTRARIAN confidence ×1.20, MACRO unchanged.",
+    related: ["CORRELATION_REGIME", "MACRO_LOCKED", "NORMAL", "SENTIMENT", "CONTRARIAN"],
+  },
+
+  MACRO_LOCKED: {
+    term: "MACRO_LOCKED",
+    display: "MACRO_LOCKED",
+    short: "TSLA strongly correlated with QQQ (z-score > +2) — broad market moves dominate. MACRO model amplified.",
+    long: `**MACRO_LOCKED** is a Correlation Regime label.
+
+It fires when the z-score of the TSLA↔QQQ 5-day rolling correlation exceeds +2 standard deviations. TSLA is moving with the market, so macro factors are the primary driver.
+
+During MACRO_LOCKED regimes:
+- MACRO model confidence is multiplied by ×1.20
+- SENTIMENT and CONTRARIAN models are unchanged`,
+    formula: "z_score > +2.0",
+    source: "yfinance · 5-day rolling correlation of TSLA and QQQ closes · 60d z-score normalization",
+    trading_impact: "MACRO confidence ×1.20, SENTIMENT/CONTRARIAN unchanged.",
+    related: ["CORRELATION_REGIME", "IDIOSYNCRATIC", "NORMAL", "MACRO"],
+  },
+
+  NORMAL: {
+    term: "NORMAL",
+    display: "NORMAL",
+    short: "Correlation regime z-score between −2 and +2 — no regime-based confidence amplification applied.",
+    long: `**NORMAL** is the default Correlation Regime label.
+
+No amplification multipliers are applied to model confidence when the regime is NORMAL. All models operate at their base confidence scores.`,
+    formula: "−2.0 ≤ z_score ≤ +2.0",
+    source: "yfinance · 5-day rolling correlation of TSLA and QQQ closes",
+    trading_impact: "No confidence multiplier adjustments.",
+    related: ["CORRELATION_REGIME", "IDIOSYNCRATIC", "MACRO_LOCKED"],
+  },
+
+  RISK_ON: {
+    term: "RISK_ON",
+    display: "RISK_ON",
+    short: "Low-fear macro environment (VIX < 15, SPY trending up) — full Kelly sizing applied.",
+    long: `**RISK_ON** is a Macro Regime label indicating a benign market environment.
+
+Characterized by VIX below 15 and SPY on an uptrend over the past 5 days. In this regime the full Kelly fraction is applied to sizing (regime_multiplier = 1.0).`,
+    formula: "VIX < 15 AND SPY 5d trend > +1%",
+    source: "^VIX and SPY via yfinance",
+    trading_impact: "regime_multiplier = 1.0 → full Kelly sizing.",
+    related: ["MACRO_REGIME", "RISK_OFF", "NEUTRAL", "REGIME_KELLY_MULTIPLIER"],
+  },
+
+  RISK_OFF: {
+    term: "RISK_OFF",
+    display: "RISK_OFF",
+    short: "High-fear macro environment (VIX > 25 or SPY in downtrend) — Kelly sizing halved.",
+    long: `**RISK_OFF** is a Macro Regime label indicating elevated market stress.
+
+Triggered by VIX above 25 or SPY in a downtrend over the past 5 days. Position sizing is halved to preserve capital during volatile conditions.`,
+    formula: "VIX > 25 OR SPY 5d trend < −1%",
+    source: "^VIX and SPY via yfinance",
+    trading_impact: "regime_multiplier = 0.5 → Kelly sizing halved.",
+    related: ["MACRO_REGIME", "RISK_ON", "NEUTRAL", "REGIME_KELLY_MULTIPLIER"],
+  },
+
+  NEUTRAL: {
+    term: "NEUTRAL",
+    display: "NEUTRAL",
+    short: "Macro regime between RISK_ON and RISK_OFF — standard Kelly sizing applies.",
+    long: `**NEUTRAL** is the default Macro Regime label when neither RISK_ON nor RISK_OFF conditions are met.
+
+Standard Kelly sizing applies (regime_multiplier = 1.0 or a moderate value depending on VIX tier).`,
+    formula: "15 ≤ VIX ≤ 25 AND −1% ≤ SPY 5d trend ≤ +1%",
+    source: "^VIX and SPY via yfinance",
+    trading_impact: "regime_multiplier = 1.0 (or VIX-tier based).",
+    related: ["MACRO_REGIME", "RISK_ON", "RISK_OFF"],
+  },
+
+  // ── Model types ───────────────────────────────────────────────────────────
+
+  SENTIMENT: {
+    term: "SENTIMENT",
+    display: "SENTIMENT",
+    short: "News NLP model: bullish/bearish confidence from recent TSLA headlines and Musk mentions.",
+    long: `**SENTIMENT** is an Alpha Engine signal model that scores the tone of recent TSLA news.
+
+NLP-based sentiment analysis is applied to headlines from the past 24h that mention TSLA, Tesla, or Elon Musk. Scores are normalized to [−1, +1] and mapped to signal confidence.
+
+Amplified during IDIOSYNCRATIC correlation regime (×1.20) and by congressional TSLA buying (×1.15).`,
+    source: "yfinance news API · TSLA headlines · refreshed with intelligence poll",
+    trading_impact: "High positive sentiment → BULLISH conviction signal at confidence 0.80–0.95.",
+    related: ["CONTRARIAN", "CONGRESS_DISCLOSURE", "IDIOSYNCRATIC"],
+  },
+
+  OPTIONS_FLOW: {
+    term: "OPTIONS_FLOW",
+    display: "OPTIONS_FLOW",
+    short: "Put/call ratio and OI model: low P/C ratio signals institutional call accumulation (bullish).",
+    long: `**OPTIONS_FLOW** is an Alpha Engine signal model based on TSLA options open interest.
+
+A put/call ratio below 0.7 suggests call accumulation — institutions leaning bullish. Above 1.3 suggests put hedging. The model converts this to a directional signal.`,
+    source: "yfinance options chain · strike OI ≥ 100 filter · 60s TTL cache",
+    trading_impact: "P/C < 0.7 → BULLISH OPTIONS_FLOW signal. P/C > 1.3 → bearish.",
+    related: ["INSTITUTIONAL_FLOW"],
+  },
+
+  MACRO: {
+    term: "MACRO",
+    display: "MACRO",
+    short: "Macro conditions model: VIX level, SPY trend, and earnings proximity combined into a regime signal.",
+    long: `**MACRO** is an Alpha Engine signal model that evaluates broad market conditions.
+
+It combines VIX level, SPY trend, and earnings proximity to produce a conviction score. Amplified during MACRO_LOCKED correlation regime (×1.20).`,
+    source: "^VIX, SPY via yfinance · earnings calendar",
+    trading_impact: "Amplified during MACRO_LOCKED regime (×1.20). Reduced by RISK_OFF (×0.5 sizing).",
+    related: ["MACRO_LOCKED", "MACRO_REGIME", "RISK_OFF"],
+  },
+
+  VOLATILITY: {
+    term: "VOLATILITY",
+    display: "VOLATILITY",
+    short: "IV vs. realized vol model: signals when implied volatility is mispriced relative to historical vol.",
+    long: `**VOLATILITY** is an Alpha Engine signal model based on implied vs. realized volatility.
+
+When IV is significantly below realized volatility, options are cheap — a buying opportunity. The vol_ratio (realized/implied) feeds into Kelly sizing.`,
+    formula: "vol_ratio = realized_vol_20d / implied_vol",
+    source: "yfinance historical closes (20d) · live options chain IV",
+    trading_impact: "vol_ratio feeds Kelly final_multiplier: min(1, vol_ratio) × kelly_base.",
+    related: ["FRACTIONAL_KELLY", "VIX_MULTIPLIER"],
+  },
+
+  CONTRARIAN: {
+    term: "CONTRARIAN",
+    display: "CONTRARIAN",
+    short: "Mean-reversion model: fires when TSLA is extended from its moving average with extreme sentiment.",
+    long: `**CONTRARIAN** is an Alpha Engine signal model looking for overextended price action.
+
+It fires when TSLA is statistically extended from its 20-day moving average (> 2σ) and sentiment is already extremely one-sided — a mean-reversion setup.
+
+Amplified during IDIOSYNCRATIC correlation regime (×1.20).`,
+    source: "yfinance daily closes (20d) · sentiment score",
+    trading_impact: "Amplified ×1.20 during IDIOSYNCRATIC regime.",
+    related: ["SENTIMENT", "IDIOSYNCRATIC", "MEAN_REVERT"],
+  },
+
+  // ── Archetype names ───────────────────────────────────────────────────────
+
+  DIRECTIONAL_STRONG: {
+    term: "DIRECTIONAL_STRONG",
+    display: "DIRECTIONAL_STRONG",
+    short: "High-conviction directional archetype: wide TP, tight SL, full Kelly. For high-confidence BULLISH signals.",
+    long: `**DIRECTIONAL_STRONG** is a signal archetype (strategy profile) applied when confidence > 0.90.
+
+It uses a wide take-profit target (+20–25% from entry) and a tight stop-loss (−5–8%), with full Kelly sizing. Designed for scenarios where multiple models agree strongly.`,
+    trading_impact: "Full Kelly sizing. TP: +20–25% from limit. SL: −5–8%.",
+    related: ["DIRECTIONAL_STD", "FRACTIONAL_KELLY", "BRACKET_ORDER"],
+  },
+
+  DIRECTIONAL_STD: {
+    term: "DIRECTIONAL_STD",
+    display: "DIRECTIONAL_STD",
+    short: "Standard directional archetype: moderate TP/SL ratio. Used for confidence 0.80–0.90.",
+    long: `**DIRECTIONAL_STD** is the standard directional archetype for conviction signals in the 0.80–0.90 confidence range.
+
+It uses moderate take-profit and stop-loss targets, with fractional Kelly sizing.`,
+    trading_impact: "Fractional Kelly (75%). TP: +12–18% from limit. SL: −8–12%.",
+    related: ["DIRECTIONAL_STRONG", "FRACTIONAL_KELLY", "BRACKET_ORDER"],
+  },
+
+  MEAN_REVERT: {
+    term: "MEAN_REVERT",
+    display: "MEAN_REVERT",
+    short: "Mean-reversion archetype: tight TP target (quick profit capture), wider SL tolerance.",
+    long: `**MEAN_REVERT** is the archetype for CONTRARIAN signals expecting a near-term snap-back.
+
+It uses a tight take-profit (capture the reversion quickly) and a wider stop-loss to avoid being stopped out by continued momentum before the reversion occurs.`,
+    trading_impact: "Fractional Kelly (50%). TP: +5–10%. SL: −15–20%.",
+    related: ["CONTRARIAN", "DIRECTIONAL_STD"],
+  },
+
+  SCALP_0DTE: {
+    term: "SCALP_0DTE",
+    display: "SCALP_0DTE",
+    short: "Same-day expiry scalp archetype: small size, tight TP/SL for intraday momentum.",
+    long: `**SCALP_0DTE** is the archetype for same-day (0DTE) options scalps.
+
+It uses minimal Kelly fraction (25%), a tight take-profit, and a tight stop-loss to manage theta decay risk. Requires high intraday momentum confidence.`,
+    trading_impact: "Kelly fraction 25%. TP: +30–50% from limit. SL: −20–25%.",
+    related: ["VOL_PLAY", "THETA_BURN_SCORE"],
+  },
+
+  VOL_PLAY: {
+    term: "VOL_PLAY",
+    display: "VOL_PLAY",
+    short: "Volatility-expansion archetype: targets IV mispricing when vol_ratio indicates options are cheap.",
+    long: `**VOL_PLAY** is the archetype for the VOLATILITY model — it bets on implied volatility expanding toward realized vol.
+
+Used when vol_ratio (realized/implied) > 1.3 and an earnings catalyst is 3–10 days away.`,
+    trading_impact: "Sizing scales with vol_ratio. Kelly fraction up to 60%.",
+    related: ["VOLATILITY", "FRACTIONAL_KELLY"],
+  },
+
+  // ── Sizing / risk terms ───────────────────────────────────────────────────
+
+  NOTIONAL_ACCOUNT_SIZE: {
+    term: "NOTIONAL_ACCOUNT_SIZE",
+    display: "Notional Account Size",
+    short: "Total capital base used for Kelly sizing — configurable via the UI. Does not need to match actual account balance.",
+    long: `**Notional Account Size** is the synthetic capital figure used for Kelly criterion position sizing.
+
+It can be set independently of the actual IBKR account balance, allowing conservative sizing while the account grows. Changing it rescales all new positions without affecting open orders.
+
+Default: $25,000. Range: $5,000 – $250,000.`,
+    source: "~/.tsla-alpha.env NOTIONAL_ACCOUNT_SIZE · configurable via /api/config/notional",
+    trading_impact: "Kelly wager = notional × kelly_pct. Lower notional = smaller contracts.",
+    related: ["FRACTIONAL_KELLY", "RISK_PCT"],
+  },
+
+  FRACTIONAL_KELLY: {
+    term: "FRACTIONAL_KELLY",
+    display: "Fractional Kelly",
+    short: "Kelly criterion fraction used for sizing — base fraction determined by VIX tier, then multiplied by regime.",
+    long: `**Fractional Kelly** is the core position-sizing formula.
+
+The Kelly fraction is chosen based on the current VIX tier:
+- VIX < 15 (LOW): 50% Kelly
+- VIX 15–25 (NORMAL): 35% Kelly
+- VIX > 25 (HIGH): 20% Kelly
+- VIX > 35 (EXTREME): 10% Kelly
+
+This base fraction is then multiplied by the regime_multiplier (0.5 if RISK_OFF, 1.0 otherwise) and capped at the risk_pct limit.`,
+    formula: "final_kelly = vix_tier_fraction × regime_multiplier, capped at risk_pct",
+    trading_impact: "Determines contracts sized: floor(notional × kelly × confidence / (price × 100 × 2))",
+    related: ["REGIME_KELLY_MULTIPLIER", "VIX_MULTIPLIER", "NOTIONAL_ACCOUNT_SIZE", "RISK_PCT"],
+  },
+
+  REGIME_KELLY_MULTIPLIER: {
+    term: "REGIME_KELLY_MULTIPLIER",
+    display: "Regime Kelly Multiplier",
+    short: "Multiplier applied to the Kelly fraction based on macro regime: 0.5 (RISK_OFF) or 1.0 (RISK_ON/NEUTRAL).",
+    long: `**Regime Kelly Multiplier** scales the base Kelly fraction up or down based on the macro environment.
+
+- **RISK_OFF** (VIX > 25 or SPY downtrend): multiplier = 0.5 — halves sizing to preserve capital
+- **RISK_ON / NEUTRAL**: multiplier = 1.0 — full fraction applied
+
+This is the primary capital-protection mechanism during market stress.`,
+    formula: "regime_multiplier = 0.5 if RISK_OFF else 1.0",
+    trading_impact: "RISK_OFF halves all new position sizes.",
+    related: ["FRACTIONAL_KELLY", "RISK_OFF", "VIX_MULTIPLIER"],
+  },
+
+  VIX_MULTIPLIER: {
+    term: "VIX_MULTIPLIER",
+    display: "VIX Multiplier",
+    short: "VIX-tier fractional Kelly: 50% (low VIX) → 10% (extreme VIX). Baseline before regime adjustment.",
+    long: `**VIX Multiplier** is the VIX-tier Kelly fraction that sets the baseline before regime adjustment.
+
+| VIX Level | Label   | Kelly Fraction |
+|-----------|---------|----------------|
+| < 15      | LOW     | 50%            |
+| 15–25     | NORMAL  | 35%            |
+| 25–35     | HIGH    | 20%            |
+| > 35      | EXTREME | 10%            |`,
+    formula: "VIX < 15 → 0.50; 15-25 → 0.35; 25-35 → 0.20; > 35 → 0.10",
+    source: "^VIX via yfinance",
+    trading_impact: "Base Kelly fraction before regime_multiplier is applied.",
+    related: ["FRACTIONAL_KELLY", "REGIME_KELLY_MULTIPLIER"],
+  },
+
+  RISK_PCT: {
+    term: "RISK_PCT",
+    display: "Risk %",
+    short: "Maximum capital at risk per trade as a percentage of notional account size. Hard cap on Kelly fraction.",
+    long: `**Risk %** is the per-trade capital cap. Even if Kelly says size larger, no single trade can risk more than this fraction of the notional account.
+
+Default: 2% of notional (per the archetype config). Configurable per archetype.`,
+    formula: "max_risk = notional × risk_pct",
+    trading_impact: "Caps position size: if Kelly sizing > risk_pct × notional, reduce to cap.",
+    related: ["FRACTIONAL_KELLY", "NOTIONAL_ACCOUNT_SIZE"],
+  },
+
+  GROSS_PREMIUM_CAP: {
+    term: "GROSS_PREMIUM_CAP",
+    display: "Gross Premium Cap",
+    short: "Maximum total premium outlay per trade in dollars — prevents oversized option purchases regardless of Kelly.",
+    long: `**Gross Premium Cap** is an absolute dollar cap on the gross premium committed to a single trade.
+
+It provides a dollar-denominated safety net when Kelly sizing, notional, or confidence are all high simultaneously.
+
+Default: 5% of notional.`,
+    formula: "max_premium = notional × gross_premium_cap_pct",
+    trading_impact: "If premium × qty × 100 > cap, reduce qty to fit cap.",
+    related: ["NOTIONAL_ACCOUNT_SIZE", "RISK_PCT", "FRACTIONAL_KELLY"],
+  },
+
+  // ── Order / execution terms ───────────────────────────────────────────────
+
+  BRACKET_ORDER: {
+    term: "BRACKET_ORDER",
+    display: "Bracket Order",
+    short: "A parent LIMIT order with two child OCO orders: Take-Profit LIMIT and Stop-Loss STP LMT.",
+    long: `**Bracket Order** is the standard execution structure for all conviction trades.
+
+It consists of:
+1. **Parent order**: LIMIT BUY at the target limit price
+2. **Take-Profit (TP)**: LIMIT SELL at the take-profit price (child, OCA group)
+3. **Stop-Loss (SL)**: STP LMT SELL at the stop-loss price (child, OCA group)
+
+The TP and SL are linked via an OCO (One Cancels Other) group — when one fills, the other is automatically cancelled.`,
+    trading_impact: "Automatically manages exit risk. If bracket fails to place, the signal is marked FAILED — no fallback single leg.",
+    related: ["OCO_GROUP", "TIF_DAY", "TAKE_PROFIT", "STOP_LOSS"],
+  },
+
+  OCO_GROUP: {
+    term: "OCO_GROUP",
+    display: "OCO Group",
+    short: "One Cancels Other — two linked child orders where filling one auto-cancels the sibling.",
+    long: `**OCO (One Cancels Other)** links the Take-Profit and Stop-Loss child orders in a bracket.
+
+When either leg fills or is cancelled, IBKR automatically cancels the other. This prevents both TP and SL from filling on the same parent position.`,
+    related: ["BRACKET_ORDER", "TAKE_PROFIT", "STOP_LOSS"],
+  },
+
+  TIF_OPG: {
+    term: "TIF_OPG",
+    display: "TIF OPG",
+    short: "Time In Force: Opening. Order executes at market open or is cancelled — for pre-market bracket submissions.",
+    long: `**TIF OPG (Opening)** specifies that the order must execute at the opening of the regular trading session or be cancelled.
+
+Used for bracket orders submitted during pre-market so they enter at a known open price rather than at a potentially wide pre-market bid/ask.`,
+    related: ["TIF_DAY", "BRACKET_ORDER"],
+  },
+
+  TIF_DAY: {
+    term: "TIF_DAY",
+    display: "TIF DAY",
+    short: "Time In Force: Day. Order is live for the current trading session only — expires at close if not filled.",
+    long: `**TIF DAY** means the order stays live for the current US equities session (9:30am–4:00pm ET) and is automatically cancelled at market close if not filled.
+
+This is the standard TIF for intraday options orders.`,
+    related: ["TIF_OPG", "BRACKET_ORDER"],
+  },
+
+  STP_LMT: {
+    term: "STP_LMT",
+    display: "STP LMT",
+    short: "Stop-Limit order: triggers at the stop price, then executes as a LIMIT order at the limit price.",
+    long: `**STP LMT (Stop-Limit)** is used for the Stop-Loss leg of a bracket order.
+
+When the market price reaches the stop price, it converts to a LIMIT order at the limit price. This prevents catastrophic fills during a fast market — the order may not fill if the market gaps past the limit.`,
+    related: ["BRACKET_ORDER", "STOP_LOSS", "UNDERLYING_STOP"],
+  },
+
+  UNDERLYING_STOP: {
+    term: "UNDERLYING_STOP",
+    display: "Underlying Stop",
+    short: "Stop-loss triggered by the TSLA stock price (not the option price) — prevents gaps from eating the entire stop.",
+    long: `**Underlying Stop** monitors the TSLA underlying price to trigger the option stop-loss.
+
+Options can have wide bid/ask spreads, especially during fast moves. Using the underlying price as the stop trigger provides cleaner execution than waiting for the option to trade at the stop-loss price.`,
+    related: ["STOP_LOSS", "STP_LMT", "BRACKET_ORDER"],
+  },
+
+  TAKE_PROFIT: {
+    term: "TAKE_PROFIT",
+    display: "Take Profit",
+    short: "The target LIMIT price at which to close the position for the expected gain.",
+    long: `**Take Profit** is the LIMIT SELL price for the upside exit leg of a bracket order.
+
+It is determined by the archetype configuration and signal confidence. Higher confidence → wider take-profit target.`,
+    related: ["STOP_LOSS", "BRACKET_ORDER", "OCO_GROUP"],
+  },
+
+  STOP_LOSS: {
+    term: "STOP_LOSS",
+    display: "Stop Loss",
+    short: "The STP LMT price at which to close the position to limit downside risk.",
+    long: `**Stop Loss** is the STP LMT SELL price for the downside exit leg of a bracket order.
+
+It is set to limit the maximum premium lost on the position. Options can expire worthless, so the stop is placed well above zero to capture remaining time value.`,
+    related: ["TAKE_PROFIT", "BRACKET_ORDER", "STP_LMT"],
+  },
+
+  EXPIRY_CLOSE: {
+    term: "EXPIRY_CLOSE",
+    display: "Expiry Close",
+    short: "Automatic position close 15 minutes before expiration to avoid pin risk and assignment.",
+    long: `**Expiry Close** is the Phase 9 expiry-exit mechanism.
+
+All open options positions with same-day expiration are automatically sent a MARKET SELL order 15 minutes before close (3:45pm ET). This prevents:
+- **Pin risk**: TSLA pinning at the strike at expiry
+- **Assignment risk**: short calls/puts being exercised
+- **Worthless expiry**: holding to zero when time value is recoverable`,
+    related: ["BRACKET_ORDER", "TIF_DAY"],
+  },
+
+  // ── Composite-bias / scoring ──────────────────────────────────────────────
+
+  COMPOSITE_BIAS: {
+    term: "COMPOSITE_BIAS",
+    display: "Composite Bias",
+    short: "Weighted average of overnight index moves (Asia/Europe/US futures) into a directional score [−1, +1].",
+    long: `**Composite Bias** is the pre-market panel's summary signal.
+
+It is computed as the weighted average of index percent changes:
+- Asia 30% (N225, HSI, SSE)
+- Europe 40% (STOXX50E, DAX, FTSE)
+- US Futures 30% (ES, NQ)
+
+FX adjustments (DXY strength) can dampen the bullish contribution.`,
+    formula: "composite = Σ(weight_i × change_i) / Σ(weight_i), clamped to [−1, +1]",
+    source: "yfinance · overnight session data · refreshed pre-market",
+    related: ["ASIA_WEIGHT", "EUROPE_WEIGHT", "US_FUTURES_WEIGHT", "FX_OVERRIDE", "PRE_MARKET_BIAS"],
+  },
+
+  ASIA_WEIGHT: {
+    term: "ASIA_WEIGHT",
+    display: "Asia Weight",
+    short: "Asia contributes 30% to the composite pre-market bias (N225, HSI, SSE).",
+    long: `**Asia Weight** = 30% of composite pre-market bias.\n\nIndex components: N225 (Nikkei 225), HSI (Hang Seng), SSE (Shanghai Composite).`,
+    formula: "asia_contribution = 0.30 × avg(N225%, HSI%, SSE%)",
+    related: ["COMPOSITE_BIAS", "EUROPE_WEIGHT", "US_FUTURES_WEIGHT"],
+  },
+
+  EUROPE_WEIGHT: {
+    term: "EUROPE_WEIGHT",
+    display: "Europe Weight",
+    short: "Europe contributes 40% to the composite pre-market bias (STOXX50E, DAX, FTSE).",
+    long: `**Europe Weight** = 40% of composite pre-market bias.\n\nIndex components: STOXX50E (Euro Stoxx 50), GDAXI (DAX), FTSE (FTSE 100).`,
+    formula: "europe_contribution = 0.40 × avg(STOXX50E%, DAX%, FTSE%)",
+    related: ["COMPOSITE_BIAS", "ASIA_WEIGHT", "US_FUTURES_WEIGHT"],
+  },
+
+  US_FUTURES_WEIGHT: {
+    term: "US_FUTURES_WEIGHT",
+    display: "US Futures Weight",
+    short: "US futures contribute 30% to the composite pre-market bias (ES/S&P 500, NQ/Nasdaq).",
+    long: `**US Futures Weight** = 30% of composite pre-market bias.\n\nComponents: ES (S&P 500 futures), NQ (Nasdaq 100 futures).`,
+    formula: "us_contribution = 0.30 × avg(ES%, NQ%)",
+    related: ["COMPOSITE_BIAS", "ASIA_WEIGHT", "EUROPE_WEIGHT"],
+  },
+
+  FX_OVERRIDE: {
+    term: "FX_OVERRIDE",
+    display: "FX Override",
+    short: "DXY strength ≥ +0.5% dampens positive pre-market bias — strong USD is risk-off for risk assets.",
+    long: `**FX Override** applies a negative adjustment to composite bias when the US Dollar Index (DXY) is rising strongly.
+
+A rising DXY (≥ +0.5%) is historically bearish for risk assets including equities and TSLA. The override reduces the bullish composite bias to reflect this macro headwind.`,
+    formula: "if DXY change ≥ +0.5%: composite_bias × 0.80",
+    source: "DX-Y.NYB via yfinance",
+    related: ["COMPOSITE_BIAS", "PRE_MARKET_BIAS"],
+  },
+
+  // ── Phase 14 prep (greeks + scoring) — values not yet shown ──────────────
+
+  DELTA: {
+    term: "DELTA",
+    display: "Delta (Δ)",
+    short: "Rate of change of option price per $1 move in TSLA — calls 0→1, puts −1→0.",
+    long: `**Delta (Δ)** measures how much the option price changes for a $1 move in the underlying (TSLA).
+
+- Long Call: Δ 0 to +1 (positive — profits from TSLA rising)
+- Long Put: Δ −1 to 0 (negative — profits from TSLA falling)
+
+Near-the-money options have Δ ≈ 0.50.`,
+    phase_note: "Added in Phase 14 — live delta values not yet shown in the UI.",
+    related: ["GAMMA", "THETA", "VEGA"],
+  },
+
+  GAMMA: {
+    term: "GAMMA",
+    display: "Gamma (Γ)",
+    short: "Rate of change of delta per $1 move in TSLA — highest near the money and close to expiration.",
+    long: `**Gamma (Γ)** measures how fast delta changes as TSLA moves.
+
+High gamma (near-the-money, near expiry) means delta — and therefore P&L — can shift rapidly. 0DTE positions have very high gamma risk.`,
+    phase_note: "Added in Phase 14 — live gamma values not yet shown in the UI.",
+    related: ["DELTA", "THETA", "SCALP_0DTE"],
+  },
+
+  THETA: {
+    term: "THETA",
+    display: "Theta (Θ)",
+    short: "Time decay — dollars lost per calendar day as the option approaches expiration.",
+    long: `**Theta (Θ)** is the daily time-value erosion of an option.
+
+Long options lose Θ per day (negative theta). The closer to expiration, the faster the decay. 0DTE positions have extreme theta burn in the final hours.`,
+    phase_note: "Added in Phase 14 — live theta values not yet shown in the UI.",
+    related: ["DELTA", "GAMMA", "THETA_BURN_SCORE", "SCALP_0DTE"],
+  },
+
+  VEGA: {
+    term: "VEGA",
+    display: "Vega (ν)",
+    short: "Sensitivity of option price to a 1% change in implied volatility.",
+    long: `**Vega (ν)** measures how much the option price changes for a 1 percentage-point change in implied volatility.
+
+Long options have positive vega — they benefit from rising IV. The VOL_PLAY archetype explicitly targets high-vega situations.`,
+    phase_note: "Added in Phase 14 — live vega values not yet shown in the UI.",
+    related: ["VOLATILITY", "VOL_PLAY"],
+  },
+
+  IV: {
+    term: "IV",
+    display: "Implied Volatility",
+    short: "Market's consensus forecast of TSLA price swings over the option's life — extracted from option prices.",
+    long: `**Implied Volatility (IV)** is the volatility parameter implied by current option prices, not historical price moves.
+
+High IV = expensive options (market expects big moves). Low IV = cheap options (calm expectations). The VOLATILITY model compares IV to 20-day realized volatility.`,
+    source: "yfinance options chain · per-strike IV",
+    related: ["VOLATILITY", "VOL_PLAY", "VEGA"],
+  },
+
+  DELTA_FIT: {
+    term: "DELTA_FIT",
+    display: "Delta Fit",
+    short: "How well the signal's target delta matches the selected strike — quality score for strike selection.",
+    long: `**Delta Fit** will score how closely the recommended strike matches the ideal delta for the archetype.
+
+Phase 14 prep: this slot is reserved but not yet populated with live data.`,
+    phase_note: "Added in Phase 14 — values not yet shown in the UI.",
+    related: ["DELTA", "SPREAD_TIGHTNESS"],
+  },
+
+  SPREAD_TIGHTNESS: {
+    term: "SPREAD_TIGHTNESS",
+    display: "Spread Tightness",
+    short: "Bid/ask spread as a percentage of mid — lower is better for entry/exit slippage.",
+    long: `**Spread Tightness** measures liquidity quality at the target strike.
+
+Formula: (ask − bid) / mid × 100%. Tighter spreads mean less slippage on entry and exit. Strikes with spread > 15% are deprioritized.`,
+    formula: "(ask − bid) / mid × 100%",
+    phase_note: "Added in Phase 14 — values not yet shown in the UI.",
+    related: ["DELTA_FIT", "LIQUIDITY_SCORE"],
+  },
+
+  THETA_BURN_SCORE: {
+    term: "THETA_BURN_SCORE",
+    display: "Theta Burn Score",
+    short: "Normalized daily theta erosion relative to premium — higher means faster decay risk.",
+    long: `**Theta Burn Score** quantifies how much of the option premium is lost per day to time decay.
+
+Formula: |theta| / mid_price × 100. A score > 5% means more than 5% of premium is lost daily — high for short-dated options.`,
+    formula: "|theta| / mid_price × 100%",
+    phase_note: "Added in Phase 14 — values not yet shown in the UI.",
+    related: ["THETA", "SCALP_0DTE"],
+  },
+
+  LIQUIDITY_SCORE: {
+    term: "LIQUIDITY_SCORE",
+    display: "Liquidity Score",
+    short: "Composite of OI, volume, and spread tightness — used to filter illiquid strikes.",
+    long: `**Liquidity Score** is a composite measure used during strike selection to avoid illiquid options.
+
+Components:
+- Open Interest ≥ 100 (minimum threshold)
+- Bid/ask spread tightness
+- Daily volume relative to OI
+
+Only strikes passing the minimum OI filter enter the signal pipeline.`,
+    formula: "score = f(OI, volume, spread%)",
+    phase_note: "Added in Phase 14 — values not yet shown in the UI.",
+    related: ["SPREAD_TIGHTNESS", "DELTA_FIT"],
+  },
+};
+
+/**
+ * Look up a glossary entry by canonical key.
+ * Returns undefined if the key is not in the glossary.
+ */
+export function lookupTerm(key: string): GlossaryEntry | undefined {
+  return GLOSSARY[key];
+}
