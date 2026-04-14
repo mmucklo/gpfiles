@@ -600,16 +600,21 @@ A rising DXY (≥ +0.5%) is historically bearish for risk assets including equit
 
   DELTA: {
     term: "DELTA",
-    display: "Delta (Δ)",
-    short: "Rate of change of option price per $1 move in TSLA — calls 0→1, puts −1→0.",
-    long: `**Delta (Δ)** measures how much the option price changes for a $1 move in the underlying (TSLA).
+    display: "Delta (δ)",
+    short: "Rate of change of option price per $1 move in TSLA. +0.30 call = option gains $0.30 if TSLA rises $1.",
+    long: `**Delta** (δ) measures how much the option price moves for each $1 change in the underlying stock.
 
-- Long Call: Δ 0 to +1 (positive — profits from TSLA rising)
-- Long Put: Δ −1 to 0 (negative — profits from TSLA falling)
+- **Calls**: delta in (0, +1). Deep ITM → delta near 1. Deep OTM → delta near 0. ATM → ~0.50.
+- **Puts**: delta in (−1, 0). Deep ITM put → delta near −1. Deep OTM → near 0.
 
-Near-the-money options have Δ ≈ 0.50.`,
-    phase_note: "Added in Phase 14 — live delta values not yet shown in the UI.",
-    related: ["GAMMA", "THETA", "VEGA"],
+**Phase 14 strike selection:**
+Each archetype has a target delta range. DIRECTIONAL_STD targets |delta| ≈ 0.30 (±0.05 tolerance) for moderate leverage. SCALP_0DTE targets |delta| ≈ 0.50 for ATM gamma scalping. A strike outside the ±tolerance band is rejected.
+
+Delta also approximates the probability the option expires in-the-money (rough heuristic).`,
+    formula: "Call: Δ = N(d1). Put: Δ = N(d1) − 1. Where d1 = [ln(S/K) + (r + σ²/2)T] / (σ√T)",
+    source: "IBKR modelGreeks (preferred) or Black-Scholes BS-compute from IV",
+    trading_impact: "Target delta determines which strike is selected. Strike outside ±tolerance is rejected.",
+    related: ["GAMMA", "VEGA", "THETA", "STRIKE_SELECTOR"],
   },
 
   GAMMA: {
@@ -618,8 +623,12 @@ Near-the-money options have Δ ≈ 0.50.`,
     short: "Rate of change of delta per $1 move in TSLA — highest near the money and close to expiration.",
     long: `**Gamma (Γ)** measures how fast delta changes as TSLA moves.
 
-High gamma (near-the-money, near expiry) means delta — and therefore P&L — can shift rapidly. 0DTE positions have very high gamma risk.`,
-    phase_note: "Added in Phase 14 — live gamma values not yet shown in the UI.",
+High gamma (near-the-money, near expiry) means delta — and therefore P&L — can shift rapidly. 0DTE positions have very high gamma risk.
+
+Gamma is always positive for long calls and puts. In Phase 14 strike selection, gamma is tracked for audit but not used as a filter criterion.`,
+    formula: "Γ = N'(d1) / (S × σ × √T)",
+    source: "IBKR modelGreeks or BS-compute",
+    trading_impact: "Not a filter. Shown in the Strike Selection drill-down for trader context.",
     related: ["DELTA", "THETA", "SCALP_0DTE"],
   },
 
@@ -629,20 +638,30 @@ High gamma (near-the-money, near expiry) means delta — and therefore P&L — c
     short: "Time decay — dollars lost per calendar day as the option approaches expiration.",
     long: `**Theta (Θ)** is the daily time-value erosion of an option.
 
-Long options lose Θ per day (negative theta). The closer to expiration, the faster the decay. 0DTE positions have extreme theta burn in the final hours.`,
-    phase_note: "Added in Phase 14 — live theta values not yet shown in the UI.",
-    related: ["DELTA", "GAMMA", "THETA_BURN_SCORE", "SCALP_0DTE"],
+Long options lose Θ per day (negative theta). The closer to expiration, the faster the decay. 0DTE positions have extreme theta burn in the final hours.
+
+**Phase 14 theta cap:**
+Each archetype has a \`max_theta_pct_premium\` limit. A strike is rejected if |theta| / premium > cap. Example: DIRECTIONAL_STD cap = 5% — if an option costs $2 and theta is −$0.12/day (6%), it's rejected. SCALP_0DTE has a 25% cap (0DTE is theta-intensive by design).`,
+    formula: "Θ_call = −(S·N'(d1)·σ)/(2√T) − r·K·e^(−rT)·N(d2), divided by 365 for daily",
+    source: "IBKR modelGreeks or BS-compute",
+    trading_impact: "Theta burn cap prevents selecting contracts where time decay eats profits before the trade works.",
+    related: ["DELTA", "GAMMA", "STRIKE_SELECTOR", "SCALP_0DTE"],
   },
 
   VEGA: {
     term: "VEGA",
     display: "Vega (ν)",
-    short: "Sensitivity of option price to a 1% change in implied volatility.",
-    long: `**Vega (ν)** measures how much the option price changes for a 1 percentage-point change in implied volatility.
+    short: "Change in option price per 1-unit change in implied volatility. Long vega = benefits from rising IV.",
+    long: `**Vega (ν)** measures how much the option price changes when implied volatility (IV) changes.
 
-Long options have positive vega — they benefit from rising IV. The VOL_PLAY archetype explicitly targets high-vega situations.`,
-    phase_note: "Added in Phase 14 — live vega values not yet shown in the UI.",
-    related: ["VOLATILITY", "VOL_PLAY"],
+Long options have positive vega — rising IV increases option value. Vega is highest for ATM options with longer time to expiry.
+
+**VOL_PLAY archetype:**
+VOL_PLAY requires vega ≥ 0.10 per contract (Phase 14 floor). The strategy needs meaningful vega exposure to benefit from volatility expansion/compression.`,
+    formula: "ν = S·√T·N'(d1). Value is per 1.0 change in σ (annualized fraction, not percent).",
+    source: "IBKR modelGreeks or BS-compute",
+    trading_impact: "VOL_PLAY filter: strike rejected if vega < 0.10. Other archetypes: vega shown for drill-down only.",
+    related: ["DELTA", "THETA", "VOL_PLAY", "STRIKE_SELECTOR"],
   },
 
   IV: {
@@ -962,6 +981,190 @@ NATS runs 24/7 as a local process. If NATS goes down, the publisher retries conn
     trading_impact: "NATS down = signals never reach execution engine = no order placement.",
     related: ["PUBLISHER", "ENGINE_SUBSCRIBER", "HEARTBEAT"],
     phase_note: "Added in Phase 13.6.",
+  },
+
+  // ── Phase 14: Greeks + Chop + Liquidity ──────────────────────────────────
+
+  CHOP_REGIME: {
+    term: "CHOP_REGIME",
+    display: "Chop Regime",
+    short: "Measures micro-structure conviction: TRENDING / MIXED / CHOPPY based on ADX, range ratio, BB squeeze, and RV/IV ratio.",
+    long: `**Chop Regime** detects whether the TSLA tape has directional conviction or is churning sideways.
+
+This is ORTHOGONAL to the macro regime (RISK_ON/OFF). Macro regime = systemic context; Chop regime = TSLA microstructure.
+
+**Four components (0.25 weight each):**
+1. **Range ratio** — 5-day avg (high−low) / |close−open|. High = lots of intraday range, little net move.
+2. **ADX** — 14-period Wilder ADX on daily TSLA. ADX < 20 = no trend.
+3. **Bollinger squeeze** — 20-day BB width / 90-day BB median. < 0.6 = compression (pre-chop signal).
+4. **RV/IV ratio** — 5-day realized vol / ATM 30d IV. < 0.7 = price not moving like options expect.
+
+**Composite score:**
+- Score ≥ 0.75 → **CHOPPY**: block long-premium signals (DIRECTIONAL, MEAN_REVERT, SCALP_0DTE)
+- Score [0.5, 0.75) → **MIXED**: down-weight long-premium ×0.7; VOL_PLAY ×1.1
+- Score < 0.5 → **TRENDING**: no adjustment`,
+    formula: "score = 0.25×(range>3) + 0.25×(ADX<20) + 0.25×(BB<0.6) + 0.25×(rv/iv<0.7)",
+    source: "yfinance daily OHLCV + ATM IV from options chain · 5min refresh (market hours), 1h off-hours",
+    trading_impact: "CHOPPY blocks DIRECTIONAL/SCALP emissions. MIXED applies ×0.7 confidence. VOL_PLAY benefits from MIXED/CHOPPY when IV is not too rich.",
+    related: ["CORRELATION_REGIME", "MACRO_REGIME_KELLY", "VOL_PLAY"],
+    phase_note: "Added in Phase 14.",
+  },
+
+  ADX: {
+    term: "ADX",
+    display: "ADX",
+    short: "Average Directional Index (Wilder, 14-period) — measures trend strength; < 20 = no trend, > 25 = trending.",
+    long: `**ADX (Average Directional Index)** is Wilder's measure of trend strength, not direction.
+
+Computed from the ratio of the smoothed +DM / −DM indicators to the ATR over 14 daily periods. Values:
+- ADX < 20: weak/no trend → potential chop
+- ADX 20-25: emerging trend
+- ADX > 25: established trend
+- ADX > 40: strong trend
+
+The chop regime uses ADX < 20 as one of four chop signals (0.25 weight).`,
+    formula: "DX = 100 × |+DI − −DI| / (+DI + −DI); ADX = Wilder-smooth(DX, 14)",
+    source: "yfinance daily OHLCV (TSLA)",
+    trading_impact: "Low ADX contributes to CHOPPY chop score → blocks long-premium signals.",
+    related: ["CHOP_REGIME"],
+    phase_note: "Added in Phase 14.",
+  },
+
+  STRIKE_SELECTOR: {
+    term: "STRIKE_SELECTOR",
+    display: "Strike Selector",
+    short: "Phase 14 greeks-aware strike selection pipeline: filters by TTM, liquidity, greeks availability, delta band, theta cap, then scores.",
+    long: `**Strike Selector** (Phase 14) replaces moneyness-only selection with a 7-step Greeks-driven pipeline:
+
+1. **TTM filter** — keep strikes within archetype's preferred days-to-expiry range.
+2. **Liquidity gate** — reject OI < floor, volume < floor, spread > floor, bid < floor.
+3. **Greeks availability** — skip rows where greeks could not be computed.
+4. **Delta band** — keep |delta − target| ≤ tolerance.
+5. **Theta cap** — reject if |theta| / premium > max_theta_pct_premium.
+6. **Vega floor** — VOL_PLAY only: reject if vega < min_vega.
+7. **Score** — weight: 50% delta-fit, 20% liquidity, 20% spread tightness, 10% theta efficiency.
+
+If NO strike survives all filters, the signal is dropped with [STRIKE-REJECT] logged.`,
+    formula: "score = 0.50×delta_fit + 0.20×liquidity + 0.20×spread + 0.10×theta",
+    source: "options_chain.py (yfinance / IBKR) + pricing/greeks.py (BS compute)",
+    trading_impact: "No relaxing of filters. Drop = no emission. Prevents stale/illiquid trades.",
+    related: ["DELTA", "THETA", "VEGA", "LIQUIDITY_HEADROOM"],
+    phase_note: "Added in Phase 14.",
+  },
+
+  LIQUIDITY_HEADROOM: {
+    term: "LIQUIDITY_HEADROOM",
+    display: "Liquidity Headroom",
+    short: "How far above the liquidity floors the selected strike sits. E.g., volume 320/50 = 6.4× headroom.",
+    long: `**Liquidity Headroom** shows the margin above each liquidity floor for the selected strike:
+
+- **Volume headroom**: today's volume / MIN_OPTION_VOLUME_TODAY floor (default 50)
+- **OI headroom**: open interest / MIN_OPTION_OPEN_INTEREST floor (default 500)
+- **Spread headroom**: floor / actual spread (higher = tighter)
+- **Bid headroom**: actual bid / MIN_ABSOLUTE_BID floor (default $0.10)
+
+A headroom of 1.0× means barely passing. 5×+ means comfortable buffer.
+
+Color coding in the pending order "Liq" chip:
+- Green: > 2× headroom on all floors
+- Amber: 1–2× on at least one
+- Red: < 1× (below floor — engine will re-verify and reject)`,
+    formula: "headroom_x = actual_value / floor_value for each gate",
+    source: "Phase 14 strike_selector.py · env vars: MIN_OPTION_OPEN_INTEREST, MIN_OPTION_VOLUME_TODAY, MAX_BID_ASK_PCT, MIN_ABSOLUTE_BID",
+    trading_impact: "Low headroom signals that a strike is marginally liquid — may degrade between emit and execution. Engine re-checks at placement time.",
+    related: ["STRIKE_SELECTOR", "PENNY_CONTRACT", "MIN_OPTION_VOLUME_TODAY"],
+    phase_note: "Added in Phase 14.",
+  },
+
+  MIN_OPTION_VOLUME_TODAY: {
+    term: "MIN_OPTION_VOLUME_TODAY",
+    display: "Min Volume Today",
+    short: "Require at least N contracts traded today on this strike. Default: 50. Prevents trading dead/stale contracts.",
+    long: `**MIN_OPTION_VOLUME_TODAY** is a liquidity gate that rejects any strike with fewer than N contracts traded today.
+
+Root cause: on 2026-04-12, a $0.05 TSLA $365 CALL order sat unfilled for 22 hours because the strike had essentially no activity. Volume = 0 during the order lifetime.
+
+Setting MIN_OPTION_VOLUME_TODAY=50 requires at least 50 contracts traded today before the strike is considered liquid enough to trade. This is a **runtime-configurable** env var — tune without redeploy via \`.tsla-alpha.env\`.`,
+    formula: "row.volume >= MIN_OPTION_VOLUME_TODAY (default 50)",
+    source: "yfinance daily volume column / IBKR ticker.volume · .tsla-alpha.env",
+    trading_impact: "Rejects strikes with zero/thin volume. Prevents 22-hour stale-order scenarios.",
+    related: ["MIN_OPTION_OPEN_INTEREST", "PENNY_CONTRACT", "LIQUIDITY_HEADROOM"],
+    phase_note: "Added in Phase 14. Anti-stale-trade control.",
+  },
+
+  MIN_OPTION_OPEN_INTEREST: {
+    term: "MIN_OPTION_OPEN_INTEREST",
+    display: "Min Open Interest",
+    short: "Require OI >= N on the selected strike. Default: 500. Low OI = wide spreads, hard fills, price impact.",
+    long: `**MIN_OPTION_OPEN_INTEREST** rejects any strike with open interest below the floor.
+
+Open interest (OI) is the count of outstanding contracts. High OI → multiple market participants → tighter bid/ask spreads → easier fills.
+
+Default 500 is conservative for TSLA (liquid stock); adjust up for tighter discipline or down for smaller OTM wings.
+
+Runtime-configurable via \`MIN_OPTION_OPEN_INTEREST\` env var.`,
+    formula: "row.open_interest >= MIN_OPTION_OPEN_INTEREST (default 500)",
+    source: "yfinance / IBKR · .tsla-alpha.env",
+    trading_impact: "Low OI = wide spread = unfavorable fills. Rejects such strikes before signal emission.",
+    related: ["MIN_OPTION_VOLUME_TODAY", "LIQUIDITY_HEADROOM"],
+    phase_note: "Added in Phase 14.",
+  },
+
+  MAX_BID_ASK_PCT: {
+    term: "MAX_BID_ASK_PCT",
+    display: "Max Bid-Ask Spread %",
+    short: "Reject if (ask−bid)/mid > threshold. Default: 15%. Wide spreads mean you pay too much at entry/exit.",
+    long: `**MAX_BID_ASK_PCT** rejects strikes where the percentage spread between bid and ask is too wide.
+
+Formula: spread% = (ask − bid) / ((ask + bid) / 2). If spread% > MAX_BID_ASK_PCT (default 15%), the strike is rejected.
+
+A 15% spread on a $2 option means the bid/ask gap is $0.30 — you lose $0.15 immediately on entry and another $0.15 on exit. That's a $30/contract round-trip friction on top of commissions.
+
+Configurable via \`MAX_BID_ASK_PCT\` env var.`,
+    formula: "(ask − bid) / mid ≤ MAX_BID_ASK_PCT (default 0.15)",
+    source: "options chain bid/ask · .tsla-alpha.env",
+    trading_impact: "Wide spreads destroy edge. Reject before emission, not after a bad fill.",
+    related: ["MIN_ABSOLUTE_BID", "LIQUIDITY_HEADROOM"],
+    phase_note: "Added in Phase 14.",
+  },
+
+  MIN_ABSOLUTE_BID: {
+    term: "MIN_ABSOLUTE_BID",
+    display: "Min Absolute Bid",
+    short: "Reject any contract whose bid < $0.10. Kills penny contracts — zero real market depth.",
+    long: `**MIN_ABSOLUTE_BID** (anti-penny filter) rejects any option contract where the bid is below the minimum dollar threshold.
+
+**Penny contracts** (bid < $0.10) have essentially no real market depth:
+- Wide percentage spreads (50%+ even on a $0.05/$0.10 market)
+- Often untradeable in practice — fills require luck, not skill
+- Commissions ($0.65/contract minimum) can exceed the entire option value
+
+Default $0.10 is conservative. Adjust via \`MIN_ABSOLUTE_BID\` env var.`,
+    formula: "row.bid >= MIN_ABSOLUTE_BID (default $0.10)",
+    source: "options chain bid · .tsla-alpha.env",
+    trading_impact: "Eliminates deep OTM, near-expiry contracts that look cheap but are untradeable. Prevents the commission-negative scenario.",
+    related: ["MAX_BID_ASK_PCT", "LIQUIDITY_HEADROOM", "PENNY_CONTRACT"],
+    phase_note: "Added in Phase 14.",
+  },
+
+  PENNY_CONTRACT: {
+    term: "PENNY_CONTRACT",
+    display: "Penny Contract",
+    short: "An option with bid < $0.10. Zero meaningful market depth; fills require luck; commissions may exceed option value.",
+    long: `A **penny contract** is any option with a bid price below $0.10. These are nearly always deep out-of-the-money options close to expiry.
+
+**Why we avoid them:**
+- Bid/ask spread is often the entire option value (e.g., bid $0.01 / ask $0.05 = 133% spread)
+- IBKR minimum commission is $1/contract — on a $0.05 contract, commission = 20× option value
+- Fills depend on luck, not market depth; often sit unfilled for hours
+- Classic root cause of the 2026-04-12 stale TSLA CALL incident
+
+Phase 14 MIN_ABSOLUTE_BID=$0.10 prevents emitting signals on penny contracts.`,
+    formula: "bid < $0.10 → reject",
+    source: "options chain bid price",
+    trading_impact: "Never trade penny contracts. Phase 14 hard-blocks them at the publisher layer.",
+    related: ["MIN_ABSOLUTE_BID", "MIN_OPTION_VOLUME_TODAY", "LIQUIDITY_HEADROOM"],
+    phase_note: "Added in Phase 14.",
   },
 };
 

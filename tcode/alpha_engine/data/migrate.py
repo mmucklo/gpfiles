@@ -26,6 +26,18 @@ def migrate(db_path: str = DB_PATH):
             else:
                 raise
 
+    # Phase 14: tag signals with strike-selection score + chop regime for attribution
+    for col, typ in [("selection_score", "REAL"), ("chop_regime", "TEXT")]:
+        try:
+            conn.execute(f"ALTER TABLE signals ADD COLUMN {col} {typ}")
+            conn.commit()
+            print(f"  + added column signals.{col}")
+        except sqlite3.OperationalError as e:
+            if "duplicate column" in str(e).lower():
+                print(f"  . signals.{col} already exists")
+            else:
+                raise
+
     conn.close()
     print("migration complete")
 

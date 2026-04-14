@@ -259,6 +259,13 @@ def get_intel() -> dict:
     except Exception as e:
         correlation_regime = {"regime": "NORMAL", "error": str(e)}
 
+    # Phase 14: market-chop regime (TRENDING / MIXED / CHOPPY)
+    try:
+        from ingestion.chop_regime import get_chop_regime
+        chop_regime = get_chop_regime()
+    except Exception as e:
+        chop_regime = {"regime": "TRENDING", "score": 0.0, "error": str(e)}
+
     result = {
         "fetch_timestamp": now,
         "news": news,
@@ -273,6 +280,7 @@ def get_intel() -> dict:
         "premarket": premarket,
         "congress": congress,
         "correlation_regime": correlation_regime,
+        "chop_regime": chop_regime,
     }
     # Sanitize NaN/Inf values (yfinance returns NaN for missing data)
     import math
@@ -287,7 +295,7 @@ def get_intel() -> dict:
     result = _sanitize(result)
 
     _cache = {"data": result, "ts": now}
-    _hb("intel_refresh", status="ok", detail=f"sources:news,vix,spy,earnings,options_flow,catalyst,institutional,ev_sector,macro_regime,premarket,congress,correlation_regime")
+    _hb("intel_refresh", status="ok", detail=f"sources:news,vix,spy,earnings,options_flow,catalyst,institutional,ev_sector,macro_regime,premarket,congress,correlation_regime,chop_regime")
     return result
 
 

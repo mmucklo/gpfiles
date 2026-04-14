@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"os"
 	"os/exec"
+	"strconv"
 	"sync"
 	"time"
 
@@ -39,6 +41,8 @@ type AlphaSignal struct {
 	ConfidenceRationale string                 `json:"confidence_rationale"`
 	ImpliedVolatility   float64                `json:"implied_volatility"`
 	SpotSources         map[string]interface{} `json:"spot_sources,omitempty"`
+	// Phase 14: strike selection metadata for UI drill-down
+	StrikeSelectionMeta map[string]interface{} `json:"strike_selection_meta,omitempty"`
 
 	// Execution result — set after order placement, zero-value before.
 	IBKROrderID int    `json:"ibkr_order_id,omitempty"` // > 0 when order reached broker
@@ -47,6 +51,150 @@ type AlphaSignal struct {
 
 	// Rank assigned at placement time (for pending-cap comparisons in UI).
 	SignalRank float64 `json:"signal_rank,omitempty"`
+}
+
+// liquidityCheckResult holds the result of engine-side liquidity re-verification.
+type liquidityCheckResult struct {
+	Pass        bool
+	Reason      string
+	Volume      int
+	OI          int
+	SpreadPct   float64
+	Bid         float64
+}
+
+// engineLiquidityCheck re-verifies liquidity floors immediately before order placement.
+// Motivation: a signal may have been emitted during peak-liquidity hours; by the time
+// it's pulled from the pending queue for placement, volume/OI may have dried up.
+//
+// Returns (pass=true, reason="") or (pass=false, reason="<which gate failed>").
+func engineLiquidityCheck(sig AlphaSignal) liquidityCheckResult {
+	strike := sig.RecommendedStrike
+	if sig.IsSpread {
+		strike = sig.ShortStrike
+	}
+	if strike <= 0 || sig.ExpirationDate == "" || sig.OptionType == "" {
+		// Can't verify — allow (publisher already checked at emit time)
+		return liquidityCheckResult{Pass: true, Reason: ""}
+	}
+
+	minOI  := envIntOrDefault("MIN_OPTION_OPEN_INTEREST", 500)
+	minVol := envIntOrDefault("MIN_OPTION_VOLUME_TODAY", 50)
+	maxSpr := envFloatOrDefault("MAX_BID_ASK_PCT", 0.15)
+	minBid := envFloatOrDefault("MIN_ABSOLUTE_BID", 0.10)
+
+	// Shell out to options_chain_api to get current quote for this strike
+	cmd := exec.Command(
+		"./alpha_engine/venv/bin/python",
+		"alpha_engine/ingestion/options_chain_api.py",
+		"--expiry", sig.ExpirationDate,
+	)
+	cmd.Dir = "/home/builder/src/gpfiles/tcode"
+	out, err := cmd.Output()
+	if err != nil {
+		// If chain fetch fails, allow (don't block on infra issues)
+		log.Printf("[ENGINE-LIQ-WARN] chain fetch failed for strike=%.1f: %v", strike, err)
+		return liquidityCheckResult{Pass: true, Reason: ""}
+	}
+
+	var chainData struct {
+		Calls []struct {
+			Strike    float64 `json:"strike"`
+			OI        int     `json:"oi"`
+			Volume    int     `json:"volume"`
+			Bid       float64 `json:"bid"`
+			Ask       float64 `json:"ask"`
+			Mid       float64 `json:"mid"`
+			SpreadPct float64 `json:"spread_pct"`
+		} `json:"calls"`
+		Puts []struct {
+			Strike    float64 `json:"strike"`
+			OI        int     `json:"oi"`
+			Volume    int     `json:"volume"`
+			Bid       float64 `json:"bid"`
+			Ask       float64 `json:"ask"`
+			Mid       float64 `json:"mid"`
+			SpreadPct float64 `json:"spread_pct"`
+		} `json:"puts"`
+	}
+	if err := json.Unmarshal(out, &chainData); err != nil {
+		return liquidityCheckResult{Pass: true, Reason: ""}
+	}
+
+	// Find the row matching our strike
+	type rowT struct {
+		Strike    float64
+		OI        int
+		Volume    int
+		Bid       float64
+		SpreadPct float64
+	}
+	var match *rowT
+	if sig.OptionType == "CALL" {
+		for _, r := range chainData.Calls {
+			if math.Abs(r.Strike-strike) < 0.5 {
+				rCopy := rowT{r.Strike, r.OI, r.Volume, r.Bid, r.SpreadPct / 100}
+				match = &rCopy
+				break
+			}
+		}
+	} else {
+		for _, r := range chainData.Puts {
+			if math.Abs(r.Strike-strike) < 0.5 {
+				rCopy := rowT{r.Strike, r.OI, r.Volume, r.Bid, r.SpreadPct / 100}
+				match = &rCopy
+				break
+			}
+		}
+	}
+
+	if match == nil {
+		// Strike not found in current chain — allow (may be expired chain data)
+		return liquidityCheckResult{Pass: true, Reason: ""}
+	}
+
+	// Apply the four gates
+	if match.Volume < minVol {
+		return liquidityCheckResult{
+			Pass: false, Reason: fmt.Sprintf("volume=%d<%d", match.Volume, minVol),
+			Volume: match.Volume, OI: match.OI, SpreadPct: match.SpreadPct, Bid: match.Bid,
+		}
+	}
+	if match.OI < minOI {
+		return liquidityCheckResult{
+			Pass: false, Reason: fmt.Sprintf("oi=%d<%d", match.OI, minOI),
+			Volume: match.Volume, OI: match.OI, SpreadPct: match.SpreadPct, Bid: match.Bid,
+		}
+	}
+	if match.SpreadPct > maxSpr {
+		return liquidityCheckResult{
+			Pass: false, Reason: fmt.Sprintf("spread_pct=%.3f>%.3f", match.SpreadPct, maxSpr),
+			Volume: match.Volume, OI: match.OI, SpreadPct: match.SpreadPct, Bid: match.Bid,
+		}
+	}
+	if match.Bid < minBid {
+		return liquidityCheckResult{
+			Pass: false, Reason: fmt.Sprintf("bid=%.2f<%.2f", match.Bid, minBid),
+			Volume: match.Volume, OI: match.OI, SpreadPct: match.SpreadPct, Bid: match.Bid,
+		}
+	}
+	return liquidityCheckResult{
+		Pass: true, Reason: "",
+		Volume: match.Volume, OI: match.OI, SpreadPct: match.SpreadPct, Bid: match.Bid,
+	}
+}
+
+// envFloatOrDefault reads an env var as float64; returns dflt if missing or unparseable.
+func envFloatOrDefault(key string, dflt float64) float64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return dflt
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return dflt
+	}
+	return f
 }
 
 // orderState tracks the last-known status for a signal fingerprint so we can
@@ -522,6 +670,20 @@ func (s *SignalSubscriber) Start() {
 					CancelledRank: lowest.Rank,
 					IncomingRank:  incomingRank,
 				})
+			}
+
+			// ── Phase 14 Layer-2: engine-side liquidity re-check ─────────────
+			// Signal was emitted by publisher during liquid hours; re-verify
+			// before placement in case liquidity has degraded since emission.
+			liqCheck := engineLiquidityCheck(sig)
+			if !liqCheck.Pass {
+				log.Printf("[ENGINE-LIQUIDITY-REJECT] fingerprint=%s current_volume=%d current_oi=%d reason=%s",
+					fp, liqCheck.Volume, liqCheck.OI, liqCheck.Reason)
+				sig.ExecStatus = "rejected"
+				sig.ExecError = fmt.Sprintf("engine_liquidity_reject:%s", liqCheck.Reason)
+				updateOrderState(fp, orderState{})
+				AddSignal(sig)
+				break
 			}
 
 			// ── Route to bracket (TP+SL both set) or single-leg ──────────────

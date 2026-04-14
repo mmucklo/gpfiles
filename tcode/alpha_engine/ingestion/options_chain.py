@@ -57,6 +57,14 @@ class OptionRow:
     bid: float
     ask: float
     last_price: float
+    volume: int = 0           # contracts traded today
+
+    # Greeks — populated by enrich_greeks()
+    delta: Optional[float] = None
+    gamma: Optional[float] = None
+    theta: Optional[float] = None
+    vega: Optional[float] = None
+    greeks_source: str = "unavailable"  # "ibkr" | "computed_bs" | "unavailable"
 
     @property
     def mid_price(self) -> float:
@@ -71,6 +79,54 @@ class OptionRow:
         if mid <= 0:
             return 1.0
         return (self.ask - self.bid) / mid
+
+
+def enrich_greeks(rows: list["OptionRow"], spot: float, ttm_years: float) -> None:
+    """
+    Mutate each OptionRow in-place: fill delta/gamma/theta/vega/greeks_source.
+
+    Priority:
+      1. IBKR modelGreeks already set on the row (greeks_source == "ibkr") — skip.
+      2. BS-compute from IV when IV > 0.
+      3. Mark greeks_source="unavailable" and leave None values.
+
+    Also tracks degradation: logs WARNING if >50% of rows end up unavailable.
+    """
+    try:
+        import sys as _sys
+        _sys.path.insert(0, "/home/builder/src/gpfiles/tcode/alpha_engine")
+        from pricing.greeks import compute_bs_greeks, get_risk_free_rate
+        rate = get_risk_free_rate()
+    except Exception as exc:
+        logger.warning("enrich_greeks: cannot import greeks module: %s", exc)
+        return
+
+    unavail_count = 0
+    for row in rows:
+        if row.greeks_source == "ibkr":
+            # Already populated by IBKR modelGreeks — trust and skip
+            continue
+        iv = row.implied_volatility
+        if iv and iv > 0:
+            g = compute_bs_greeks(spot, row.strike, ttm_years, rate, iv, row.option_type)
+            row.delta = g["delta"]
+            row.gamma = g["gamma"]
+            row.theta = g["theta"]
+            row.vega = g["vega"]
+            row.greeks_source = g["greeks_source"]
+            if g["greeks_source"] == "unavailable":
+                unavail_count += 1
+        else:
+            row.greeks_source = "unavailable"
+            unavail_count += 1
+
+    total = len(rows)
+    if total > 0 and unavail_count / total > 0.5:
+        logger.warning(
+            "Greeks data degraded: %d/%d strikes missing greeks. "
+            "Strike selector will skip unavailable rows.",
+            unavail_count, total,
+        )
 
 
 class OptionsChainCache:
@@ -154,8 +210,9 @@ class OptionsChainCache:
                     last = float(ticker_data.last or ticker_data.close or 0)
                     oi   = int(ticker_data.volume or 0)  # volume as OI proxy off-hours
                     iv   = float(getattr(ticker_data, "impliedVol", 0) or 0)
+                    vol_today = int(getattr(ticker_data, "volume", 0) or 0)
 
-                    rows.append(OptionRow(
+                    row = OptionRow(
                         strike=strike_val,
                         option_type=opt_type,
                         expiration_date=expiry,
@@ -164,7 +221,22 @@ class OptionsChainCache:
                         bid=bid,
                         ask=ask,
                         last_price=last,
-                    ))
+                        volume=vol_today,
+                    )
+
+                    # IBKR modelGreeks — prefer native greeks when available
+                    model_greeks = getattr(ticker_data, "modelGreeks", None)
+                    if model_greeks is not None:
+                        try:
+                            row.delta = float(model_greeks.delta or 0)
+                            row.gamma = float(model_greeks.gamma or 0)
+                            row.theta = float(model_greeks.theta or 0)
+                            row.vega  = float(model_greeks.vega or 0)
+                            row.greeks_source = "ibkr"
+                        except Exception:
+                            pass  # fall through to BS-compute
+
+                    rows.append(row)
 
             logger.info("IBKR chain: %d contracts loaded for %s %s (source=ibkr)",
                         len(rows), self.ticker, expiry)
@@ -194,6 +266,7 @@ class OptionsChainCache:
                         bid=float(r.get("bid", 0.0)),
                         ask=float(r.get("ask", 0.0)),
                         last_price=float(r.get("lastPrice", 0.0)),
+                        volume=int(r.get("volume", 0) or 0),
                     ))
                 except Exception:
                     continue
@@ -230,6 +303,21 @@ class OptionsChainCache:
             except Exception as e:
                 logger.warning(f"Chain fetch failed for {expiry}: {e}")
                 return cached[1] if cached else []
+
+        # Enrich with greeks (BS-compute from IV; IBKR rows already have greeks from modelGreeks)
+        if rows:
+            from datetime import date as _d
+            try:
+                exp_date = _d.fromisoformat(expiry)
+                dte = (exp_date - _d.today()).days
+                ttm = max(dte / 365.0, 0.0001)
+            except ValueError:
+                ttm = 7 / 365.0
+            try:
+                _spot, _ = get_spot_with_fallback(self.ticker)
+            except Exception:
+                _spot = 0.0
+            enrich_greeks(rows, spot=_spot, ttm_years=ttm)
 
         self._cache[expiry] = (now, rows)
         logger.info("Options chain loaded: %s — %d contracts (source=%s)", expiry, len(rows), source)
