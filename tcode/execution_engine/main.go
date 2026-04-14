@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -234,6 +235,21 @@ func main() {
 	mux.HandleFunc("/api/signals/feedback", configHandler.ServeSignalFeedback)
 	mux.HandleFunc("/api/signals/cancel", configHandler.ServeSignalCancel)
 
+	// System heartbeats (Phase 13.6)
+	mux.HandleFunc("/api/system/heartbeats", configHandler.ServeSystemHeartbeats)
+	mux.HandleFunc("/api/system/alerts", configHandler.ServeSystemAlerts)
+	// Prefix-match for /{component}/sparkline and /{component}/restart
+	mux.HandleFunc("/api/system/heartbeats/", func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		if strings.HasSuffix(path, "/sparkline") {
+			configHandler.ServeSystemHeartbeatSparkline(w, r)
+		} else if strings.HasSuffix(path, "/restart") {
+			configHandler.ServeSystemHeartbeatRestart(w, r)
+		} else {
+			http.NotFound(w, r)
+		}
+	})
+
 	// Live Reload WebSocket (Task: Auto-Refresh)
 	mux.Handle("/dev/ws", GlobalReloader)
 	mux.HandleFunc("/dev/reload", TriggerReloadHandler)
@@ -293,6 +309,20 @@ func main() {
 
 	// Phase 13: keep cancelled-signal cache current (10s refresh from DB)
 	StartCancelRefreshLoop()
+
+	// Phase 13.6: IBKR status heartbeat — 60s ticker, polls open orders as liveness probe.
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			_, err := OpenIBKROrders()
+			if err != nil {
+				emitEngineHeartbeat("engine_ibkr_status", "degraded", err.Error())
+			} else {
+				emitEngineHeartbeat("engine_ibkr_status", "ok", "")
+			}
+		}
+	}()
 
 	// Periodic Portfolio Revaluation (Task: Real-time NAV & Unrealized PnL)
 	go func() {
