@@ -38,6 +38,10 @@ interface Signal {
     ibkr_order_id?: number;
     exec_status?: string;    // "submitted" | "failed" | "sim_filled" | "rejected"
     exec_error?: string;
+    strike_selection_meta?: StrikeSelectionMeta;
+    // Phase 14 chop annotation — set when signal was gated/downweighted
+    chop_label?: string;    // "CHOPPY" | "MIXED" | "TRENDING"
+    chop_score?: number;
 }
 
 interface BrokerStatus {
@@ -357,6 +361,45 @@ interface IntelCorrelationRegime {
     error?: string | null;
 }
 
+interface IntelChopRegimeComponents {
+    range_ratio: number | null;
+    adx: number | null;
+    bb_squeeze: number | null;
+    rv_iv_ratio: number | null;
+}
+
+interface IntelChopRegime {
+    regime: 'TRENDING' | 'MIXED' | 'CHOPPY';
+    score: number;
+    components: IntelChopRegimeComponents;
+    thresholds_hit: string[];
+    ts: string;
+    source: string;
+    rv?: number | null;
+    atm_iv?: number | null;
+    error?: string;
+}
+
+interface StrikeSelectionMeta {
+    strike: number;
+    expiry: string;
+    contract_type: string;
+    delta: number;
+    gamma: number;
+    theta: number;
+    vega: number;
+    iv: number;
+    bid: number;
+    ask: number;
+    mid: number;
+    open_interest: number;
+    volume: number;
+    score: number;
+    score_breakdown: { delta_fit: number; liquidity: number; spread_tightness: number; theta_efficiency: number };
+    greeks_source: string;
+    liquidity_headroom: { volume: number; oi: number; spread_pct: number; bid: number };
+}
+
 interface Intel {
     fetch_timestamp: number;
     news: IntelNews;
@@ -367,6 +410,7 @@ interface Intel {
     premarket?: IntelPremarket;
     congress?: IntelCongress;
     correlation_regime?: IntelCorrelationRegime;
+    chop_regime?: IntelChopRegime;
 }
 
 interface LosingTrade {
@@ -894,6 +938,78 @@ const SignalModal = ({ signal, onClose }: { signal: Signal; onClose: () => void 
                 <div style={{ padding: '0.5rem 0.6rem', fontSize: '12px', color: '#8b949e', borderTop: '1px solid #21262d', lineHeight: '1.5' }}>
                     {contractExplanation(signal)}
                 </div>
+
+                {/* ── Phase 14: Strike Selection drill-down ────────── */}
+                {signal.strike_selection_meta && (() => {
+                    const m = signal.strike_selection_meta;
+                    const scoreBarStyle = () => ({
+                        display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '3px',
+                    });
+                    const barFill = (val: number, color: string) => (
+                        <div style={{ flex: 1, height: '4px', background: '#21262d', borderRadius: '2px', overflow: 'hidden' }}>
+                            <div style={{ width: `${Math.round(val * 100)}%`, height: '100%', background: color, borderRadius: '2px' }} />
+                        </div>
+                    );
+                    const minHeadroom = Math.min(
+                        m.liquidity_headroom.volume ?? 99,
+                        m.liquidity_headroom.oi ?? 99,
+                    );
+                    const liqColor = minHeadroom > 2 ? '#3fb950' : minHeadroom > 1 ? '#e6a200' : '#f85149';
+                    return (
+                        <div style={{ borderTop: '1px solid #21262d', padding: '0.5rem 0.6rem' }}>
+                            <div style={{ fontSize: '11px', fontWeight: 700, color: '#58a6ff', marginBottom: '6px', letterSpacing: '0.05em' }}>
+                                STRIKE SELECTION
+                            </div>
+                            {/* Greeks row */}
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '6px', marginBottom: '8px' }}>
+                                {([
+                                    { label: 'Delta', val: m.delta, term: 'DELTA', fmt: (v: number) => v.toFixed(3) },
+                                    { label: 'Gamma', val: m.gamma, term: 'GAMMA', fmt: (v: number) => v.toFixed(4) },
+                                    { label: 'Theta/d', val: m.theta, term: 'THETA', fmt: (v: number) => v.toFixed(4) },
+                                    { label: 'Vega', val: m.vega, term: 'VEGA', fmt: (v: number) => v.toFixed(3) },
+                                ] as Array<{ label: string; val: number; term: string; fmt: (v: number) => string }>).map(({ label, val, term, fmt }) => (
+                                    <div key={label} style={{ textAlign: 'center', padding: '4px', background: '#161b22', borderRadius: '4px', border: '1px solid #30363d' }}>
+                                        <div style={{ fontSize: '9px', color: '#8b949e', marginBottom: '2px' }}>
+                                            <TermLabel term={term} style={{ fontSize: '9px', color: '#8b949e' }} />
+                                        </div>
+                                        <div style={{ fontSize: '11px', fontWeight: 700, color: '#c9d1d9', fontFamily: 'monospace' }}
+                                             data-testid={`greeks-${label.toLowerCase()}`}>
+                                            {val != null ? fmt(val) : '—'}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                            {/* Score breakdown bars */}
+                            <div style={{ marginBottom: '6px' }}>
+                                <div style={{ fontSize: '10px', color: '#8b949e', marginBottom: '4px' }}>
+                                    Score: <strong style={{ color: '#c9d1d9' }}>{m.score.toFixed(3)}</strong>
+                                    <span style={{ color: '#8b949e', marginLeft: '6px', fontSize: '9px' }}>
+                                        (source: {m.greeks_source})
+                                    </span>
+                                </div>
+                                {Object.entries(m.score_breakdown).map(([key, val]) => (
+                                    <div key={key} style={scoreBarStyle()}>
+                                        <span style={{ fontSize: '9px', color: '#8b949e', width: '100px', flexShrink: 0 }}>
+                                            {key.replace(/_/g, ' ')}
+                                        </span>
+                                        {barFill(val as number, '#58a6ff')}
+                                        <span style={{ fontSize: '9px', color: '#c9d1d9', width: '32px', textAlign: 'right', fontFamily: 'monospace' }}>
+                                            {((val as number) * 100).toFixed(0)}%
+                                        </span>
+                                    </div>
+                                ))}
+                            </div>
+                            {/* Liquidity headroom */}
+                            <div style={{ fontSize: '10px', color: '#8b949e' }}>
+                                <TermLabel term="LIQUIDITY_HEADROOM" style={{ fontSize: '10px', color: liqColor }} />
+                                {': '}
+                                <span style={{ color: liqColor }}>
+                                    vol {m.liquidity_headroom.volume?.toFixed(1)}× · OI {m.liquidity_headroom.oi?.toFixed(1)}× · spread {m.liquidity_headroom.spread_pct?.toFixed(1)}× · bid {m.liquidity_headroom.bid?.toFixed(1)}×
+                                </span>
+                            </div>
+                        </div>
+                    );
+                })()}
 
                 {/* ── Trade Economics section ──────────────────────── */}
                 {(() => {
@@ -2138,6 +2254,10 @@ interface PendingOrder {
     avg_fill_price: number;
     timestamp: string;
     rank?: number;  // signal rank [0,1] from pending cap tracker
+    // Phase 14: greeks and liquidity from strike selection
+    delta?: number;
+    strike_selection_meta?: StrikeSelectionMeta;
+    exec_error?: string;
 }
 
 interface PendingOrdersResponse {
@@ -2752,6 +2872,42 @@ const PendingOrdersPanel = ({
                                     >
                                         rank: {o.rank.toFixed(2)}
                                     </span>
+                                )}
+                                {/* Phase 14: Delta badge */}
+                                {o.strike_selection_meta?.delta != null && (
+                                    <Tooltip text={`δ=${o.strike_selection_meta.delta.toFixed(3)} · γ=${o.strike_selection_meta.gamma.toFixed(4)} · θ=${o.strike_selection_meta.theta.toFixed(4)}/d · ν=${o.strike_selection_meta.vega.toFixed(3)}`}>
+                                        <span
+                                            data-testid="delta-badge"
+                                            style={{ fontSize: '0.65rem', color: '#a5d6ff', background: 'rgba(165,214,255,0.1)', border: '1px solid rgba(165,214,255,0.3)', borderRadius: '3px', padding: '1px 5px', cursor: 'default' }}
+                                        >
+                                            δ{o.strike_selection_meta.delta.toFixed(2)}
+                                        </span>
+                                    </Tooltip>
+                                )}
+                                {/* Phase 14: Liquidity chip */}
+                                {o.strike_selection_meta?.liquidity_headroom != null && (() => {
+                                    const h = o.strike_selection_meta!.liquidity_headroom;
+                                    const minH = Math.min(h.volume ?? 99, h.oi ?? 99);
+                                    const chipColor = minH > 2 ? '#3fb950' : minH > 1 ? '#e6a200' : '#f85149';
+                                    const chipBg = minH > 2 ? 'rgba(63,185,80,0.1)' : minH > 1 ? 'rgba(230,162,0,0.1)' : 'rgba(248,81,73,0.1)';
+                                    return (
+                                        <Tooltip text={`Liq floors: vol ${h.volume?.toFixed(1)}× · OI ${h.oi?.toFixed(1)}× · spread ${h.spread_pct?.toFixed(1)}× · bid ${h.bid?.toFixed(1)}×`}>
+                                            <span
+                                                data-testid="liq-chip"
+                                                style={{ fontSize: '0.65rem', color: chipColor, background: chipBg, border: `1px solid ${chipColor}55`, borderRadius: '3px', padding: '1px 5px', cursor: 'default' }}
+                                            >
+                                                Liq {minH > 2 ? '✓' : minH > 1 ? '~' : '!'}
+                                            </span>
+                                        </Tooltip>
+                                    );
+                                })()}
+                                {/* Phase 14: Engine liquidity rejection indicator */}
+                                {o.exec_error?.startsWith('engine_liquidity_reject') && (
+                                    <Tooltip text={`Liquidity degraded after emit: ${o.exec_error.replace('engine_liquidity_reject:', '')}`}>
+                                        <span style={{ fontSize: '0.65rem', color: '#f85149', background: 'rgba(248,81,73,0.1)', border: '1px solid rgba(248,81,73,0.3)', borderRadius: '3px', padding: '1px 5px' }}>
+                                            Liq degraded
+                                        </span>
+                                    </Tooltip>
                                 )}
                                 {/* Cancel button — amber, not red; cancellation is neutral */}
                                 <button
@@ -4031,6 +4187,7 @@ const IntelPanel = ({ intel, isLoading }: { intel: Intel | null; isLoading?: boo
 
     const congress = intel.congress;
     const corrRegime = intel.correlation_regime;
+    const chopRegime = intel.chop_regime;
 
     const vixCls = vix.vix_status === 'LOW' ? 'low'
         : vix.vix_status === 'HIGH' ? 'high'
@@ -4251,7 +4408,79 @@ const IntelPanel = ({ intel, isLoading }: { intel: Intel | null; isLoading?: boo
                     )}
                 </div>
 
-                {/* Card 6: TSLA↔Mag7 Correlation Regime */}
+                {/* Card 6a: Market-Chop Regime (Phase 14) */}
+                <div className="intel-card" role="region" aria-label="Market-Chop Regime" data-testid="chop-regime-card">
+                    <div className="intel-card-title">
+                        <TermLabel term="CHOP_REGIME" />
+                    </div>
+                    {chopRegime ? (
+                        <>
+                            <div className="intel-row" style={{ alignItems: 'center' }}>
+                                <span className="intel-label">Regime</span>
+                                <span style={{
+                                    color: chopRegime.regime === 'CHOPPY' ? '#f85149'
+                                         : chopRegime.regime === 'MIXED'  ? '#e6a200'
+                                         : '#3fb950',
+                                    fontWeight: 800,
+                                    fontSize: '13px',
+                                    letterSpacing: '0.03em',
+                                }}>
+                                    {chopRegime.regime}
+                                </span>
+                                <span style={{ marginLeft: '6px', color: '#8b949e', fontSize: '11px' }}>
+                                    score: {(chopRegime.score * 100).toFixed(0)}%
+                                </span>
+                            </div>
+                            {/* Component bars */}
+                            {(['range_ratio', 'adx', 'bb_squeeze', 'rv_iv_ratio'] as const).map(k => {
+                                const raw = chopRegime.components[k];
+                                const hit = chopRegime.thresholds_hit.includes(k);
+                                const labels: Record<string, string> = {
+                                    range_ratio: 'Range ratio', adx: 'ADX',
+                                    bb_squeeze: 'BB squeeze', rv_iv_ratio: 'RV/IV',
+                                };
+                                return (
+                                    <div key={k} className="intel-row" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: '2px' }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', width: '100%' }}>
+                                            <span className="intel-label" style={{ fontSize: '10px' }}>
+                                                <TermLabel term={k === 'adx' ? 'ADX' : 'CHOP_REGIME'} style={{ fontSize: '10px' }} />
+                                                {' '}{labels[k]}
+                                            </span>
+                                            <span style={{ fontSize: '10px', color: hit ? '#f85149' : '#8b949e' }}>
+                                                {raw !== null && raw !== undefined ? raw.toFixed(2) : '—'}
+                                                {hit ? ' ✓' : ''}
+                                            </span>
+                                        </div>
+                                        <div style={{
+                                            width: '100%', height: '3px', background: '#21262d', borderRadius: '2px', overflow: 'hidden',
+                                        }}>
+                                            <div style={{
+                                                width: `${Math.min(100, (hit ? 100 : 0))}%`,
+                                                height: '100%',
+                                                background: hit ? '#f85149' : '#3fb950',
+                                                borderRadius: '2px',
+                                            }} />
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                            {chopRegime.regime !== 'TRENDING' && (
+                                <div className="intel-row" style={{ fontSize: '10px', color: chopRegime.regime === 'CHOPPY' ? '#f85149' : '#e6a200', marginTop: '4px' }}>
+                                    {chopRegime.regime === 'CHOPPY'
+                                        ? 'DIRECTIONAL/SCALP signals blocked'
+                                        : 'Long-premium conf ×0.7 · VOL_PLAY ×1.1'}
+                                </div>
+                            )}
+                            <div className="intel-stale">
+                                {chopRegime.ts ? new Date(chopRegime.ts).toLocaleTimeString() : '—'} · {chopRegime.source}
+                            </div>
+                        </>
+                    ) : (
+                        <div className="intel-no-news">Chop regime unavailable</div>
+                    )}
+                </div>
+
+                {/* Card 6b: TSLA↔Mag7 Correlation Regime */}
                 <div className="intel-card" role="region" aria-label="TSLA-Mag7 Correlation Regime" data-testid="correlation-regime-card">
                     <div className="intel-card-title">
                         <TermLabel term="CORRELATION_REGIME" />
