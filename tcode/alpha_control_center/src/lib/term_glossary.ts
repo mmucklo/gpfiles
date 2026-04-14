@@ -707,6 +707,102 @@ Only strikes passing the minimum OI filter enter the signal pipeline.`,
     phase_note: "Added in Phase 14 — values not yet shown in the UI.",
     related: ["SPREAD_TIGHTNESS", "DELTA_FIT"],
   },
+
+  // ── Phase 13.5: Data-source repair terms ─────────────────────────────────
+
+  DXY_SOURCE: {
+    term: "DXY_SOURCE",
+    display: "DXY (US Dollar Index)",
+    short: "US Dollar Index — measures dollar strength vs 6 major currencies. Rising DXY = risk-off signal for equities.",
+    long: `**DXY (US Dollar Index)** tracks the value of the US dollar against a basket of 6 major currencies (EUR 57.6%, JPY 13.6%, GBP 11.9%, CAD 9.1%, SEK 4.2%, CHF 3.6%).
+
+**Source chain (Phase 13.5):**
+- **Primary**: DX-Y.NYB — ICE US Dollar Index futures continuous contract, intraday available via yfinance.
+- **Proxy fallback**: UUP — Invesco DB US Dollar Index Bullish ETF. ~1:1 directional correlation with DXY.
+- **Unavailable**: If both fail, DXY is omitted from the composite confidence adjustment.
+
+The legacy \`^DXY\` ticker was delisted from yfinance data feeds as of early 2026.`,
+    source: "DX-Y.NYB (ICE futures) via yfinance — primary; UUP ETF as proxy fallback",
+    trading_impact: "DXY move >0.5% adds ±0.20 to pre-market composite confidence. Rising DXY dampens bullish equity bias.",
+    related: ["UUP_PROXY"],
+    phase_note: "Updated in Phase 13.5 — ^DXY delisted; using DX-Y.NYB primary + UUP proxy.",
+  },
+
+  UUP_PROXY: {
+    term: "UUP_PROXY",
+    display: "UUP (DXY Proxy)",
+    short: "Invesco DB US Dollar Index Bullish ETF — used as a DXY proxy when the primary DX-Y.NYB source fails.",
+    long: `**UUP** (Invesco DB US Dollar Index Bullish Fund) is an ETF that tracks the Deutsche Bank Long US Dollar Futures index, which closely follows DXY composition.
+
+Used as a **proxy** for DXY when the primary DX-Y.NYB futures contract is unavailable. The directional correlation is ~1:1, though the absolute price level is different (~28 vs DXY ~104).
+
+When UUP is shown as the source, the system is using UUP % change as a stand-in for DXY % change. The confidence adjustment logic (>0.5% move = ±0.20 confidence) applies identically.
+
+**Tradeoff**: UUP has slightly less granularity than the ICE futures contract and may lag by a few minutes during pre-market hours.`,
+    source: "UUP ETF via yfinance — fallback when DX-Y.NYB returns empty data",
+    trading_impact: "Same as DXY_SOURCE: >0.5% move adjusts pre-market confidence ±0.20.",
+    related: ["DXY_SOURCE"],
+    phase_note: "Added in Phase 13.5 as DXY fallback.",
+  },
+
+  SOURCE_DEGRADED: {
+    term: "SOURCE_DEGRADED",
+    display: "Feed Degraded",
+    short: "A data source failed 3+ times consecutively and is in circuit-breaker mode — retrying after a 10-minute cooldown.",
+    long: `**Feed Degraded** means a data source has exceeded the retry threshold and the circuit breaker has opened.
+
+**Circuit breaker behavior (Phase 13.5):**
+- 3 attempts with exponential backoff (1s, 4s, 16s)
+- After 3 consecutive failures, the source is marked degraded for 10 minutes
+- During cooldown, no requests are sent (prevents hammering a down endpoint)
+- After cooldown, one probe is allowed; success resets the counter
+
+**While degraded:**
+- Data from other sources is still shown
+- The UI displays "retrying at HH:MM"
+- Signals continue from non-degraded sources
+
+**Senate eFTS degradation** is typically caused by DNS failures on efts.senate.gov.`,
+    trading_impact: "Signal generation continues from non-degraded sources. Congress signal shows as NEUTRAL if all sources degraded.",
+    phase_note: "Added in Phase 13.5 — circuit breaker for Senate eFTS.",
+  },
+
+  PRICE_CONDITION: {
+    term: "PRICE_CONDITION",
+    display: "PriceCondition",
+    short: "IBKR conditional stop: fires the stop-loss when the underlying stock price crosses a threshold, not the option premium.",
+    long: `**PriceCondition** is an IBKR order condition that fires a child order when the underlying stock reaches a specified price.
+
+**Why used for options brackets:**
+Option premium fluctuates with implied volatility even when the underlying hasn't moved. A premium-based stop can fire prematurely during IV spikes. A PriceCondition on the underlying stock avoids this "volatility whipsaw."
+
+**Phase 13.5 fix**: \`reqContractDetails()\` now used to verify \`conId > 0\` before building PriceCondition. Prior code used \`qualifyContracts()\`, which could return before metadata arrived, leaving \`conId=0\` and causing IBKR Error 321.
+
+**Downgrade path**: If qualification fails, SL leg falls back to option-premium stop and a \`[BRACKET-DOWNGRADE]\` log line is emitted.`,
+    source: "ib_insync PriceCondition · IBKR EWrapper",
+    trading_impact: "Prevents SL leg from firing on IV noise. Requires conId > 0 from reqContractDetails().",
+    related: ["IBKR_ERROR_321"],
+    phase_note: "Phase 9 introduced PriceCondition; Phase 13.5 fixed conId=0 bug.",
+  },
+
+  IBKR_ERROR_321: {
+    term: "IBKR_ERROR_321",
+    display: "IBKR Error 321",
+    short: "IBKR validation error: 'Invalid contract id' — caused by passing conId=0 to a PriceCondition before full qualification.",
+    long: `**IBKR Error 321** ("Error validating request — Invalid contract id") is thrown when an order references a contract with \`conId=0\`.
+
+**Root cause (Phase 9):**
+\`qualifyContracts()\` could return before \`conId\` was populated, leaving it at 0. IBKR rejected the bracket order.
+
+**Phase 13.5 fix:**
+Replaced with \`reqContractDetails()\`, which returns explicit contract details. We verify \`conId > 0\` before proceeding. If not, the condition is skipped with a \`[BRACKET-DOWNGRADE]\` audit log.
+
+**Error classification: FATAL** — not retried. This is a configuration error, not a connectivity blip.`,
+    source: "IBKR EWrapper error code 321 · ib_insync reqContractDetails()",
+    trading_impact: "Post-fix: PriceCondition has valid conId or SL downgrades gracefully to option-premium stop.",
+    related: ["PRICE_CONDITION"],
+    phase_note: "Added in Phase 13.5.",
+  },
 };
 
 /**

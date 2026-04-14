@@ -293,6 +293,7 @@ interface IntelIndexEntry {
     symbol: string;
     change_pct: number;
     ok: boolean;
+    source?: string;  // DXY only: "live" | "uup_proxy" | "unavailable"
 }
 
 interface IntelPremarket {
@@ -328,6 +329,13 @@ interface IntelCongressTrade {
     within_48h: boolean;
 }
 
+interface CongressSourceStatus {
+    status: 'ok' | 'degraded' | 'disabled' | 'unknown';
+    last_success_at: string | null;
+    last_error: string | null;
+    next_retry_at?: string | null;
+}
+
 interface IntelCongress {
     signal: string;
     committee_weighted_buy_48h: boolean;
@@ -336,6 +344,8 @@ interface IntelCongress {
     filing_count: number;
     recent_count: number;
     recent_trades?: IntelCongressTrade[];
+    senate?: CongressSourceStatus;
+    house?: CongressSourceStatus;
 }
 
 interface IntelCorrelationRegime {
@@ -3767,9 +3777,23 @@ const PreMarketPanel = ({ intel, isLoading }: { intel: Intel | null; isLoading?:
                                 <>
                                     <div className="fill-row"><span>USDJPY</span><span>{changePctLabel(pm.fx.USDJPY.change_pct)}</span></div>
                                     <div className="fill-row"><span>EURUSD</span><span>{changePctLabel(pm.fx.EURUSD.change_pct)}</span></div>
-                                    <div className="fill-row"><span>DXY</span><span>{changePctLabel(pm.fx.DXY.change_pct)}</span></div>
+                                    <div className="fill-row">
+                                        <span><TermLabel term="DXY_SOURCE">DXY</TermLabel></span>
+                                        <span style={{display:'flex',alignItems:'center',gap:'6px'}}>
+                                            {pm.fx.DXY.ok ? changePctLabel(pm.fx.DXY.change_pct) : <span style={{color:'#f85149'}}>Unavailable</span>}
+                                            {pm.fx.DXY.source === 'live' && (
+                                                <span style={{background:'#1c4a1c',color:'#3fb950',fontSize:'10px',padding:'1px 5px',borderRadius:'3px'}}>DX-Y.NYB live</span>
+                                            )}
+                                            {pm.fx.DXY.source === 'uup_proxy' && (
+                                                <span style={{background:'#4a3a00',color:'#f0883e',fontSize:'10px',padding:'1px 5px',borderRadius:'3px'}}><TermLabel term="UUP_PROXY">UUP proxy</TermLabel></span>
+                                            )}
+                                            {(pm.fx.DXY.source === 'unavailable' || !pm.fx.DXY.ok) && (
+                                                <span style={{background:'#4a1c1c',color:'#f85149',fontSize:'10px',padding:'1px 5px',borderRadius:'3px'}}>Unavailable</span>
+                                            )}
+                                        </span>
+                                    </div>
                                     <div className="fill-row"><span>FX override</span><span style={{color:'#8b949e',fontSize:'11px'}}>Moves &gt;0.5% add ±0.20 to confidence</span></div>
-                                    <div className="fill-row"><span>Source</span><span style={{fontSize:'11px'}}>yfinance (2d history)</span></div>
+                                    <div className="fill-row"><span>Source</span><span style={{fontSize:'11px'}}>{pm.fx.DXY.source === 'uup_proxy' ? 'UUP ETF (DXY proxy) via yfinance' : pm.fx.DXY.source === 'live' ? 'DX-Y.NYB ICE futures via yfinance' : 'yfinance (2d history)'}</span></div>
                                 </>
                             )}
                             {drillTarget === 'TSLA' && pm && (
@@ -3923,7 +3947,23 @@ const PreMarketPanel = ({ intel, isLoading }: { intel: Intel | null; isLoading?:
                         <>
                             <div className="intel-row"><span className="intel-label">USDJPY</span><span>{changePctLabel(pm.fx.USDJPY.change_pct)}</span></div>
                             <div className="intel-row"><span className="intel-label">EURUSD</span><span>{changePctLabel(pm.fx.EURUSD.change_pct)}</span></div>
-                            <div className="intel-row"><span className="intel-label">DXY</span><span>{changePctLabel(pm.fx.DXY.change_pct)}</span></div>
+                            <div className="intel-row">
+                                <span className="intel-label"><TermLabel term="DXY_SOURCE">DXY</TermLabel></span>
+                                <span style={{display:'flex',alignItems:'center',gap:'4px'}}>
+                                    {pm.fx.DXY.ok ? changePctLabel(pm.fx.DXY.change_pct) : <span style={{color:'#f85149',fontSize:'11px'}}>Unavail</span>}
+                                    {pm.fx.DXY.source === 'live' && (
+                                        <span style={{background:'#1c4a1c',color:'#3fb950',fontSize:'9px',padding:'1px 4px',borderRadius:'3px'}}>live</span>
+                                    )}
+                                    {pm.fx.DXY.source === 'uup_proxy' && (
+                                        <Tooltip text="^DXY delisted. UUP ETF used as directional proxy. Click FX Barometer for details.">
+                                            <span style={{background:'#4a3a00',color:'#f0883e',fontSize:'9px',padding:'1px 4px',borderRadius:'3px',cursor:'help'}}><TermLabel term="UUP_PROXY">proxy</TermLabel></span>
+                                        </Tooltip>
+                                    )}
+                                    {(pm.fx.DXY.source === 'unavailable' || (!pm.fx.DXY.ok && !pm.fx.DXY.source)) && (
+                                        <span style={{background:'#4a1c1c',color:'#f85149',fontSize:'9px',padding:'1px 4px',borderRadius:'3px'}}>down</span>
+                                    )}
+                                </span>
+                            </div>
                         </>
                     ) : (
                         <div style={{color:'#8b949e',fontSize:'12px'}}>Awaiting data</div>
@@ -4135,40 +4175,77 @@ const IntelPanel = ({ intel, isLoading }: { intel: Intel | null; isLoading?: boo
                     <Tooltip text="STOCK Act filings: TSLA trades by Congress members within 48h, committee-weighted. Committee members (Senate Commerce / House Energy) = 2× weight. Buying boosts SENTIMENT confidence ×1.15; selling = ×0.85.">
                         <div className="intel-card-title">Congress Trades</div>
                     </Tooltip>
-                    {congress ? (
-                        <>
-                            <div className="intel-row">
-                                <span className="intel-label">Signal</span>
-                                <span style={{
-                                    color: congress.signal === 'BULLISH' ? '#3fb950' : congress.signal === 'BEARISH' ? '#f85149' : '#8b949e',
-                                    fontWeight: 600,
-                                }}>
-                                    {congress.signal}
-                                </span>
-                            </div>
-                            <div className="intel-row">
-                                <span className="intel-label">Recent (48h/$15k+)</span>
-                                <span style={{color: congress.recent_count > 0 ? '#f0883e' : '#8b949e'}}>{congress.recent_count}</span>
-                            </div>
-                            <div className="intel-row">
-                                <span className="intel-label">Total filings</span>
-                                <span style={{color:'#8b949e'}}>{congress.filing_count}</span>
-                            </div>
-                            {congress.committee_weighted_buy_48h && (
-                                <div className="intel-row"><span className="intel-label">Committee</span><span style={{color:'#3fb950',fontSize:'11px'}}>KEY CMTE BUYING</span></div>
-                            )}
-                            {congress.committee_weighted_sell_48h && (
-                                <div className="intel-row"><span className="intel-label">Committee</span><span style={{color:'#f85149',fontSize:'11px'}}>KEY CMTE SELLING</span></div>
-                            )}
-                            {congress.recent_trades && congress.recent_trades.slice(0, 2).map((t, i) => (
-                                <div key={i} className="intel-row" style={{fontSize:'10px',flexDirection:'column',alignItems:'flex-start',gap:'1px'}}>
-                                    <span style={{color:'#8b949e'}}>{t.name} — {t.transaction_type} {t.amount}</span>
-                                    <span style={{color:'#666'}}>{t.date_filed} {t.committee_weight >= 2 ? '(key cmte)' : ''}</span>
+                    {congress ? (() => {
+                        const senateDegraded = congress.senate?.status === 'degraded';
+                        const houseDegraded = congress.house?.status === 'disabled' || congress.house?.status === 'degraded';
+                        const bothDown = senateDegraded && houseDegraded;
+                        const senateNextRetry = congress.senate?.next_retry_at
+                            ? new Date(congress.senate.next_retry_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})
+                            : null;
+
+                        if (bothDown) {
+                            return (
+                                <>
+                                    <div style={{color:'#f85149',fontSize:'11px',padding:'4px 0'}}>
+                                        Congress data unavailable since {congress.senate?.last_success_at
+                                            ? new Date(congress.senate.last_success_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})
+                                            : 'session start'}
+                                    </div>
+                                    <div className="intel-stale" style={{color:'#f85149'}}>Both feeds degraded</div>
+                                </>
+                            );
+                        }
+
+                        return (
+                            <>
+                                <div className="intel-row">
+                                    <span className="intel-label">Signal</span>
+                                    <span style={{
+                                        color: congress.signal === 'BULLISH' ? '#3fb950' : congress.signal === 'BEARISH' ? '#f85149' : '#8b949e',
+                                        fontWeight: 600,
+                                    }}>
+                                        {congress.signal}
+                                    </span>
                                 </div>
-                            ))}
-                            <div className="intel-stale">Cached 1h · STOCK Act data</div>
-                        </>
-                    ) : (
+                                <div className="intel-row">
+                                    <span className="intel-label">Recent (48h/$15k+)</span>
+                                    <span style={{color: congress.recent_count > 0 ? '#f0883e' : '#8b949e'}}>{congress.recent_count}</span>
+                                </div>
+                                <div className="intel-row">
+                                    <span className="intel-label">Total filings</span>
+                                    <span style={{color:'#8b949e'}}>{congress.filing_count}</span>
+                                </div>
+                                {congress.committee_weighted_buy_48h && (
+                                    <div className="intel-row"><span className="intel-label">Committee</span><span style={{color:'#3fb950',fontSize:'11px'}}>KEY CMTE BUYING</span></div>
+                                )}
+                                {congress.committee_weighted_sell_48h && (
+                                    <div className="intel-row"><span className="intel-label">Committee</span><span style={{color:'#f85149',fontSize:'11px'}}>KEY CMTE SELLING</span></div>
+                                )}
+                                {congress.recent_trades && congress.recent_trades.slice(0, 2).map((t, i) => (
+                                    <div key={i} className="intel-row" style={{fontSize:'10px',flexDirection:'column',alignItems:'flex-start',gap:'1px'}}>
+                                        <span style={{color:'#8b949e'}}>{t.name} — {t.transaction_type} {t.amount}</span>
+                                        <span style={{color:'#666'}}>{t.date_filed} {t.committee_weight >= 2 ? '(key cmte)' : ''}</span>
+                                    </div>
+                                ))}
+                                {senateDegraded && (
+                                    <Tooltip text={congress.senate?.last_error ?? 'Senate eFTS endpoint unreachable'}>
+                                        <div style={{color:'#f0883e',fontSize:'10px',marginTop:'4px',cursor:'help'}}>
+                                            Senate feed <TermLabel term="SOURCE_DEGRADED">degraded</TermLabel>
+                                            {senateNextRetry && ` — retrying at ${senateNextRetry}`}
+                                        </div>
+                                    </Tooltip>
+                                )}
+                                {houseDegraded && (
+                                    <Tooltip text="House PTR transaction feed disabled pending annual URL discovery. See TODO(phase-13.5).">
+                                        <div style={{color:'#8b949e',fontSize:'10px',marginTop:'2px',cursor:'help'}}>
+                                            House feed: <TermLabel term="SOURCE_DEGRADED">annual discovery required</TermLabel>
+                                        </div>
+                                    </Tooltip>
+                                )}
+                                <div className="intel-stale">Cached 1h · STOCK Act data</div>
+                            </>
+                        );
+                    })() : (
                         <div className="intel-no-news">No STOCK Act data</div>
                     )}
                 </div>

@@ -63,7 +63,10 @@ test.describe('Integrity API Contract', () => {
 
 test.describe('Integrity Dashboard No-Alert', () => {
   test('no INTEGRITY ALERT banner and all three dots green after load', async ({ page }) => {
-    await page.goto(BASE_URL, { waitUntil: 'networkidle' });
+    // Use 'load' not 'networkidle': the dashboard polls every few seconds so
+    // networkidle never fires. 'load' fires after initial resources; the
+    // waitForSelector below handles React render timing.
+    await page.goto(BASE_URL, { waitUntil: 'load' });
 
     // Wait for integrity bar to render
     await page.waitForSelector('.integrity-bar', { timeout: 10_000 });

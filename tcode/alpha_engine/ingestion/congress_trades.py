@@ -12,8 +12,14 @@ Why this signal exists:
 Data sources (free, public):
   - Senate: Senate Electronic Financial Disclosures (eFTS) JSON search API
     https://efts.senate.gov/LATEST/search-index
-  - House: House Disclosure Clerk periodic transaction reports (XML)
-    https://disclosures-clerk.house.gov/FinancialDisclosure
+  - House: House Disclosure Clerk annual ZIP (Phase 13.5 fix)
+    https://disclosures-clerk.house.gov/public_disc/financial-pdfs/{year}FD.zip
+    (The prior URL pattern ptr-pdfs/{year}FD.xml returned 404 as of 2026.)
+    NOTE: The ZIP contains a filing INDEX only — no per-transaction ticker data.
+    House PTR is currently DISABLED pending discovery of a transaction-level source.
+    TODO(phase-13.5): Investigate individual DocID PDFs or alternate data source
+    (QuiverQuant requires API key; OpenSecrets per-ticker endpoint needs auth).
+    Annual URL discovery: verify each January — pattern is financial-pdfs/{year}FD.zip
 
 Committee weighting rationale:
   Senate Commerce, Science & Transportation: oversees FCC, FTC, NHTSA, and EV/tech.
@@ -41,6 +47,30 @@ _CACHE_TS: float = 0.0
 _CACHE_TTL = 3600  # 1 hour — disclosures trickle in; no need to hammer gov servers
 
 _REQUEST_TIMEOUT = 10  # seconds
+
+# ── Senate eFTS circuit breaker state ────────────────────────────────────────
+# After 3 consecutive failures, mark degraded for 10 minutes to avoid hammering DNS.
+_SENATE_FAIL_COUNT: int = 0
+_SENATE_DEGRADED_UNTIL: float = 0.0
+_SENATE_LAST_SUCCESS_AT: Optional[str] = None
+_SENATE_LAST_ERROR: Optional[str] = None
+_SENATE_DEGRADED_RETRY_INTERVAL: float = 600  # 10 minutes
+_SENATE_MAX_RETRIES: int = 3
+_SENATE_RETRY_DELAYS: tuple = (1, 4, 16)  # exponential backoff seconds
+
+# ── House PTR URL pattern ─────────────────────────────────────────────────────
+# The old ptr-pdfs/{year}FD.xml path returned 404 as of 2026. The new ZIP is
+# available at financial-pdfs/{year}FD.zip but contains only a filing INDEX
+# (member names + DocIDs), NOT per-transaction ticker data.
+# Pattern: https://disclosures-clerk.house.gov/public_disc/financial-pdfs/{year}FD.zip
+# House PTR is DISABLED until a transaction-level source is identified.
+# Source: verified 2026-04-14 that ZIP returns 200 but has no <Asset>/<Transaction> nodes.
+HOUSE_PTR_URL_PATTERN = "https://disclosures-clerk.house.gov/public_disc/financial-pdfs/{year}FD.zip"
+_HOUSE_DISABLED_REASON = (
+    "House PTR feed disabled — annual URL discovery required. "
+    "The {year}FD.zip index contains filing metadata only (no per-ticker transaction data). "
+    "See TODO(phase-13.5) in congress_trades.py."
+)
 
 # ── Committee membership: 119th Congress (2025–2026) ──────────────────────────
 # Source: congress.gov committee listings, updated manually each session.
@@ -163,10 +193,25 @@ def _fetch_senate_ptrs() -> list[dict]:
     generation we use the metadata + senator/committee info.
 
     Reference: https://efts.senate.gov — no auth required, rate limit unclear.
+
+    Resilience (Phase 13.5):
+      - 3 retry attempts with exponential backoff (1s, 4s, 16s)
+      - After 3 consecutive failures, source is marked degraded for 10 minutes
+      - Logs [CONGRESS-DEGRADED] on circuit open; [CONGRESS-RECOVERED] on success
     """
-    now = datetime.now(timezone.utc)
-    from_date = (now - timedelta(days=3)).strftime("%Y-%m-%d")  # 3-day window for buffer
-    to_date = now.strftime("%Y-%m-%d")
+    global _SENATE_FAIL_COUNT, _SENATE_DEGRADED_UNTIL, _SENATE_LAST_SUCCESS_AT, _SENATE_LAST_ERROR
+
+    now_ts = time.time()
+
+    # Circuit breaker: if degraded, don't attempt until cooldown expires
+    if _SENATE_DEGRADED_UNTIL > 0 and now_ts < _SENATE_DEGRADED_UNTIL:
+        next_retry = datetime.fromtimestamp(_SENATE_DEGRADED_UNTIL, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        logger.debug("[CONGRESS-DEGRADED] Senate eFTS circuit open — next_retry_at=%s", next_retry)
+        return []
+
+    now_dt = datetime.now(timezone.utc)
+    from_date = (now_dt - timedelta(days=3)).strftime("%Y-%m-%d")
+    to_date = now_dt.strftime("%Y-%m-%d")
 
     url = "https://efts.senate.gov/LATEST/search-index"
     params = {
@@ -177,15 +222,40 @@ def _fetch_senate_ptrs() -> list[dict]:
         "category": "Periodic Transactions Report",
         "results": "25",
     }
-    try:
-        resp = requests.get(url, params=params, timeout=_REQUEST_TIMEOUT)
-        resp.raise_for_status()
-        data = resp.json()
-    except requests.RequestException as e:
-        logger.warning(f"Senate eFTS fetch failed: {e}")
-        return []
-    except (json.JSONDecodeError, ValueError) as e:
-        logger.warning(f"Senate eFTS JSON parse failed: {e}")
+
+    last_exc: Optional[Exception] = None
+    for attempt in range(_SENATE_MAX_RETRIES):
+        try:
+            resp = requests.get(url, params=params, timeout=_REQUEST_TIMEOUT)
+            resp.raise_for_status()
+            data = resp.json()
+            # Success — reset circuit breaker
+            if _SENATE_FAIL_COUNT > 0:
+                logger.info("[CONGRESS-RECOVERED] Senate eFTS recovered after %d failures", _SENATE_FAIL_COUNT)
+            _SENATE_FAIL_COUNT = 0
+            _SENATE_DEGRADED_UNTIL = 0.0
+            _SENATE_LAST_SUCCESS_AT = now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+            _SENATE_LAST_ERROR = None
+            break
+        except (requests.RequestException, json.JSONDecodeError, ValueError) as e:
+            last_exc = e
+            if attempt < _SENATE_MAX_RETRIES - 1:
+                delay = _SENATE_RETRY_DELAYS[attempt]
+                logger.debug("Senate eFTS attempt %d/%d failed (%s), retrying in %ds",
+                             attempt + 1, _SENATE_MAX_RETRIES, e, delay)
+                time.sleep(delay)
+    else:
+        # All _SENATE_MAX_RETRIES attempts exhausted — open circuit immediately.
+        # The spec says "after 3 failures, mark degraded": those 3 failures are
+        # the 3 retry attempts within a single call (not 3 separate calls).
+        _SENATE_FAIL_COUNT += 1
+        _SENATE_LAST_ERROR = str(last_exc)
+        _SENATE_DEGRADED_UNTIL = time.time() + _SENATE_DEGRADED_RETRY_INTERVAL
+        next_retry = datetime.fromtimestamp(_SENATE_DEGRADED_UNTIL, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        logger.warning(
+            "[CONGRESS-DEGRADED] reason=%s next_retry_at=%s",
+            _SENATE_LAST_ERROR, next_retry,
+        )
         return []
 
     trades = []
@@ -224,41 +294,36 @@ def _fetch_senate_ptrs() -> list[dict]:
 
 def _fetch_house_ptrs() -> list[dict]:
     """
-    Fetch House Periodic Transaction Reports from the disclosure clerk.
+    Fetch House Periodic Transaction Reports.
 
-    The House Clerk publishes annual PTR data as XML. We download the current
-    year's data and filter for TSLA transactions filed in the last 48 hours.
+    STATUS: DISABLED as of Phase 13.5 (2026-04-14).
 
-    XML format (House eFD system, standardized 2020+):
-      <FinancialDisclosure>
-        <Member><First/><Last/><State/><District/></Member>
-        <Transactions>
-          <Transaction>
-            <FilingDate>MM/DD/YYYY</FilingDate>
-            <TransactionDate>MM/DD/YYYY</TransactionDate>
-            <Asset>Tesla, Inc. [TSLA]</Asset>
-            <TransactionType>P|S</TransactionType>
-            <Amount>$15,001 - $50,000</Amount>
-            <Committee>...</Committee>
-          </Transaction>
-        </Transactions>
-      </FinancialDisclosure>
+    Investigation found:
+      - https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/{year}FD.xml → 404
+      - https://disclosures-clerk.house.gov/public_disc/financial-pdfs/{year}FD.zip → 200
+        BUT the ZIP contains only a filing INDEX (member names + DocIDs), not
+        per-transaction ticker/amount data. The <Asset>, <TransactionType>, and
+        <Amount> fields expected by _parse_house_xml() are absent.
+      - QuiverQuant API requires authentication (no free unauthenticated endpoint).
+      - JSON API at /api/v1/public_disc/ptr → 404.
 
-    Note: House system does not provide a real-time JSON API; the XML is
-    updated incrementally. For live use, cache is 1 hour.
+    TODO(phase-13.5): Identify a transaction-level source for House PTRs.
+    Options to investigate next:
+      a) Fetch individual DocID PDFs (requires PDF parsing library — pyPDF2 or pdfplumber)
+      b) Obtain QuiverQuant or OpenSecrets API key
+      c) Check if eFTS/House adds per-transaction XML by next annual update
+    Annual URL: verify HOUSE_PTR_URL_PATTERN pattern each January.
+
+    Returns empty list with a logged warning so the Congress card shows
+    "House feed: annual URL discovery required" rather than silently missing data.
     """
     year = datetime.now(timezone.utc).year
-    url = f"https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/{year}FD.xml"
-
-    try:
-        resp = requests.get(url, timeout=_REQUEST_TIMEOUT)
-        resp.raise_for_status()
-        xml_text = resp.text
-    except requests.RequestException as e:
-        logger.warning(f"House PTR fetch failed ({url}): {e}")
-        return []
-
-    return _parse_house_xml(xml_text)
+    logger.warning(
+        "[HOUSE-PTR-DISABLED] House PTR transaction feed unavailable (Phase 13.5). "
+        "ZIP index at %s exists but lacks per-ticker data. See TODO(phase-13.5).",
+        HOUSE_PTR_URL_PATTERN.format(year=year),
+    )
+    return []
 
 
 def _parse_house_xml(xml_text: str) -> list[dict]:
@@ -338,6 +403,29 @@ def _parse_house_xml(xml_text: str) -> list[dict]:
     return trades
 
 
+def get_senate_status() -> dict:
+    """
+    Return current Senate eFTS source status for /api/intel congress sub-object.
+
+    Status values:
+      "ok"       — last fetch succeeded
+      "degraded" — circuit open (3+ failures), retrying at next_retry_at
+      "unknown"  — never successfully fetched in this process lifetime
+    """
+    now_ts = time.time()
+    if _SENATE_DEGRADED_UNTIL > 0 and now_ts < _SENATE_DEGRADED_UNTIL:
+        next_retry = datetime.fromtimestamp(_SENATE_DEGRADED_UNTIL, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return {
+            "status": "degraded",
+            "last_success_at": _SENATE_LAST_SUCCESS_AT,
+            "last_error": _SENATE_LAST_ERROR,
+            "next_retry_at": next_retry,
+        }
+    if _SENATE_LAST_SUCCESS_AT:
+        return {"status": "ok", "last_success_at": _SENATE_LAST_SUCCESS_AT, "last_error": None}
+    return {"status": "unknown", "last_success_at": None, "last_error": _SENATE_LAST_ERROR}
+
+
 def get_congress_trades() -> dict:
     """
     Return congress trade intelligence. Cached 1 hour.
@@ -351,6 +439,8 @@ def get_congress_trades() -> dict:
       sentiment_multiplier: float — ×1.15 for buying, ×0.85 for selling, 1.0 neutral
       filing_count: int
       last_fetch_ts: float
+      senate: {status, last_success_at, last_error}  — source health (Phase 13.5)
+      house:  {status, last_success_at, last_error}  — "disabled" until PTR source found
     """
     global _CACHE, _CACHE_TS
     now = time.time()
@@ -408,6 +498,13 @@ def get_congress_trades() -> dict:
         "filing_count": len(all_trades),
         "recent_count": len(recent),
         "last_fetch_ts": now,
+        # Source health sub-objects (Phase 13.5) — used by /api/intel and Congress card
+        "senate": get_senate_status(),
+        "house": {
+            "status": "disabled",
+            "last_success_at": None,
+            "last_error": _HOUSE_DISABLED_REASON.format(year=datetime.now(timezone.utc).year),
+        },
     }
     _CACHE = result
     _CACHE_TS = now

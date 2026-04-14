@@ -29,12 +29,23 @@ class TestPremarketStructure(unittest.TestCase):
         """
         Patch yfinance so each Ticker(symbol).history() returns the configured DataFrame.
         ticker_map: {symbol: [close_prev, close_now]}
+
+        Phase 13.5: DXY key changed from "^DXY" to "DX-Y.NYB" (primary source).
+        Tests using "^DXY" are automatically remapped to "DX-Y.NYB".
         """
         import pandas as pd
 
+        # Remap legacy ^DXY test keys to new primary source
+        remapped: dict = {}
+        for k, v in ticker_map.items():
+            if k == "^DXY":
+                remapped["DX-Y.NYB"] = v  # primary source
+            else:
+                remapped[k] = v
+
         def mock_ticker(symbol):
             t = MagicMock()
-            closes = ticker_map.get(symbol, [100.0, 100.0])
+            closes = remapped.get(symbol, [100.0, 100.0])
             hist = _make_hist(closes)
 
             def history(period="2d", prepost=False):
@@ -46,9 +57,12 @@ class TestPremarketStructure(unittest.TestCase):
             return t
 
         with patch("yfinance.Ticker", side_effect=mock_ticker):
-            # Force cache miss so _fetch_premarket() runs
+            # Force cache misses so _fetch_premarket() and _fetch_dxy() both run
             import ingestion.premarket as pm
+            import ingestion.macro_regime as mr
             pm._premarket_cache = None
+            mr._dxy_cache = None
+            mr._dxy_cache_ts = 0.0
             result = pm._fetch_premarket()
         return result
 

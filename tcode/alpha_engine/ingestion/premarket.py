@@ -96,7 +96,15 @@ def _fetch_premarket() -> dict:
         sse  = _fetch_index(yf, "000001.SS")  # Shanghai Composite
         usdjpy = _fetch_index(yf, "USDJPY=X")
         eurusd = _fetch_index(yf, "EURUSD=X")
-        dxy    = _fetch_index(yf, "^DXY")
+        # DXY: ^DXY is delisted. Use resilient fetcher (DX-Y.NYB primary, UUP proxy fallback).
+        from ingestion.macro_regime import _fetch_dxy as _get_dxy
+        _dxy_data = _get_dxy()
+        dxy = {
+            "symbol": _dxy_data.get("dxy_source") or "DXY",
+            "change_pct": _dxy_data.get("dxy_change_pct") or 0.0,
+            "ok": _dxy_data.get("dxy_status") not in (None, "unavailable"),
+            "source": _dxy_data.get("dxy_status", "unavailable"),  # "live" | "uup_proxy" | "unavailable"
+        }
 
         # ── TSLA pre/post-market ───────────────────────────────────────────
         tsla_premarket: dict = {"change_pct": 0.0, "volume": 0, "ok": False}
@@ -199,7 +207,7 @@ def _fetch_premarket() -> dict:
             "fx": {
                 "USDJPY": usdjpy,
                 "EURUSD": eurusd,
-                "DXY": dxy,
+                "DXY": dxy,  # includes .source: "live" | "uup_proxy" | "unavailable"
             },
             "tsla_premarket": tsla_premarket,
             # ── Top-level composite ──

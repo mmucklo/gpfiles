@@ -2,9 +2,17 @@
 """
 Macro Regime Detection: Fed rate, yield curve, VIX term structure, trade tensions.
 Classifies the macro environment as RISK_ON, RISK_OFF, or NEUTRAL.
+
+DXY sourcing (Phase 13.5):
+  ^DXY was delisted from yfinance. We now try:
+    1. DX-Y.NYB  — ICE US Dollar Index futures continuous contract (primary)
+    2. UUP       — Invesco DB US Dollar Index Bullish ETF (proxy; ~1:1 directional)
+  If both fail, dxy_status="unavailable" and dxy_trend="NEUTRAL" (no stale zeros).
+  Cache: 5 min during US hours, 15 min off-hours.
 """
 import time
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 
 logger = logging.getLogger("MacroRegime")
@@ -16,6 +24,93 @@ _VIX_TTL = 300     # 5 minutes for VIX term structure
 
 _vix_cache: Optional[dict] = None
 _vix_cache_ts: float = 0.0
+
+# DXY cache — separate because it has a different TTL than the macro block
+_dxy_cache: Optional[dict] = None
+_dxy_cache_ts: float = 0.0
+
+
+def _dxy_ttl() -> float:
+    """5 min during US market hours (9:30–16:00 ET), 15 min otherwise."""
+    et_hour = datetime.now(timezone.utc).hour - 4  # rough EDT offset
+    if 9 <= et_hour < 16:
+        return 300
+    return 900
+
+
+def _fetch_dxy() -> dict:
+    """
+    Fetch US Dollar Index.
+
+    Tries DX-Y.NYB (ICE futures) first. Falls back to UUP (ETF proxy) if that
+    fails or returns empty. Returns status field so callers can show a source badge.
+
+    Never returns a stale value beyond the TTL — callers are responsible for
+    checking _dxy_cache_ts.
+    """
+    global _dxy_cache, _dxy_cache_ts
+    now = time.time()
+    if _dxy_cache is not None and now - _dxy_cache_ts < _dxy_ttl():
+        return _dxy_cache
+
+    try:
+        import yfinance as yf
+
+        # Primary: ICE US Dollar Index futures
+        try:
+            hist = yf.Ticker("DX-Y.NYB").history(period="2d")
+            if not hist.empty and len(hist) >= 1:
+                price = float(hist["Close"].iloc[-1])
+                chg_pct = None
+                if len(hist) >= 2:
+                    prev = float(hist["Close"].iloc[-2])
+                    chg_pct = round((price - prev) / prev * 100, 3) if prev else None
+                result = {
+                    "dxy": round(price, 3),
+                    "dxy_change_pct": chg_pct,
+                    "dxy_status": "live",
+                    "dxy_source": "DX-Y.NYB",
+                }
+                _dxy_cache = result
+                _dxy_cache_ts = now
+                return result
+        except Exception as e:
+            logger.debug("DX-Y.NYB fetch failed: %s", e)
+
+        # Fallback: UUP ETF proxy
+        try:
+            hist = yf.Ticker("UUP").history(period="2d")
+            if not hist.empty and len(hist) >= 1:
+                price = float(hist["Close"].iloc[-1])
+                chg_pct = None
+                if len(hist) >= 2:
+                    prev = float(hist["Close"].iloc[-2])
+                    chg_pct = round((price - prev) / prev * 100, 3) if prev else None
+                result = {
+                    "dxy": round(price, 3),
+                    "dxy_change_pct": chg_pct,
+                    "dxy_status": "uup_proxy",
+                    "dxy_source": "UUP",
+                }
+                _dxy_cache = result
+                _dxy_cache_ts = now
+                return result
+        except Exception as e:
+            logger.debug("UUP fallback fetch failed: %s", e)
+
+    except ImportError:
+        pass
+
+    logger.warning("[DXY-UNAVAILABLE] Both DX-Y.NYB and UUP failed at %s", time.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    result = {
+        "dxy": None,
+        "dxy_change_pct": None,
+        "dxy_status": "unavailable",
+        "dxy_source": None,
+    }
+    _dxy_cache = result
+    _dxy_cache_ts = now
+    return result
 
 
 def _fetch_macro_data() -> dict:
@@ -77,6 +172,16 @@ def _fetch_macro_data() -> dict:
                 result["china_risk"] = round(max(0, -fxi_change * 2), 1)  # 0-10 scale
         except Exception:
             pass
+
+        # DXY: use resilient fetcher (DX-Y.NYB primary, UUP proxy fallback)
+        dxy_data = _fetch_dxy()
+        if dxy_data["dxy_status"] != "unavailable" and dxy_data.get("dxy_change_pct") is not None:
+            chg = dxy_data["dxy_change_pct"]
+            result["dxy_trend"] = "RISING" if chg > 0.2 else "FALLING" if chg < -0.2 else "NEUTRAL"
+        result["dxy"] = dxy_data.get("dxy")
+        result["dxy_change_pct"] = dxy_data.get("dxy_change_pct")
+        result["dxy_status"] = dxy_data.get("dxy_status", "unavailable")
+        result["dxy_source"] = dxy_data.get("dxy_source")
 
         return result
     except Exception as e:

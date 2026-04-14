@@ -63,6 +63,49 @@ logger.addHandler(_stderr_handler)
 CONNECT_TIMEOUT = int(os.getenv("IBKR_CONNECT_TIMEOUT", "10"))
 ORDER_WAIT_SEC = 2.0
 
+# ── IBKR error classification ─────────────────────────────────────────────────
+# Classifies IBKR EWrapper error codes as TRANSIENT (safe to retry) or FATAL
+# (configuration/validation errors that will never succeed with the same params).
+# Error 321: "Error validating request — Invalid contract id"
+#   Root cause: conId=0 passed to a PriceCondition (contract not fully qualified).
+#   This is a FATAL configuration error — retrying with conId=0 will always fail.
+#   Fix: use reqContractDetails() to get a verified conId before building PriceCondition.
+_IBKR_FATAL_ERRORS: frozenset = frozenset({
+    321,   # Invalid contract id (e.g., PriceCondition with conId=0)
+    200,   # No security definition found
+    10168, # Requested market data is not subscribed
+    10197, # No market data during competing live session
+})
+
+_IBKR_TRANSIENT_ERRORS: frozenset = frozenset({
+    1100,  # Connectivity between IB and TWS has been lost
+    1101,  # Connectivity between IB and TWS has been restored
+    1102,  # Connectivity between IB and TWS has been restored (data lost)
+    2110,  # Connectivity between TWS and server is broken
+    504,   # Not connected
+})
+
+
+def classify_ibkr_error(error_code: int, message: str = "") -> str:
+    """
+    Classify an IBKR EWrapper error as 'fatal', 'transient', or 'unknown'.
+
+    Fatal errors are configuration/validation errors that will not succeed on retry
+    with the same parameters. The engine must NOT retry these — log and escalate.
+
+    Transient errors indicate connectivity issues that may resolve on reconnect.
+
+    Usage in error callback:
+        category = classify_ibkr_error(errorCode, errorString)
+        if category == 'fatal':
+            logger.error("[IBKR-FATAL] error=%d msg=%s — not retrying", errorCode, errorString)
+    """
+    if error_code in _IBKR_FATAL_ERRORS:
+        return "fatal"
+    if error_code in _IBKR_TRANSIENT_ERRORS:
+        return "transient"
+    return "unknown"
+
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -301,33 +344,46 @@ def place_bracket_order(
         # ── Apply underlying PriceCondition if requested ──────────────────────
         if underlying_stop_symbol and underlying_stop_price > 0:
             underlying_contract = Stock(underlying_stop_symbol, "SMART", "USD")
-            q_under = ib.qualifyContracts(underlying_contract)
-            if q_under:
-                underlying_contract = q_under[0]
-                # Long CALL: trigger when underlying DROPS below stop → isMore=False
-                # Long PUT:  trigger when underlying RISES above stop → isMore=True
-                is_put  = right == "P"
-                is_more = is_put
-                sl_order.conditions = [
-                    PriceCondition(
-                        conId=underlying_contract.conId,
-                        exch="SMART",
-                        price=underlying_stop_price,
-                        isMore=is_more,
+            # Phase 13.5 fix: use reqContractDetails to guarantee conId is populated.
+            # qualifyContracts() can return before metadata arrives, leaving conId=0,
+            # which causes IBKR Error 321 "Invalid contract id" when PriceCondition
+            # is built with conId=0.
+            try:
+                details = ib.reqContractDetails(underlying_contract)
+                if details and len(details) > 0 and details[0].contract.conId > 0:
+                    underlying_contract = details[0].contract
+                    # Long CALL: trigger when underlying DROPS below stop → isMore=False
+                    # Long PUT:  trigger when underlying RISES above stop → isMore=True
+                    is_put  = right == "P"
+                    is_more = is_put
+                    sl_order.conditions = [
+                        PriceCondition(
+                            conId=underlying_contract.conId,
+                            exch="SMART",
+                            price=underlying_stop_price,
+                            isMore=is_more,
+                        )
+                    ]
+                    sl_order.conditionsCancelOrder = False
+                    logger.info(
+                        "Underlying stop condition: %s conId=%d %s %.2f (isMore=%s)",
+                        underlying_stop_symbol,
+                        underlying_contract.conId,
+                        "rises above" if is_more else "drops below",
+                        underlying_stop_price,
+                        is_more,
                     )
-                ]
-                sl_order.conditionsCancelOrder = False
-                logger.info(
-                    "Underlying stop condition: %s %s %.2f (isMore=%s)",
-                    underlying_stop_symbol,
-                    "rises above" if is_more else "drops below",
-                    underlying_stop_price,
-                    is_more,
-                )
-            else:
+                else:
+                    logger.warning(
+                        "[CONTRACT-QUAL-FAIL] symbol=%s reason=empty_details — "
+                        "[BRACKET-DOWNGRADE] SL uses option-premium stop only (no PriceCondition)",
+                        underlying_stop_symbol,
+                    )
+            except Exception as qual_exc:
                 logger.warning(
-                    "Could not qualify underlying %s — using option-premium SL only",
-                    underlying_stop_symbol,
+                    "[CONTRACT-QUAL-FAIL] symbol=%s reason=%s — "
+                    "[BRACKET-DOWNGRADE] SL uses option-premium stop only (no PriceCondition)",
+                    underlying_stop_symbol, qual_exc,
                 )
 
         # ── Place all three orders ────────────────────────────────────────────
