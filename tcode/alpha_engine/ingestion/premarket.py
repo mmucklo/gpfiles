@@ -195,6 +195,32 @@ def _fetch_premarket() -> dict:
         eu_change = stoxx["change_pct"]  # STOXX as legacy Europe proxy
         legacy_europe_direction = "BULLISH" if eu_change > 0.5 else "BEARISH" if eu_change < -0.5 else "FLAT"
 
+        # ── Countdown to next premarket window ────────────────────────────────
+        et_now = datetime.now(timezone(timedelta(hours=-4)))
+        et_min = et_now.hour * 60 + et_now.minute
+        is_pm = _is_premarket_hours()
+        # Premarket opens 4:00 AM ET = 240 min, closes 9:30 AM ET = 570 min
+        if is_pm:
+            minutes_until_premarket_open = 0
+        elif et_min < 240:
+            minutes_until_premarket_open = 240 - et_min
+        else:
+            # After 9:30 AM — next premarket is 4:00 AM tomorrow
+            minutes_until_premarket_open = 240 + (1440 - et_min)  # 1440 = mins in a day
+
+        # UTC timestamps for the next premarket window boundaries
+        et_date = et_now.date()
+        pm_open_today = datetime(et_date.year, et_date.month, et_date.day, 4, 0,
+                                 tzinfo=timezone(timedelta(hours=-4)))
+        pm_close_today = datetime(et_date.year, et_date.month, et_date.day, 9, 30,
+                                  tzinfo=timezone(timedelta(hours=-4)))
+        if et_now >= pm_close_today:
+            # Window passed today — next one is tomorrow
+            pm_open_today  = pm_open_today  + timedelta(days=1)
+            pm_close_today = pm_close_today + timedelta(days=1)
+        us_premarket_window_opens_at  = pm_open_today.isoformat()
+        us_premarket_window_closes_at = pm_close_today.isoformat()
+
         return {
             # ── Structured regional data ──
             "us_futures": {
@@ -222,8 +248,12 @@ def _fetch_premarket() -> dict:
             "confidence": round(confidence, 3),
             "rationale": rationale,
             # ── Meta ──
-            "is_premarket": _is_premarket_hours(),
+            "is_premarket": is_pm,
             "is_signal_window": _is_signal_window(),
+            "us_premarket_window_opens_at": us_premarket_window_opens_at,
+            "us_premarket_window_closes_at": us_premarket_window_closes_at,
+            "minutes_until_premarket_open": minutes_until_premarket_open,
+            "data_freshness_sec": 0,  # overwritten by get_premarket_intel()
             # ── Legacy flat fields (publisher.py backward compat) ──
             "futures_bias": legacy_futures_bias,
             "es_change_pct": es["change_pct"],
@@ -258,10 +288,14 @@ def get_premarket_intel() -> dict:
         _premarket_cache = _fetch_premarket()
         _premarket_cache_ts = now
         # Heartbeat: ok if in premarket window; skipped:off-hours otherwise (NOT red)
-        if _is_premarket_window():
+        if _is_premarket_hours():
             _hb("premarket", status="ok")
         else:
             _hb("premarket", status="ok", detail="skipped:off-hours")
+
+    # Stamp freshness every call so callers see current age
+    if _premarket_cache is not None:
+        _premarket_cache["data_freshness_sec"] = round(now - _premarket_cache_ts)
 
     return _premarket_cache
 

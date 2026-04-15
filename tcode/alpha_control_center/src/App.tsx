@@ -374,6 +374,11 @@ function App() {
           )}
         </div>
 
+        {/* Hidden always-on health poller — keeps badge updated without requiring the modal open */}
+        <div style={{ display: 'none' }} aria-hidden="true">
+          <SystemHealthPanel onHealthChange={setHealthSummary} />
+        </div>
+
         {/* System Health modal drill-down — Phase 14.4 */}
         {showHealthModal && (
           <div
@@ -392,7 +397,7 @@ function App() {
                 <span className="modal-title">SYSTEM HEALTH — PER-COMPONENT DETAIL</span>
                 <button className="modal-close" onClick={() => setShowHealthModal(false)} aria-label="Close">✕</button>
               </div>
-              <SystemHealthPanel onHealthChange={setHealthSummary} />
+              <SystemHealthPanel />
             </div>
           </div>
         )}
@@ -497,7 +502,7 @@ function App() {
 
       <main className="main-content" role="main">
         <Routes>
-          <Route path="/" element={<Dashboard brokerStatus={brokerStatus} integrityRed={integrityRed} onHealthChange={setHealthSummary} />} />
+          <Route path="/" element={<Dashboard brokerStatus={brokerStatus} integrityRed={integrityRed} />} />
           <Route path="/architecture" element={<Architecture />} />
           <Route path="/gastown" element={<Gastown />} />
         </Routes>

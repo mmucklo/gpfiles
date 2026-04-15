@@ -306,11 +306,21 @@ class OptionsChainCache:
             # IBKR Error 321 ("Invalid contract id") fires when reqMktData receives
             # an unqualified contract (conId == 0).  qualifyContracts fills conIds
             # via reqContractDetails in one round-trip per batch.
+            #
+            # FIX (Phase 14.6): Include currency="USD" and multiplier="100" so IBKR
+            # doesn't return an ambiguous / generic contract.  Without these,
+            # qualifyContracts may silently succeed but leave conId==0 because the
+            # spec matched multiple listings.  tradingClass="TSLA" disambiguates
+            # weekly vs monthly series.
             all_contracts = []
             contract_meta = []
             for right_chr, opt_type in [("C", "CALL"), ("P", "PUT")]:
                 for strike_val in sorted_strikes:
-                    c = Option(self.ticker, expiry_ib, strike_val, right_chr, "SMART")
+                    c = Option(
+                        self.ticker, expiry_ib, strike_val, right_chr, "SMART",
+                        currency="USD", multiplier="100",
+                        tradingClass=self.ticker,
+                    )
                     all_contracts.append(c)
                     contract_meta.append((opt_type, strike_val))
 
@@ -322,20 +332,84 @@ class OptionsChainCache:
                                self.ticker, expiry, qe)
                 return []
 
-            # Build a map from (right, strike) → qualified contract for fast lookup
+            # ── CHAIN-DIAG: log qualification results for each cycle ──────────
+            n_qualified = sum(1 for q in (qualified or []) if q is not None and getattr(q, "conId", 0) > 0)
+            logger.info(
+                "[CHAIN-DIAG] expiry=%s strikes_requested=%d qualified_returned=%d",
+                expiry, len(all_contracts), n_qualified,
+            )
+            for qc_sample in (qualified or [])[:5]:
+                if qc_sample is not None:
+                    logger.info(
+                        "[CHAIN-DIAG] qualified sample: conId=%s right=%s strike=%s "
+                        "exchange=%s currency=%s multiplier=%s tradingClass=%s",
+                        getattr(qc_sample, "conId", "?"),
+                        getattr(qc_sample, "right", "?"),
+                        getattr(qc_sample, "strike", "?"),
+                        getattr(qc_sample, "exchange", "?"),
+                        getattr(qc_sample, "currency", "?"),
+                        getattr(qc_sample, "multiplier", "?"),
+                        getattr(qc_sample, "tradingClass", "?"),
+                    )
+
+            # ── Per-contract fallback if batch returned zero qualified ─────────
+            # qualifyContracts can silently return an empty/None list for some IBKR
+            # account types.  Fall back to individual reqContractDetails calls which
+            # are slower (200ms each) but always work.
+            if n_qualified == 0 and len(all_contracts) > 0:
+                logger.info(
+                    "[CHAIN-DIAG] batch qualification returned 0 — falling back to "
+                    "per-contract reqContractDetails for %s %s",
+                    self.ticker, expiry,
+                )
+                qualified_fallback = []
+                for c in all_contracts:
+                    try:
+                        details = ib.reqContractDetails(c)
+                        ib.sleep(0.2)
+                        if details:
+                            qualified_fallback.append(details[0].contract)
+                        else:
+                            qualified_fallback.append(None)
+                    except Exception:
+                        qualified_fallback.append(None)
+                qualified = qualified_fallback
+
+            # Build a map from (right, strike) → qualified contract for fast lookup.
+            # Key by round(strike, 2) to avoid floating-point mismatch
+            # (e.g. 250.0 sent vs 250.0000001 returned).
             qual_map: dict[tuple, object] = {}
-            for qc in qualified:
+            for qc in (qualified or []):
                 if qc is not None and getattr(qc, "conId", 0) > 0:
-                    qual_map[(qc.right, qc.strike)] = qc
+                    key = (qc.right, round(float(qc.strike), 2))
+                    qual_map[key] = qc
+
+            # Diagnostic: log lookup failures before entering the data loop
+            lookup_failures: list[tuple] = []
+            for (opt_type, strike_val), _ in zip(contract_meta, all_contracts):
+                right_chr = "C" if opt_type == "CALL" else "P"
+                if (right_chr, round(float(strike_val), 2)) not in qual_map:
+                    lookup_failures.append((right_chr, strike_val))
+            logger.info(
+                "[CHAIN-DIAG] qual_map_size=%d contracts_failing_lookup=%d sample=%s",
+                len(qual_map), len(lookup_failures), lookup_failures[:5],
+            )
 
             for (opt_type, strike_val), contract in zip(contract_meta, all_contracts):
                 right_chr = "C" if opt_type == "CALL" else "P"
-                qc = qual_map.get((right_chr, float(strike_val)))
+                key = (right_chr, round(float(strike_val), 2))
+                qc = qual_map.get(key)
                 if qc is None:
-                    # Contract not qualified — skip rather than trigger Error 321
                     logger.debug(
-                        "[CONTRACT-QUAL-FAIL] %s %s %s %s — skipped",
-                        self.ticker, expiry_ib, strike_val, right_chr,
+                        "[CHAIN-SKIP] reason=qualification_failed strike=%s right=%s",
+                        strike_val, right_chr,
+                    )
+                    continue
+                # Hard guard: never call reqMktData on a zero-conId contract (causes Error 321)
+                if getattr(qc, "conId", 0) == 0:
+                    logger.warning(
+                        "[CHAIN-SKIP] reason=conId_zero strike=%s right=%s — skipping to prevent Error 321",
+                        strike_val, right_chr,
                     )
                     continue
 

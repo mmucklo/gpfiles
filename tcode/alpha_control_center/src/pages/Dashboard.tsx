@@ -6,7 +6,6 @@ import SystemMonitor from '../components/SystemMonitor';
 import { SkeletonCard, SkeletonTable } from '../components/SkeletonLoader';
 import { computeEconomics, formatRR, rrColorClass } from '../lib/signal_economics';
 import TermLabel from '../components/TermLabel';
-import SystemHealthPanel, { type HealthSummary } from '../components/SystemHealthPanel';
 import RejectedSignalsPanel from '../components/RejectedSignalsPanel';
 
 // ============================================================
@@ -305,6 +304,11 @@ interface IntelIndexEntry {
 interface IntelPremarket {
     is_premarket: boolean;
     is_signal_window: boolean;
+    // Window meta (Phase 14.6)
+    us_premarket_window_opens_at?: string;
+    us_premarket_window_closes_at?: string;
+    minutes_until_premarket_open?: number;
+    data_freshness_sec?: number;
     // Structured regional data (Phase 11)
     us_futures?: { ES: IntelIndexEntry; NQ: IntelIndexEntry };
     europe?: { STOXX50E: IntelIndexEntry; GDAXI: IntelIndexEntry; FTSE: IntelIndexEntry };
@@ -3881,23 +3885,31 @@ const PreMarketPanel = ({ intel, isLoading }: { intel: Intel | null; isLoading?:
 
     const pm = intel?.premarket;
 
-    // Countdown to US market open/close
+    // Countdown to US pre-market open (4:00 AM ET) or market open (9:30 AM ET)
     const marketCountdown = (() => {
         const now = new Date();
         const et = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
         const h = et.getHours(), m = et.getMinutes();
         const totalMin = h * 60 + m;
         const isWeekend = et.getDay() === 0 || et.getDay() === 6;
-        if (isWeekend) return 'Market closed — weekend';
+        if (isWeekend) return 'Pre-market closed — weekend';
+        // Before 4:00 AM ET — show countdown to pre-market open
+        if (totalMin < 240) {
+            const minsLeft = 240 - totalMin;
+            return `US pre-market opens in ${Math.floor(minsLeft / 60)}h ${minsLeft % 60}m`;
+        }
+        // 4:00–9:30 AM ET — pre-market active
         if (totalMin < 570) {
             const minsLeft = 570 - totalMin;
-            return `Next US open: ${Math.floor(minsLeft / 60)}h ${minsLeft % 60}m`;
+            return `Pre-market ACTIVE — market open in ${Math.floor(minsLeft / 60)}h ${minsLeft % 60}m`;
         }
         if (totalMin < 960) {
             const minsLeft = 960 - totalMin;
             return `Market open — closes in ${Math.floor(minsLeft / 60)}h ${minsLeft % 60}m`;
         }
-        return 'Market closed — after hours';
+        // After 4:00 PM — next pre-market is tomorrow 4:00 AM
+        const minsLeft = 240 + (1440 - totalMin);
+        return `US pre-market opens in ${Math.floor(minsLeft / 60)}h ${minsLeft % 60}m`;
     })();
 
     const biasColor = (bias: string) => {
@@ -4954,7 +4966,7 @@ const CollapsiblePanel = ({
 //  Main Dashboard Component
 // ============================================================
 
-const Dashboard = ({ brokerStatus, integrityRed = false, onHealthChange }: { brokerStatus: BrokerStatus | null; integrityRed?: boolean; onHealthChange?: (s: HealthSummary) => void }) => {
+const Dashboard = ({ brokerStatus, integrityRed = false }: { brokerStatus: BrokerStatus | null; integrityRed?: boolean }) => {
     const [signals, setSignals] = useState<Signal[]>([]);
     const [trades, setTrades] = useState<Trade[]>([]);
     const [portfolio, setPortfolio] = useState<Portfolio>({
@@ -5352,8 +5364,6 @@ const Dashboard = ({ brokerStatus, integrityRed = false, onHealthChange }: { bro
 
             {/* Zone 2: 4-Column Trading Grid */}
             <div className="dashboard-grid">
-                {/* Phase 13.6 — System Health panel: topmost, above Pending Orders */}
-                <SystemHealthPanel onHealthChange={onHealthChange} />
                 <SignalCommand
                     signals={signals}
                     newTimestamps={newTimestamps}
