@@ -50,7 +50,7 @@ export class RootErrorBoundary extends Component<{ children: ReactNode }, EBStat
 }
 import IntegrityStatus from './components/IntegrityStatus';
 import HelpPanel from './components/HelpPanel';
-import { SystemHealthBadge, type HealthSummary } from './components/SystemHealthPanel';
+import SystemHealthPanel, { SystemHealthBadge, type HealthSummary } from './components/SystemHealthPanel';
 import { Shield, Menu, Home, Share2, Map, HelpCircle } from 'lucide-react';
 import Dashboard from './pages/Dashboard';
 import Architecture from './pages/Architecture';
@@ -78,6 +78,7 @@ function App() {
   const [notionalToast, setNotionalToast] = useState<string>('');
   const [notionalPendingRestart, setNotionalPendingRestart] = useState(false);
   const [showNotionalDrill, setShowNotionalDrill] = useState(false);
+  const [showHealthModal, setShowHealthModal] = useState(false);
 
   const brokerStatus = useDataFetching('/api/broker/status', 10000, null);
 
@@ -184,6 +185,14 @@ function App() {
 
   const handleIntegrityChange = useCallback((isRed: boolean) => {
     setIntegrityRed(isRed);
+  }, []);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setShowHealthModal(false);
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
   }, []);
 
   return (
@@ -364,13 +373,40 @@ function App() {
             </div>
           )}
         </div>
+
+        {/* System Health modal drill-down — Phase 14.4 */}
+        {showHealthModal && (
+          <div
+            className="modal-overlay"
+            onClick={() => setShowHealthModal(false)}
+            role="dialog"
+            aria-modal="true"
+            aria-label="System Health Details"
+          >
+            <div
+              className="modal-card nav-drill"
+              style={{ maxWidth: '680px', width: '90%', maxHeight: '80vh', overflowY: 'auto' }}
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="modal-header">
+                <span className="modal-title">SYSTEM HEALTH — PER-COMPONENT DETAIL</span>
+                <button className="modal-close" onClick={() => setShowHealthModal(false)} aria-label="Close">✕</button>
+              </div>
+              <SystemHealthPanel onHealthChange={setHealthSummary} />
+            </div>
+          </div>
+        )}
+
         <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
             {/* Integrity Status — three traffic lights */}
             <IntegrityStatus onStatusChange={handleIntegrityChange} />
 
             {/* System health badge — Phase 13.6: always visible, goes red on component outage */}
+            {/* Phase 14.4: onClick opens SystemHealthPanel modal drill-down */}
             <SystemHealthBadge
               summary={healthSummary}
+              onClick={() => setShowHealthModal(true)}
+              ariaExpanded={showHealthModal}
             />
 
             {/* Execution mode banner — always visible, never hidden.
