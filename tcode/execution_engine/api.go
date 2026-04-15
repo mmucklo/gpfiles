@@ -2735,24 +2735,122 @@ func (h *ConfigHandler) ServeSystemAlerts(w http.ResponseWriter, r *http.Request
 	w.Write(out)
 }
 
-// ServeSignalRejections handles GET /api/signals/rejections — dropped signals in the last hour.
+// ServeSignalRejections handles GET /api/signals/rejections — paginated + filtered list.
+//
+//	Query params: since, hours (default 24), limit (default 50), offset (default 0),
+//	              model, reason, archetype
 func (h *ConfigHandler) ServeSignalRejections(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
-	hours := r.URL.Query().Get("hours")
-	if hours == "" {
-		hours = "1"
+	q := r.URL.Query()
+
+	// Build a URL-encoded query string to pass to the Python script.
+	// All params are optional; Python defaults are used when absent.
+	params := ""
+	if since := q.Get("since"); since != "" {
+		params += "since=" + since + "&"
+	}
+	if hours := q.Get("hours"); hours != "" {
+		params += "hours=" + hours + "&"
+	} else {
+		params += "hours=24&"
+	}
+	if limit := q.Get("limit"); limit != "" {
+		params += "limit=" + limit + "&"
+	}
+	if offset := q.Get("offset"); offset != "" {
+		params += "offset=" + offset + "&"
+	}
+	if model := q.Get("model"); model != "" {
+		params += "model=" + model + "&"
+	}
+	if reason := q.Get("reason"); reason != "" {
+		params += "reason=" + reason + "&"
+	}
+	if archetype := q.Get("archetype"); archetype != "" {
+		params += "archetype=" + archetype + "&"
 	}
 
-	cmd := exec.Command("./alpha_engine/venv/bin/python",
-		"alpha_engine/heartbeat_query.py", "rejections", hours)
+	args := []string{"alpha_engine/heartbeat_query.py", "rejections"}
+	if params != "" {
+		args = append(args, strings.TrimRight(params, "&"))
+	}
+
+	cmd := exec.Command("./alpha_engine/venv/bin/python", args...)
 	cmd.Dir = "/home/builder/src/gpfiles/tcode"
 	cmd.Env = os.Environ()
 
 	out, err := cmd.Output()
 	if err != nil {
-		w.Write([]byte(`{"count":0,"items":[]}`))
+		w.Write([]byte(`{"total_count":0,"items":[],"has_more":false}`))
+		return
+	}
+	w.Write(out)
+}
+
+// ServeSignalRejectionDetail handles GET /api/signals/rejections/:id — full row with JSON blobs.
+func (h *ConfigHandler) ServeSignalRejectionDetail(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	// Extract id from path: /api/signals/rejections/<id>
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/signals/rejections/"), "/")
+	rejID := parts[0]
+	if rejID == "" || rejID == "summary" {
+		http.NotFound(w, r)
+		return
+	}
+	// Validate numeric
+	if _, err := strconv.Atoi(rejID); err != nil {
+		http.Error(w, `{"error":"invalid id"}`, http.StatusBadRequest)
+		return
+	}
+
+	cmd := exec.Command("./alpha_engine/venv/bin/python",
+		"alpha_engine/heartbeat_query.py", "rejection_detail", rejID)
+	cmd.Dir = "/home/builder/src/gpfiles/tcode"
+	cmd.Env = os.Environ()
+
+	out, err := cmd.Output()
+	if err != nil || string(out) == "null" || len(out) == 0 {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"error":"not_found"}`))
+		return
+	}
+	w.Write(out)
+}
+
+// ServeSignalRejectionsSummary handles GET /api/signals/rejections/summary — aggregated counts.
+//
+//	Query params: hours (default 24), since
+func (h *ConfigHandler) ServeSignalRejectionsSummary(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	q := r.URL.Query()
+	params := ""
+	if since := q.Get("since"); since != "" {
+		params += "since=" + since + "&"
+	}
+	if hours := q.Get("hours"); hours != "" {
+		params += "hours=" + hours + "&"
+	} else {
+		params += "hours=24&"
+	}
+
+	args := []string{"alpha_engine/heartbeat_query.py", "rejections_summary"}
+	if params != "" {
+		args = append(args, strings.TrimRight(params, "&"))
+	}
+
+	cmd := exec.Command("./alpha_engine/venv/bin/python", args...)
+	cmd.Dir = "/home/builder/src/gpfiles/tcode"
+	cmd.Env = os.Environ()
+
+	out, err := cmd.Output()
+	if err != nil {
+		w.Write([]byte(`{"total":0,"by_reason":{},"by_model":{},"by_archetype":{}}`))
 		return
 	}
 	w.Write(out)

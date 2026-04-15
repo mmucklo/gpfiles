@@ -234,7 +234,12 @@ func main() {
 	mux.HandleFunc("/api/signals/feedback/resolve", configHandler.ServeSignalFeedbackResolve)
 	mux.HandleFunc("/api/signals/feedback", configHandler.ServeSignalFeedback)
 	mux.HandleFunc("/api/signals/cancel", configHandler.ServeSignalCancel)
+	mux.HandleFunc("/api/signals/rejections/summary", configHandler.ServeSignalRejectionsSummary)
 	mux.HandleFunc("/api/signals/rejections", configHandler.ServeSignalRejections)
+	// Prefix match for /api/signals/rejections/:id
+	mux.HandleFunc("/api/signals/rejections/", func(w http.ResponseWriter, r *http.Request) {
+		configHandler.ServeSignalRejectionDetail(w, r)
+	})
 
 	// System heartbeats (Phase 13.6)
 	mux.HandleFunc("/api/system/heartbeats", configHandler.ServeSystemHeartbeats)

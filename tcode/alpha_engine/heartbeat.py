@@ -168,45 +168,168 @@ async def emit_heartbeat_async(
 
 # ── Signal rejection tracking ─────────────────────────────────────────────────
 
+# Full schema for signal_rejections (Phase 14.3 — rich drill-down context).
+_SIGNAL_REJECTIONS_DDL = """
+CREATE TABLE IF NOT EXISTS signal_rejections (
+    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts                       TEXT NOT NULL,
+    -- Phase 14.1 columns (always populated)
+    model                    TEXT NOT NULL,
+    opt_type                 TEXT NOT NULL,
+    archetype                TEXT NOT NULL,
+    reason                   TEXT NOT NULL,
+    expiry                   TEXT,
+    -- Phase 14.3 columns (nullable — old rows will have NULL here)
+    model_id                 TEXT,
+    direction                TEXT,
+    confidence               REAL,
+    ticker                   TEXT,
+    option_type              TEXT,
+    expiration_date          TEXT,
+    target_strike_attempted  REAL,
+    spot_at_rejection        REAL,
+    reason_code              TEXT,
+    reason_detail            TEXT,
+    chain_snapshot           TEXT,
+    strike_selector_breakdown TEXT,
+    chop_regime_at_rejection TEXT,
+    regime_context           TEXT
+)
+"""
+
+# Columns added in Phase 14.3 — applied via ALTER TABLE to existing installs.
+_NEW_COLUMNS_14_3 = [
+    ("model_id",                 "TEXT"),
+    ("direction",                "TEXT"),
+    ("confidence",               "REAL"),
+    ("ticker",                   "TEXT"),
+    ("option_type",              "TEXT"),
+    ("expiration_date",          "TEXT"),
+    ("target_strike_attempted",  "REAL"),
+    ("spot_at_rejection",        "REAL"),
+    ("reason_code",              "TEXT"),
+    ("reason_detail",            "TEXT"),
+    ("chain_snapshot",           "TEXT"),
+    ("strike_selector_breakdown","TEXT"),
+    ("chop_regime_at_rejection", "TEXT"),
+    ("regime_context",           "TEXT"),
+]
+
+
+def _migrate_rejections_table(conn: sqlite3.Connection) -> None:
+    """Add Phase-14.3 columns to existing signal_rejections tables.
+
+    Uses try/except per column because SQLite doesn't support IF NOT EXISTS
+    in ALTER TABLE ADD COLUMN.  Each column failure is silently skipped.
+    """
+    for col, col_type in _NEW_COLUMNS_14_3:
+        try:
+            conn.execute(f"ALTER TABLE signal_rejections ADD COLUMN {col} {col_type}")
+        except sqlite3.OperationalError:
+            pass  # column already exists — expected for Phase-14.3+ installs
+
+
 def emit_rejection(
     model: str,
     opt_type: str,
     archetype: str,
     reason: str,
     expiry: str | None = None,
+    # Phase 14.3 extended context (all optional for backward compat)
+    model_id: str | None = None,
+    direction: str | None = None,
+    confidence: float | None = None,
+    ticker: str | None = None,
+    option_type: str | None = None,
+    expiration_date: str | None = None,
+    target_strike_attempted: float | None = None,
+    spot_at_rejection: float | None = None,
+    reason_code: str | None = None,
+    reason_detail: str | None = None,
+    chain_snapshot: str | None = None,
+    strike_selector_breakdown: str | None = None,
+    chop_regime_at_rejection: str | None = None,
+    regime_context: str | None = None,
     db_path: str = DB_PATH,
 ) -> None:
     """Record a dropped signal to the signal_rejections table.
 
-    Schema is created on first write.  Called at [STRIKE-REJECT] and
-    [STRIKE-SELECT-FAIL] sites in publisher.py.  Silently swallows all
-    exceptions — a failed rejection write must never crash the publisher.
+    Phase 14.1 fields (model, opt_type, archetype, reason, expiry) are always
+    written.  Phase 14.3 fields are written when provided and are NULL in rows
+    emitted by pre-14.3 publisher code.
+
+    Failures are logged loudly to stderr and retried once; a second failure is
+    swallowed — a failed rejection write must never crash the publisher.
     """
-    try:
-        conn = sqlite3.connect(db_path, timeout=5)
+    ts = _isotime()
+
+    def _write(conn: sqlite3.Connection) -> None:
         conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(_SIGNAL_REJECTIONS_DDL)
+        # Ensure system_alerts exists (created by heartbeat.py on first heartbeat,
+        # but may not exist in isolated test databases).
         conn.execute(
-            """CREATE TABLE IF NOT EXISTS signal_rejections (
-                id      INTEGER PRIMARY KEY AUTOINCREMENT,
-                ts      TEXT NOT NULL,
-                model   TEXT NOT NULL,
-                opt_type TEXT NOT NULL,
-                archetype TEXT NOT NULL,
-                reason  TEXT NOT NULL,
-                expiry  TEXT
+            """CREATE TABLE IF NOT EXISTS system_alerts (
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts        TEXT    NOT NULL,
+                component TEXT    NOT NULL,
+                status    TEXT    NOT NULL,
+                message   TEXT    NOT NULL
             )"""
         )
+        _migrate_rejections_table(conn)
         conn.execute(
-            """INSERT INTO signal_rejections (ts, model, opt_type, archetype, reason, expiry)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (_isotime(), model, opt_type, archetype, reason, expiry or ""),
+            """INSERT INTO signal_rejections
+               (ts, model, opt_type, archetype, reason, expiry,
+                model_id, direction, confidence, ticker, option_type,
+                expiration_date, target_strike_attempted, spot_at_rejection,
+                reason_code, reason_detail, chain_snapshot,
+                strike_selector_breakdown, chop_regime_at_rejection, regime_context)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                ts, model, opt_type, archetype, reason, expiry or "",
+                model_id or model, direction, confidence, ticker or "TSLA",
+                option_type or opt_type, expiration_date or expiry,
+                target_strike_attempted, spot_at_rejection,
+                reason_code, reason_detail, chain_snapshot,
+                strike_selector_breakdown, chop_regime_at_rejection, regime_context,
+            ),
         )
-        # Trim table to last 500 rows to prevent unbounded growth
+        # Also write a system_alert so the audit feed surfaces this rejection.
+        rc = reason_code or reason[:40]
+        mid = model_id or model
+        conn.execute(
+            """INSERT INTO system_alerts (ts, component, status, message)
+               VALUES (?, ?, ?, ?)""",
+            (ts, "publisher", "ok",
+             f"[SIGNAL-REJECTED] model={mid} reason={rc}"),
+        )
+        # Keep last 500 rejection rows; trim older ones.
         conn.execute(
             """DELETE FROM signal_rejections
                WHERE id NOT IN (SELECT id FROM signal_rejections ORDER BY id DESC LIMIT 500)"""
         )
         conn.commit()
+
+    # Attempt 1
+    try:
+        conn = sqlite3.connect(db_path, timeout=5)
+        _write(conn)
         conn.close()
-    except Exception:
-        pass  # rejection writes must never crash the publisher
+        return
+    except Exception as exc:
+        import sys
+        print(f"[EMIT-REJECTION] write failed (attempt 1): {exc}", file=sys.stderr)
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    # Retry once
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+        _write(conn)
+        conn.close()
+    except Exception as exc2:
+        import sys
+        print(f"[EMIT-REJECTION] write failed (attempt 2, giving up): {exc2}", file=sys.stderr)

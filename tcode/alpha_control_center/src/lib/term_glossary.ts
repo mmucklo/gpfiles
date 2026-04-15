@@ -1166,6 +1166,166 @@ Phase 14 MIN_ABSOLUTE_BID=$0.10 prevents emitting signals on penny contracts.`,
     related: ["MIN_ABSOLUTE_BID", "MIN_OPTION_VOLUME_TODAY", "LIQUIDITY_HEADROOM"],
     phase_note: "Added in Phase 14.",
   },
+
+  // ── Phase 14.3: rejection reason codes ───────────────────────────────────────
+
+  STRIKE_SELECT_FAIL: {
+    term: "STRIKE_SELECT_FAIL",
+    display: "Strike Select Fail",
+    short: "Publisher couldn't find any strike passing the greeks + liquidity + theta filters for this signal.",
+    long: `**STRIKE_SELECT_FAIL** means the publisher evaluated every candidate strike in the options chain and every one failed at least one filter gate.
+
+**Common causes:**
+- Liquidity drought: all strikes below MIN_OPTION_VOLUME_TODAY or MIN_OPTION_OPEN_INTEREST
+- Greeks unavailable: BS-compute and IBKR modelGreeks both failed — selector can't score delta/theta
+- Theta cap: too close to expiry, all strikes have theta_decay > threshold
+- Delta band: no strike lands in the required delta range for the archetype
+
+The drill-down shows a per-candidate strike breakdown indicating which filter eliminated each one.`,
+    formula: "SELECT max-score strike WHERE delta ∈ band AND liquidity gates pass AND theta ≤ cap",
+    source: "publisher.py strike_selector · options chain · IBKR greeks",
+    trading_impact: "Signal is dropped entirely. No order emitted. Recorded in signal_rejections for audit.",
+    related: ["LIQUIDITY_REJECT", "GREEKS_UNAVAILABLE", "CANDIDATE_STRIKE", "MIN_OPTION_VOLUME_TODAY"],
+    phase_note: "Reason code added in Phase 14.3.",
+  },
+
+  LIQUIDITY_REJECT: {
+    term: "LIQUIDITY_REJECT",
+    display: "Liquidity Reject",
+    short: "Contract failed one or more liquidity gates: volume, open interest, bid-ask spread, or minimum bid.",
+    long: `**LIQUIDITY_REJECT** means the best available strike failed a minimum liquidity threshold before order emission.
+
+**The four liquidity gates (all must pass):**
+1. **Volume today** ≥ MIN_OPTION_VOLUME_TODAY (default 50) — requires active trading today
+2. **Open interest** ≥ MIN_OPTION_OPEN_INTEREST (default 500) — requires market depth
+3. **Bid-ask spread %** ≤ MAX_BID_ASK_PCT (default 15%) — prevents overpaying at entry/exit
+4. **Minimum bid** ≥ MIN_ABSOLUTE_BID (default $0.10) — eliminates penny contracts
+
+The drill-down shows each gate's actual vs required value.`,
+    formula: "PASS if volume≥50 AND oi≥500 AND (ask−bid)/mid≤15% AND bid≥$0.10",
+    source: "options chain · publisher.py liquidity_gate() · .tsla-alpha.env",
+    trading_impact: "Signal dropped. Root cause of the 2026-04-12 stale-order incident. Phase 14 prevents recurrence.",
+    related: ["STRIKE_SELECT_FAIL", "MIN_OPTION_VOLUME_TODAY", "MIN_OPTION_OPEN_INTEREST", "MAX_BID_ASK_PCT", "MIN_ABSOLUTE_BID", "PENNY_CONTRACT"],
+    phase_note: "Reason code added in Phase 14.3.",
+  },
+
+  CHOP_BLOCK: {
+    term: "CHOP_BLOCK",
+    display: "Chop Block",
+    short: "Market chop regime (CHOPPY) suppressed this signal — the archetype requires a trending environment.",
+    long: `**CHOP_BLOCK** means the chop regime detector classified current market conditions as CHOPPY at rejection time, and the signal's archetype is configured to require TRENDING or MIXED conditions.
+
+**Chop regime labels:**
+- **TRENDING**: directional momentum — full signal throughput
+- **MIXED**: borderline — partial pass depending on archetype
+- **CHOPPY**: random/mean-reverting — directional archetypes blocked
+
+The drill-down shows the chop_regime components (ATR ratio, ADX, Hurst exponent) at rejection time.
+
+This is a **protective gate**, not a signal failure. The underlying model may be correct; the trade is blocked because the execution environment would erode edge.`,
+    formula: "chop_regime = CHOPPY AND archetype ∈ {DIRECTIONAL_STRONG, DIRECTIONAL_STD, MOMENTUM_BREAKOUT}",
+    source: "publisher.py chop_regime_cache · alpha_engine/ingestion/chop_regime.py",
+    trading_impact: "Signal suppressed for directional archetypes during choppy markets. Prevents whipsaw trades.",
+    related: ["CHOP_REGIME", "DIRECTIONAL_STRONG", "DIRECTIONAL_STD", "STRIKE_SELECT_FAIL"],
+    phase_note: "Reason code added in Phase 14.3.",
+  },
+
+  GREEKS_UNAVAILABLE: {
+    term: "GREEKS_UNAVAILABLE",
+    display: "Greeks Unavailable",
+    short: "Both BS-compute and IBKR modelGreeks failed for this chain — the selector can't score strikes without delta/theta.",
+    long: `**GREEKS_UNAVAILABLE** means the strike selector tried two greeks sources and both failed:
+
+1. **BS-compute (Black-Scholes)**: Falls back to local calculation using IV. Fails if IV is unavailable or the chain is missing bid/ask data.
+2. **IBKR modelGreeks**: Fails if IBKR isn't connected or the contract details request times out.
+
+Without greeks, the selector cannot verify that any strike lands in the required delta band — so all candidates fail and the signal is dropped.
+
+**Remediation**: Check options_chain_api heartbeat status and IBKR gateway connectivity.`,
+    formula: "greeks = None if BS-compute fails AND IBKR modelGreeks unavailable",
+    source: "alpha_engine/pricing/greeks.py · IBKR reqContractDetails · options chain IV",
+    trading_impact: "Signal dropped. No fallback — we never trade without knowing delta.",
+    related: ["STRIKE_SELECT_FAIL", "GREEKS_SOURCE", "IBKR_GATEWAY", "OPTIONS_CHAIN_API"],
+    phase_note: "Reason code added in Phase 14.3.",
+  },
+
+  SPOT_VARIANCE: {
+    term: "SPOT_VARIANCE",
+    display: "Spot Variance",
+    short: "Triple-consensus spot price sources (TradingView, yfinance, IBKR) diverged beyond ±2% tolerance.",
+    long: `**SPOT_VARIANCE** means the publisher's three independent spot price sources disagreed by more than the tolerance threshold.
+
+**Sources polled:**
+- TradingView datafeed (primary)
+- yfinance (secondary)
+- IBKR ticker.last / ticker.marketPrice (tertiary)
+
+If any pairwise divergence exceeds 2%, the publisher halts signal emission to avoid trading on a stale or wrong price — a bad spot cascades into bad strike selection, wrong delta estimates, and mispriced greeks.
+
+The drill-down shows the three spot readings and which pair(s) diverged.`,
+    formula: "|price_A − price_B| / min(price_A, price_B) > 0.02 for any pair",
+    source: "publisher.py triple_consensus_spot() · TradingView · yfinance · IBKR",
+    trading_impact: "Signal blocked. Prevents trading with a stale/wrong underlying price.",
+    related: ["STRIKE_SELECT_FAIL", "PRE_MARKET_BIAS", "DATA_AUDIT"],
+    phase_note: "Reason code added in Phase 14.3.",
+  },
+
+  REJECTION_COMMENT: {
+    term: "REJECTION_COMMENT",
+    display: "Rejection Comment",
+    short: "A user annotation on a specific signal rejection — stored as signal_feedback with action=REJECTION_COMMENT.",
+    long: `**REJECTION_COMMENT** is a feedback action type that lets you annotate a specific rejected signal in the drill-down modal.
+
+It stores a row in the \`signal_feedback\` table with:
+- \`action = "REJECTION_COMMENT"\`
+- \`signal_id\` = the rejection fingerprint
+- \`user_comment\` = verbatim annotation (never trimmed)
+- Optional \`tag\` = \`"rejection_analysis"\` / \`"false_negative"\` / \`"expected"\`
+
+These annotations feed attribution runs to refine publisher thresholds over time.`,
+    source: "signal_feedback table · /api/signals/feedback endpoint",
+    trading_impact: "No immediate trading impact. Annotation feeds future threshold tuning.",
+    related: ["FALSE_NEGATIVE", "STRIKE_SELECT_FAIL", "LIQUIDITY_REJECT"],
+    phase_note: "Added in Phase 14.3 drill-down actions.",
+  },
+
+  FALSE_NEGATIVE: {
+    term: "FALSE_NEGATIVE",
+    display: "False Negative",
+    short: "A rejection that should NOT have fired — the signal was good but the publisher incorrectly blocked it.",
+    long: `A **false negative** in rejection analysis is when a signal was dropped (rejection fired) but in retrospect the trade would have been profitable and the rejection filter was over-tuned.
+
+**Example**: STRIKE_SELECT_FAIL because MIN_OPTION_VOLUME_TODAY=50 but volume=48 and TSLA moved +5% — the signal was correct, the floor was too strict.
+
+You can tag any rejection as **"Mark as false-negative"** in the drill-down modal. Attribution runs will use these tags to flag overly aggressive thresholds.
+
+Note: the inverse (**true negative**) = rejection was correct, the trade would have lost. Tag those as **"Mark as expected"**.`,
+    source: "signal_feedback.tag = 'false_negative' · Phase 14.3 drill-down",
+    trading_impact: "Informs threshold tuning. Enough false-negatives on the same reason_code suggest loosening that gate.",
+    related: ["REJECTION_COMMENT", "STRIKE_SELECT_FAIL", "LIQUIDITY_REJECT"],
+    phase_note: "Tag added in Phase 14.3.",
+  },
+
+  CANDIDATE_STRIKE: {
+    term: "CANDIDATE_STRIKE",
+    display: "Candidate Strike",
+    short: "A strike evaluated by the selector before being accepted or eliminated by a filter gate.",
+    long: `A **candidate strike** is any options chain row that the strike selector considers for the current signal.
+
+The selector evaluates each candidate in order of proximity to the target delta, running it through a gate sequence:
+
+1. **Delta band** — Is delta within the archetype's required range?
+2. **Liquidity** — Volume, OI, spread, bid all pass their floors?
+3. **Theta cap** — Is theta_decay below the archetype's daily decay limit?
+4. **Greeks availability** — Can we compute/retrieve delta, gamma, theta, vega?
+
+Each gate elimination is recorded in the \`strike_selector_breakdown\` JSON blob, visible in the drill-down modal's **Chain Snapshot** section.`,
+    formula: "candidate score = f(delta_proximity, iv_rank, theta_efficiency, liquidity_score)",
+    source: "publisher.py StrikeSelector.select() · options chain",
+    trading_impact: "Best-scoring candidate passing all gates becomes the emitted strike. Zero passing candidates → STRIKE_SELECT_FAIL.",
+    related: ["STRIKE_SELECT_FAIL", "LIQUIDITY_REJECT", "GREEKS_UNAVAILABLE"],
+    phase_note: "Concept formalized in Phase 14.3 drill-down UI.",
+  },
 };
 
 /**

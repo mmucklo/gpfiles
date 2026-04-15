@@ -7,6 +7,7 @@ import { SkeletonCard, SkeletonTable } from '../components/SkeletonLoader';
 import { computeEconomics, formatRR, rrColorClass } from '../lib/signal_economics';
 import TermLabel from '../components/TermLabel';
 import SystemHealthPanel, { type HealthSummary } from '../components/SystemHealthPanel';
+import RejectedSignalsPanel from '../components/RejectedSignalsPanel';
 
 // ============================================================
 //  Types
@@ -4832,6 +4833,78 @@ const ExecutionLog = ({ trades, fromLog, brokerStatus, lossSummary, simMode }: {
 };
 
 // ============================================================
+//  Phase 14.3: Rejection Audit Feed
+// ============================================================
+/**
+ * Shows recent [SIGNAL-REJECTED] entries from /api/system/alerts.
+ * Each entry is clickable — opens the RejectedSignalsPanel.
+ * Displayed as a compact collapsible accordion near the rejection badge.
+ */
+const RejectionAuditFeed = ({ onOpenPanel }: { onOpenPanel: () => void }) => {
+    const [events, setEvents] = useState<{ ts: string; message: string }[]>([]);
+    const [open, setOpen] = useState(false);
+
+    const fetchEvents = useCallback(async () => {
+        try {
+            const r = await fetch('/api/system/alerts');
+            if (!r.ok) return;
+            const all = await r.json() as { ts: string; component: string; message: string }[];
+            const rej = all.filter(e => e.message && e.message.includes('[SIGNAL-REJECTED]'));
+            setEvents(rej.slice(0, 8));
+        } catch { /* ignore */ }
+    }, []);
+
+    useEffect(() => {
+        fetchEvents();
+        const id = setInterval(fetchEvents, 30000);
+        return () => clearInterval(id);
+    }, [fetchEvents]);
+
+    if (events.length === 0) return null;
+
+    return (
+        <div style={{ margin: '4px 0', fontSize: '0.72rem' }}>
+            <button
+                onClick={() => setOpen(v => !v)}
+                style={{
+                    display: 'flex', alignItems: 'center', gap: 6, background: 'none',
+                    border: 'none', color: '#8b949e', cursor: 'pointer', padding: '2px 0',
+                    fontSize: '0.72rem',
+                }}
+                aria-expanded={open}
+            >
+                <span style={{ transform: open ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s', fontSize: '0.6rem' }}>▶</span>
+                <span>Recent rejection events ({events.length})</span>
+            </button>
+            {open && (
+                <div style={{ borderLeft: '2px solid #30363d', paddingLeft: 10, marginTop: 4 }}>
+                    {events.map((ev, i) => (
+                        <div
+                            key={i}
+                            onClick={onOpenPanel}
+                            style={{
+                                padding: '3px 0', cursor: 'pointer', color: '#d29922',
+                                borderBottom: '1px solid rgba(48,54,61,0.4)',
+                                display: 'flex', gap: 8,
+                            }}
+                            title="Click to open rejected signals panel"
+                            role="button"
+                            tabIndex={0}
+                            onKeyDown={e => { if (e.key === 'Enter') onOpenPanel(); }}
+                        >
+                            <span style={{ color: '#6e7681', flexShrink: 0 }}>
+                                {ev.ts.slice(11, 19)}
+                            </span>
+                            <span>{ev.message}</span>
+                        </div>
+                    ))}
+                </div>
+            )}
+        </div>
+    );
+};
+
+// ============================================================
 //  Zone 3: Collapsible Panel
 // ============================================================
 const CollapsiblePanel = ({
@@ -4909,24 +4982,27 @@ const Dashboard = ({ brokerStatus, integrityRed = false, onHealthChange }: { bro
     const [lastFetchMs, setLastFetchMs] = useState(0);
     const [selectedSignal, setSelectedSignal] = useState<Signal | null>(null);
     const [newTimestamps, setNewTimestamps] = useState<Set<number>>(new Set());
-    const [rejections, setRejections] = useState<{ count: number; items: { ts: string; model: string; opt_type: string; archetype: string; reason: string; expiry: string }[] }>({ count: 0, items: [] });
-    const [showRejectionsModal, setShowRejectionsModal] = useState(false);
+    const [rejectionCount, setRejectionCount] = useState(0);
+    const [showRejectionsPanel, setShowRejectionsPanel] = useState(false);
 
     const prevSignalTsRef = useRef<Set<number>>(new Set());
 
-    // Fetch signal rejections (30s interval — SQLite via Python subprocess)
-    const fetchRejections = useCallback(async () => {
+    // Fetch rejection summary count (30s interval) — lightweight /summary endpoint
+    const fetchRejectionCount = useCallback(async () => {
         try {
-            const r = await fetch('/api/signals/rejections?hours=1');
-            if (r.ok) setRejections(await r.json());
+            const r = await fetch('/api/signals/rejections/summary?hours=1');
+            if (r.ok) {
+                const d = await r.json() as { total?: number };
+                if (typeof d.total === 'number') setRejectionCount(d.total);
+            }
         } catch { /* ignore */ }
     }, []);
 
     useEffect(() => {
-        fetchRejections();
-        const id = setInterval(fetchRejections, 30000);
+        fetchRejectionCount();
+        const id = setInterval(fetchRejectionCount, 30000);
         return () => clearInterval(id);
-    }, [fetchRejections]);
+    }, [fetchRejectionCount]);
 
     // Fetch audit on a slower interval (30s) — runs Python subprocess
     const fetchAudit = useCallback(async () => {
@@ -5237,74 +5313,31 @@ const Dashboard = ({ brokerStatus, integrityRed = false, onHealthChange }: { bro
             <DataProvenancePanel audit={audit} />
 
             {/* Rejected signals badge — shows count of dropped signals in last 1h */}
-            {rejections.count > 0 && (
+            {rejectionCount > 0 && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '4px 0' }}>
                     <button
-                        onClick={() => setShowRejectionsModal(true)}
+                        onClick={() => setShowRejectionsPanel(true)}
                         style={{
                             display: 'inline-flex', alignItems: 'center', gap: '6px',
                             padding: '3px 10px', borderRadius: '12px',
                             background: 'rgba(210,153,34,0.15)', border: '1px solid rgba(210,153,34,0.45)',
                             color: '#d29922', fontSize: '0.75rem', fontWeight: 700, cursor: 'pointer',
                         }}
-                        title="Signals dropped in last 1h due to strike selection failure — click for details"
+                        title="Signals dropped in last 1h — click for drill-down list"
+                        aria-label="Open rejected signals panel"
                     >
                         <span>⚠</span>
-                        <span>{rejections.count} rejected signal{rejections.count !== 1 ? 's' : ''} (1h)</span>
+                        <span>{rejectionCount} rejected signal{rejectionCount !== 1 ? 's' : ''} (1h)</span>
                     </button>
                 </div>
             )}
 
-            {/* Rejections modal */}
-            {showRejectionsModal && (
-                <div
-                    onClick={() => setShowRejectionsModal(false)}
-                    style={{
-                        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)',
-                        zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    }}
-                >
-                    <div
-                        onClick={e => e.stopPropagation()}
-                        style={{
-                            background: '#161b22', border: '1px solid #30363d', borderRadius: '8px',
-                            padding: '20px', minWidth: '540px', maxWidth: '720px', maxHeight: '60vh',
-                            overflowY: 'auto',
-                        }}
-                    >
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-                            <span style={{ color: '#d29922', fontWeight: 700, fontSize: '0.9rem' }}>
-                                Rejected Signals — last 1h ({rejections.count})
-                            </span>
-                            <button
-                                onClick={() => setShowRejectionsModal(false)}
-                                style={{ background: 'none', border: 'none', color: '#8b949e', cursor: 'pointer', fontSize: '1.1rem' }}
-                            >✕</button>
-                        </div>
-                        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.75rem', color: '#c9d1d9' }}>
-                            <thead>
-                                <tr style={{ borderBottom: '1px solid #30363d', color: '#8b949e' }}>
-                                    <th style={{ textAlign: 'left', padding: '4px 8px' }}>Time</th>
-                                    <th style={{ textAlign: 'left', padding: '4px 8px' }}>Model</th>
-                                    <th style={{ textAlign: 'left', padding: '4px 8px' }}>Type</th>
-                                    <th style={{ textAlign: 'left', padding: '4px 8px' }}>Reason</th>
-                                    <th style={{ textAlign: 'left', padding: '4px 8px' }}>Expiry</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {rejections.items.map((item, i) => (
-                                    <tr key={i} style={{ borderBottom: '1px solid rgba(48,54,61,0.5)' }}>
-                                        <td style={{ padding: '4px 8px', color: '#8b949e' }}>{item.ts.replace('T', ' ').slice(0, 19)}</td>
-                                        <td style={{ padding: '4px 8px' }}>{item.model}</td>
-                                        <td style={{ padding: '4px 8px' }}>{item.opt_type} / {item.archetype}</td>
-                                        <td style={{ padding: '4px 8px', color: '#f0883e', maxWidth: '220px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={item.reason}>{item.reason}</td>
-                                        <td style={{ padding: '4px 8px', color: '#8b949e' }}>{item.expiry || '—'}</td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
+            {/* Phase 14.3: Rejection audit event feed — shows [SIGNAL-REJECTED] entries */}
+            <RejectionAuditFeed onOpenPanel={() => setShowRejectionsPanel(true)} />
+
+            {/* Phase 14.3: Rejections panel (full list + drill-down) */}
+            {showRejectionsPanel && (
+                <RejectedSignalsPanel onClose={() => setShowRejectionsPanel(false)} />
             )}
 
             {/* Pre-Market Intelligence Panel */}

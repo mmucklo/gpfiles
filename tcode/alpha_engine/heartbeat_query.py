@@ -199,52 +199,270 @@ def query_recent_alerts(limit: int = 5) -> list[dict]:
         return []
 
 
-def query_rejections(hours: int = 1, limit: int = 100) -> dict:
-    """Return signal rejections from the last `hours` hours.
+def query_rejections(
+    hours: int = 24,
+    limit: int = 50,
+    offset: int = 0,
+    since: str | None = None,
+    model: str | None = None,
+    reason_code: str | None = None,
+    archetype: str | None = None,
+) -> dict:
+    """Return paginated signal rejections.
+
+    Args:
+        hours:       How many hours back to look (ignored when since is set).
+        limit:       Page size (max 200).
+        offset:      Pagination offset.
+        since:       ISO 8601 UTC string — overrides hours if provided.
+        model:       Filter by model_id (exact match, case-insensitive).
+        reason_code: Filter by reason_code (exact match, case-insensitive).
+        archetype:   Filter by archetype (exact match, case-insensitive).
 
     Returns:
-        {"count": int, "items": [{"ts", "model", "opt_type", "archetype", "reason", "expiry"}, ...]}
+        {
+          "total_count": int,
+          "items": [{id, ts, model_id, direction, confidence, reason_code,
+                     reason_detail (trimmed to 80 chars), spot_at_rejection,
+                     option_type, expiration_date, archetype,
+                     chop_regime_at_rejection, model, opt_type, reason, expiry}],
+          "has_more": bool,
+        }
     """
     if not os.path.exists(DB_PATH):
-        return {"count": 0, "items": []}
+        return {"total_count": 0, "items": [], "has_more": False}
     try:
-        cutoff = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        # Compute cutoff as UTC string hours ago
         import datetime as _dt
-        cutoff_dt = datetime.now(timezone.utc) - _dt.timedelta(hours=hours)
-        cutoff_str = cutoff_dt.strftime("%Y-%m-%d %H:%M:%S")
+        if since:
+            cutoff_str = since.replace("T", " ").replace("Z", "")[:19]
+        else:
+            cutoff_dt = datetime.now(timezone.utc) - _dt.timedelta(hours=hours)
+            cutoff_str = cutoff_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+        limit = min(int(limit), 200)
+        offset = max(int(offset), 0)
 
         conn = sqlite3.connect(DB_PATH, timeout=5)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
+
         try:
+            # Build WHERE clause
+            where = ["ts >= ?"]
+            params: list = [cutoff_str]
+            if model:
+                where.append("(LOWER(model_id) = LOWER(?) OR LOWER(model) = LOWER(?))")
+                params += [model, model]
+            if reason_code:
+                where.append("LOWER(reason_code) = LOWER(?)")
+                params.append(reason_code)
+            if archetype:
+                where.append("LOWER(archetype) = LOWER(?)")
+                params.append(archetype)
+            where_sql = " AND ".join(where)
+
+            total = conn.execute(
+                f"SELECT COUNT(*) FROM signal_rejections WHERE {where_sql}", params
+            ).fetchone()[0]
+
             rows = conn.execute(
-                """SELECT ts, model, opt_type, archetype, reason, expiry
+                f"""SELECT id, ts,
+                       COALESCE(model_id, model) AS model_id,
+                       direction, confidence,
+                       COALESCE(reason_code, reason) AS reason_code,
+                       reason_detail,
+                       spot_at_rejection,
+                       COALESCE(option_type, opt_type) AS option_type,
+                       COALESCE(expiration_date, expiry) AS expiration_date,
+                       archetype, chop_regime_at_rejection,
+                       model, opt_type, reason, expiry
                    FROM signal_rejections
-                   WHERE ts >= ?
-                   ORDER BY id DESC LIMIT ?""",
-                (cutoff_str, limit),
+                   WHERE {where_sql}
+                   ORDER BY id DESC
+                   LIMIT ? OFFSET ?""",
+                params + [limit, offset],
             ).fetchall()
         except sqlite3.OperationalError:
-            # Table doesn't exist yet (no rejections ever written)
-            return {"count": 0, "items": []}
+            conn.close()
+            return {"total_count": 0, "items": [], "has_more": False}
         finally:
             conn.close()
-        items = [dict(r) for r in rows]
-        return {"count": len(items), "items": items}
+
+        items = []
+        for r in rows:
+            d = dict(r)
+            # Trim reason_detail for list view — full text available via /:id
+            if d.get("reason_detail") and len(d["reason_detail"]) > 80:
+                d["reason_detail"] = d["reason_detail"][:80]
+            items.append(d)
+
+        return {
+            "total_count": total,
+            "items": items,
+            "has_more": (offset + limit) < total,
+        }
     except Exception as e:
-        return {"count": 0, "items": [], "error": str(e)}
+        return {"total_count": 0, "items": [], "has_more": False, "error": str(e)}
+
+
+def query_rejection_by_id(rejection_id: int) -> dict | None:
+    """Return a single rejection row with all fields including large JSON blobs.
+
+    Returns None if not found.
+    """
+    if not os.path.exists(DB_PATH):
+        return None
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        try:
+            row = conn.execute(
+                """SELECT id, ts,
+                       COALESCE(model_id, model) AS model_id,
+                       direction, confidence, ticker,
+                       COALESCE(option_type, opt_type) AS option_type,
+                       COALESCE(expiration_date, expiry) AS expiration_date,
+                       target_strike_attempted, spot_at_rejection,
+                       COALESCE(reason_code, reason) AS reason_code,
+                       reason_detail,
+                       chain_snapshot, strike_selector_breakdown,
+                       archetype, chop_regime_at_rejection, regime_context,
+                       model, opt_type, reason, expiry
+                   FROM signal_rejections
+                   WHERE id = ?""",
+                (rejection_id,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            conn.close()
+            return None
+        finally:
+            conn.close()
+
+        if row is None:
+            return None
+        d = dict(row)
+        # Parse JSON blobs so consumers get native objects
+        for field in ("chain_snapshot", "strike_selector_breakdown", "regime_context"):
+            if d.get(field):
+                try:
+                    d[field] = json.loads(d[field])
+                except (json.JSONDecodeError, TypeError):
+                    pass  # Leave as string if unparseable
+        return d
+    except Exception:
+        return None
+
+
+def query_rejections_summary(hours: int = 24, since: str | None = None) -> dict:
+    """Return aggregated rejection counts by reason_code, model_id, and archetype.
+
+    Returns:
+        {
+          "total": int,
+          "by_reason": {"STRIKE_SELECT_FAIL": 47, ...},
+          "by_model":  {"SENTIMENT": 22, ...},
+          "by_archetype": {"DIRECTIONAL_STRONG": 15, ...},
+          "since": "<iso cutoff>",
+        }
+    """
+    if not os.path.exists(DB_PATH):
+        return {"total": 0, "by_reason": {}, "by_model": {}, "by_archetype": {}, "since": ""}
+    try:
+        import datetime as _dt
+        if since:
+            cutoff_str = since.replace("T", " ").replace("Z", "")[:19]
+        else:
+            cutoff_dt = datetime.now(timezone.utc) - _dt.timedelta(hours=hours)
+            cutoff_str = cutoff_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+        conn = sqlite3.connect(DB_PATH, timeout=5)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+
+        try:
+            total = conn.execute(
+                "SELECT COUNT(*) FROM signal_rejections WHERE ts >= ?", (cutoff_str,)
+            ).fetchone()[0]
+
+            by_reason_rows = conn.execute(
+                """SELECT COALESCE(reason_code, reason) AS rc, COUNT(*) AS cnt
+                   FROM signal_rejections WHERE ts >= ?
+                   GROUP BY rc ORDER BY cnt DESC""",
+                (cutoff_str,),
+            ).fetchall()
+
+            by_model_rows = conn.execute(
+                """SELECT COALESCE(model_id, model) AS mid, COUNT(*) AS cnt
+                   FROM signal_rejections WHERE ts >= ?
+                   GROUP BY mid ORDER BY cnt DESC""",
+                (cutoff_str,),
+            ).fetchall()
+
+            by_archetype_rows = conn.execute(
+                """SELECT archetype, COUNT(*) AS cnt
+                   FROM signal_rejections WHERE ts >= ?
+                   GROUP BY archetype ORDER BY cnt DESC""",
+                (cutoff_str,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            conn.close()
+            return {"total": 0, "by_reason": {}, "by_model": {}, "by_archetype": {}, "since": cutoff_str}
+        finally:
+            conn.close()
+
+        return {
+            "total": total,
+            "by_reason":    {r["rc"]: r["cnt"] for r in by_reason_rows},
+            "by_model":     {r["mid"]: r["cnt"] for r in by_model_rows},
+            "by_archetype": {r["archetype"]: r["cnt"] for r in by_archetype_rows if r["archetype"]},
+            "since": cutoff_str,
+        }
+    except Exception as e:
+        return {"total": 0, "by_reason": {}, "by_model": {}, "by_archetype": {}, "since": "", "error": str(e)}
 
 
 if __name__ == "__main__":
     import sys
+    import urllib.parse
+
     mode = sys.argv[1] if len(sys.argv) > 1 else "heartbeats"
+
     if mode == "sparkline" and len(sys.argv) > 2:
         print(json.dumps(query_sparkline(sys.argv[2])))
+
     elif mode == "alerts":
         print(json.dumps(query_recent_alerts()))
+
     elif mode == "rejections":
-        hours = int(sys.argv[2]) if len(sys.argv) > 2 else 1
-        print(json.dumps(query_rejections(hours=hours)))
+        # argv[2] is a query-string: "hours=24&limit=50&offset=0&since=...&model=...&reason=...&archetype=..."
+        qs = urllib.parse.parse_qs(sys.argv[2]) if len(sys.argv) > 2 else {}
+        def _first(key, default=""):
+            vals = qs.get(key, [default])
+            return vals[0] if vals else default
+        hours    = int(_first("hours", "24"))
+        limit    = int(_first("limit", "50"))
+        offset   = int(_first("offset", "0"))
+        since    = _first("since") or None
+        model    = _first("model") or None
+        reason   = _first("reason") or None
+        arch     = _first("archetype") or None
+        print(json.dumps(query_rejections(hours=hours, limit=limit, offset=offset,
+                                          since=since, model=model, reason_code=reason,
+                                          archetype=arch)))
+
+    elif mode == "rejection_detail":
+        # argv[2] is the integer id
+        rid = int(sys.argv[2]) if len(sys.argv) > 2 else 0
+        result = query_rejection_by_id(rid)
+        print(json.dumps(result) if result is not None else "null")
+
+    elif mode == "rejections_summary":
+        # argv[2] is a query-string: "hours=24&since=..."
+        qs = urllib.parse.parse_qs(sys.argv[2]) if len(sys.argv) > 2 else {}
+        hours = int((qs.get("hours", ["24"])[0]))
+        since = (qs.get("since", [""])[0]) or None
+        print(json.dumps(query_rejections_summary(hours=hours, since=since)))
+
     else:
         print(json.dumps(query_heartbeats()))
