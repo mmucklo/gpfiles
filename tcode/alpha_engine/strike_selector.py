@@ -12,7 +12,8 @@ Selection pipeline (strict order):
   5. Filter by theta cap: |theta| / premium <= max_theta_pct_premium
   6. VOL_PLAY only: filter vega >= min_vega_for_vol_play
   7. Score survivors by weighted distance to ideal contract
-  8. Return best-scored StrikeSelection, or None if no survivor
+  8. Return StrikeSelectionResult — always includes rejection_audit even when
+     no candidate survived.
 
 Liquidity thresholds are env-overridable at runtime:
   MIN_OPTION_OPEN_INTEREST   (default 500)
@@ -20,8 +21,9 @@ Liquidity thresholds are env-overridable at runtime:
   MAX_BID_ASK_PCT            (default 0.15 = 15%)
   MIN_ABSOLUTE_BID           (default 0.10)
 
-When nothing survives any filter step, returns None — the caller must log
-[STRIKE-REJECT] and drop the signal.  Never relaxes filters silently.
+When nothing survives any filter step, selected=None in the result — the
+caller must log [STRIKE-REJECT] and drop the signal.  Never relaxes filters
+silently.
 """
 import os
 import logging
@@ -54,6 +56,38 @@ class StrikeSelection:
     liquidity_headroom: dict     # {"volume": x, "oi": x, "spread": x, "bid": x}
 
 
+@dataclass
+class StrikeSelectionResult:
+    """Return type of select_strike() — always returned, even on failure.
+
+    rejection_audit shape:
+    {
+        "total_candidates": int,   # rows of the right option_type
+        "filter_eliminations": {
+            "liquidity": int,
+            "greeks_unavailable": int,
+            "delta_band": int,
+            "theta_cap": int,
+            "vega_floor": int,
+        },
+        "per_strike": [
+            {
+                "strike": float,
+                "option_type": str,
+                "score": None,
+                "delta": float | None,
+                "filter_killed": str,   # e.g. "LIQUIDITY", "DELTA_BAND"
+                "filter_reason": str,   # human-readable why
+            },
+            ...
+        ]
+    }
+    """
+    selected: Optional[StrikeSelection]
+    rejection_audit: dict
+    target_strike_attempted: Optional[float]  # nearest-to-spot strike in step1
+
+
 def _load_liquidity_floors() -> tuple[int, int, float, float]:
     """Load liquidity floor env vars, returning (min_oi, min_vol, max_spread_pct, min_abs_bid)."""
     min_oi = int(os.getenv("MIN_OPTION_OPEN_INTEREST", "500"))
@@ -74,18 +108,52 @@ def select_strike(
     min_volume_today: Optional[int] = None,
     max_bid_ask_pct: Optional[float] = None,
     min_absolute_bid: Optional[float] = None,
-) -> Optional[StrikeSelection]:
+) -> "StrikeSelectionResult":
     """
     Select the best strike from chain_rows for the given archetype and direction.
 
-    Returns StrikeSelection or None (caller must log [STRIKE-REJECT] and drop signal).
+    Always returns StrikeSelectionResult.  When no candidate survives,
+    result.selected is None and result.rejection_audit contains per-filter
+    elimination counts and per-strike reasons — use these in emit_rejection().
     """
     from config.archetypes import GREEKS_PROFILES
+
+    # ── Audit tracking ────────────────────────────────────────────────────────
+    per_strike_audit: list[dict] = []
+    elim = {
+        "liquidity": 0,
+        "greeks_unavailable": 0,
+        "delta_band": 0,
+        "theta_cap": 0,
+        "vega_floor": 0,
+    }
+
+    def _audit_reject(r, filter_name: str, reason: str) -> None:
+        per_strike_audit.append({
+            "strike": r.strike,
+            "option_type": r.option_type,
+            "score": None,
+            "delta": r.delta,
+            "filter_killed": filter_name,
+            "filter_reason": reason,
+        })
+
+    def _make_result(selected: Optional[StrikeSelection], total_candidates: int,
+                     target_strike: Optional[float]) -> "StrikeSelectionResult":
+        return StrikeSelectionResult(
+            selected=selected,
+            rejection_audit={
+                "total_candidates": total_candidates,
+                "filter_eliminations": elim,
+                "per_strike": per_strike_audit,
+            },
+            target_strike_attempted=target_strike,
+        )
 
     gp = GREEKS_PROFILES.get(archetype_name)
     if gp is None:
         logger.warning("[STRIKE-REJECT] unknown archetype=%s", archetype_name)
-        return None
+        return _make_result(None, 0, None)
 
     # Resolve liquidity floors (arg overrides env)
     env_oi, env_vol, env_spread, env_bid = _load_liquidity_floors()
@@ -119,9 +187,16 @@ def select_strike(
             # Don't hard-reject TTM mismatch — just log and continue with what we have
             # so the signal can still be placed on the nearest available expiry.
 
+    # Nearest-to-spot strike in step1 — what the old moneyness approach would have picked
+    target_strike_attempted: Optional[float] = (
+        min(step1, key=lambda r: abs(r.strike - spot)).strike if step1 else None
+    )
+
     if not step1:
         logger.info("[STRIKE-REJECT] archetype=%s direction=%s no %s rows", archetype_name, direction, opt_type)
-        return None
+        return _make_result(None, 0, None)
+
+    total_candidates = len(step1)
 
     # ── Step 2: liquidity gates ──────────────────────────────────────────────
     step2 = []
@@ -142,6 +217,8 @@ def select_strike(
                 "[LIQUIDITY-REJECT] strike=%s expiry=%s volume=%s oi=%s spread_pct=%.3f bid=%.2f reason=%s",
                 r.strike, r.expiration_date, r.volume, r.open_interest, spread_pct, r.bid, reasons[0],
             )
+            _audit_reject(r, "LIQUIDITY", reasons[0])
+            elim["liquidity"] += 1
         else:
             step2.append(r)
 
@@ -151,16 +228,23 @@ def select_strike(
             "(floor_oi=%d floor_vol=%d floor_spr=%.2f floor_bid=%.2f)",
             archetype_name, direction, floor_oi, floor_vol, floor_spr, floor_bid,
         )
-        return None
+        return _make_result(None, total_candidates, target_strike_attempted)
 
     # ── Step 3: greeks availability ──────────────────────────────────────────
-    step3 = [r for r in step2 if r.greeks_source != "unavailable" and r.delta is not None]
+    step3 = []
+    for r in step2:
+        if r.greeks_source == "unavailable" or r.delta is None:
+            _audit_reject(r, "GREEKS_UNAVAILABLE", f"greeks_source={r.greeks_source}")
+            elim["greeks_unavailable"] += 1
+        else:
+            step3.append(r)
+
     if not step3:
         logger.info(
             "[STRIKE-REJECT] archetype=%s direction=%s reason=no_greeks "
             "(%d rows had greeks_source=unavailable)", archetype_name, direction, len(step2),
         )
-        return None
+        return _make_result(None, total_candidates, target_strike_attempted)
 
     # ── Step 4: delta band ───────────────────────────────────────────────────
     target = gp.target_delta_abs
@@ -170,6 +254,10 @@ def select_strike(
         delta_abs = abs(r.delta)
         if abs(delta_abs - target) <= tol:
             step4.append(r)
+        else:
+            _audit_reject(r, "DELTA_BAND",
+                f"delta {delta_abs:.3f} outside [{target - tol:.2f}, {target + tol:.2f}]")
+            elim["delta_band"] += 1
 
     if not step4:
         closest = min(step3, key=lambda r: abs(abs(r.delta) - target))
@@ -178,34 +266,47 @@ def select_strike(
             "target=%.2f±%.2f best_delta=%.3f",
             archetype_name, direction, target, tol, abs(closest.delta),
         )
-        return None
+        return _make_result(None, total_candidates, target_strike_attempted)
 
     # ── Step 5: theta cap ────────────────────────────────────────────────────
     step5 = []
     for r in step4:
         premium = r.mid_price
         if premium <= 0:
+            _audit_reject(r, "THETA_CAP", "premium <= 0")
+            elim["theta_cap"] += 1
             continue
         theta_burn = abs(r.theta) / premium if r.theta is not None else 0.0
         if theta_burn <= gp.max_theta_pct_premium:
             step5.append(r)
+        else:
+            _audit_reject(r, "THETA_CAP",
+                f"theta_burn {theta_burn:.3f} > max {gp.max_theta_pct_premium:.3f}")
+            elim["theta_cap"] += 1
 
     if not step5:
         logger.info(
             "[STRIKE-REJECT] archetype=%s direction=%s reason=theta_cap max=%.3f",
             archetype_name, direction, gp.max_theta_pct_premium,
         )
-        return None
+        return _make_result(None, total_candidates, target_strike_attempted)
 
     # ── Step 6: vega floor (VOL_PLAY only) ──────────────────────────────────
     if archetype_name == "VOL_PLAY" and gp.min_vega_for_vol_play > 0:
-        step6 = [r for r in step5 if r.vega is not None and r.vega >= gp.min_vega_for_vol_play]
+        step6 = []
+        for r in step5:
+            if r.vega is None or r.vega < gp.min_vega_for_vol_play:
+                _audit_reject(r, "VEGA_FLOOR",
+                    f"vega {r.vega} < {gp.min_vega_for_vol_play}")
+                elim["vega_floor"] += 1
+            else:
+                step6.append(r)
         if not step6:
             logger.info(
                 "[STRIKE-REJECT] archetype=%s direction=%s reason=vega_floor min=%.3f",
                 archetype_name, direction, gp.min_vega_for_vol_play,
             )
-            return None
+            return _make_result(None, total_candidates, target_strike_attempted)
     else:
         step6 = step5
 
@@ -217,7 +318,6 @@ def select_strike(
 
     max_oi = max(r.open_interest for r in step6) or 1
     max_vol = max(r.volume for r in step6) or 1
-    min_spread = min(r.spread_pct for r in step6) if step6 else 1.0
 
     for r in step6:
         premium = r.mid_price or 0.01
@@ -244,7 +344,7 @@ def select_strike(
             }
 
     if best_row is None:
-        return None
+        return _make_result(None, total_candidates, target_strike_attempted)
 
     mid = best_row.mid_price
     headroom = {
@@ -262,22 +362,26 @@ def select_strike(
         best_row.volume, best_row.open_interest,
     )
 
-    return StrikeSelection(
-        strike=best_row.strike,
-        expiry=expiry,
-        contract_type=opt_type,
-        delta=best_row.delta,
-        gamma=best_row.gamma if best_row.gamma is not None else 0.0,
-        theta=best_row.theta if best_row.theta is not None else 0.0,
-        vega=best_row.vega if best_row.vega is not None else 0.0,
-        iv=best_row.implied_volatility,
-        bid=best_row.bid,
-        ask=best_row.ask,
-        mid=mid,
-        open_interest=best_row.open_interest,
-        volume=best_row.volume,
-        score=round(best_score, 4),
-        score_breakdown=best_breakdown,
-        greeks_source=best_row.greeks_source,
-        liquidity_headroom=headroom,
+    return _make_result(
+        StrikeSelection(
+            strike=best_row.strike,
+            expiry=expiry,
+            contract_type=opt_type,
+            delta=best_row.delta,
+            gamma=best_row.gamma if best_row.gamma is not None else 0.0,
+            theta=best_row.theta if best_row.theta is not None else 0.0,
+            vega=best_row.vega if best_row.vega is not None else 0.0,
+            iv=best_row.implied_volatility,
+            bid=best_row.bid,
+            ask=best_row.ask,
+            mid=mid,
+            open_interest=best_row.open_interest,
+            volume=best_row.volume,
+            score=round(best_score, 4),
+            score_breakdown=best_breakdown,
+            greeks_source=best_row.greeks_source,
+            liquidity_headroom=headroom,
+        ),
+        total_candidates,
+        target_strike_attempted,
     )
