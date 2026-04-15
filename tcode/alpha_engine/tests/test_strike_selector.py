@@ -10,7 +10,7 @@ from typing import Optional
 
 sys.path.insert(0, "/home/builder/src/gpfiles/tcode/alpha_engine")
 
-from strike_selector import select_strike, StrikeSelection
+from strike_selector import select_strike, StrikeSelection, StrikeSelectionResult
 
 
 @dataclass
@@ -83,17 +83,19 @@ def make_chain(include_liquid=True, include_greeks=True):
 
 class TestLiquidityGate:
     def test_rejects_all_low_oi(self):
-        """When all rows fail OI floor, returns None."""
+        """When all rows fail OI floor, selected is None with liquidity eliminations."""
         rows = make_chain(include_liquid=False)
         result = select_strike(
             rows, "DIRECTIONAL_STD", 380.0, "LONG_CALL", EXPIRY,
             min_open_interest=500, min_volume_today=50,
             max_bid_ask_pct=0.15, min_absolute_bid=0.10,
         )
-        assert result is None
+        assert isinstance(result, StrikeSelectionResult)
+        assert result.selected is None
+        assert result.rejection_audit["filter_eliminations"]["liquidity"] > 0
 
     def test_rejects_all_low_volume(self):
-        """When all rows fail volume floor, returns None."""
+        """When all rows fail volume floor, selected is None."""
         rows = make_chain()
         for r in rows:
             r.volume = 5
@@ -102,7 +104,8 @@ class TestLiquidityGate:
             min_open_interest=500, min_volume_today=50,
             max_bid_ask_pct=0.15, min_absolute_bid=0.10,
         )
-        assert result is None
+        assert result.selected is None
+        assert result.rejection_audit["filter_eliminations"]["liquidity"] > 0
 
     def test_rejects_penny_contracts(self):
         """Contracts with bid < min_absolute_bid are rejected."""
@@ -115,7 +118,7 @@ class TestLiquidityGate:
             min_open_interest=100, min_volume_today=10,
             max_bid_ask_pct=0.50, min_absolute_bid=0.10,
         )
-        assert result is None
+        assert result.selected is None
 
     def test_rejects_wide_spread(self):
         """Contracts with spread > max_bid_ask_pct are rejected."""
@@ -128,7 +131,7 @@ class TestLiquidityGate:
             min_open_interest=100, min_volume_today=10,
             max_bid_ask_pct=0.15, min_absolute_bid=0.10,
         )
-        assert result is None
+        assert result.selected is None
 
     def test_env_override_floors(self, monkeypatch):
         """Environment variable overrides are honored."""
@@ -136,18 +139,19 @@ class TestLiquidityGate:
         # Set env to require very high OI
         monkeypatch.setenv("MIN_OPTION_OPEN_INTEREST", "5000")
         result = select_strike(rows, "DIRECTIONAL_STD", 380.0, "LONG_CALL", EXPIRY)
-        assert result is None
+        assert result.selected is None
 
 
 class TestGreeksGate:
     def test_rejects_unavailable_greeks(self):
-        """When greeks_source=unavailable for all rows, returns None."""
+        """When greeks_source=unavailable for all rows, selected is None."""
         rows = make_chain(include_greeks=False)
         result = select_strike(
             rows, "DIRECTIONAL_STD", 380.0, "LONG_CALL", EXPIRY,
             min_open_interest=100, min_volume_today=10,
         )
-        assert result is None
+        assert result.selected is None
+        assert result.rejection_audit["filter_eliminations"]["greeks_unavailable"] > 0
 
 
 class TestDeltaBand:
@@ -159,11 +163,11 @@ class TestDeltaBand:
             min_open_interest=100, min_volume_today=10,
             max_bid_ask_pct=0.50, min_absolute_bid=0.05,
         )
-        if result is not None:
-            assert abs(result.delta - 0.30) <= 0.10, f"delta={result.delta}"
+        if result.selected is not None:
+            assert abs(result.selected.delta - 0.30) <= 0.10, f"delta={result.selected.delta}"
 
     def test_rejects_when_no_delta_in_band(self):
-        """When no row falls in delta band, returns None."""
+        """When no row falls in delta band, selected is None with delta_band eliminations."""
         rows = make_chain()
         # Set all deltas far from target
         for r in rows:
@@ -174,7 +178,8 @@ class TestDeltaBand:
             min_open_interest=100, min_volume_today=10,
             max_bid_ask_pct=0.50, min_absolute_bid=0.05,
         )
-        assert result is None
+        assert result.selected is None
+        assert result.rejection_audit["filter_eliminations"]["delta_band"] > 0
 
     def test_directional_strong_higher_delta(self):
         """DIRECTIONAL_STRONG target_delta=0.40 should pick higher delta than STD."""
@@ -189,27 +194,28 @@ class TestDeltaBand:
             min_open_interest=100, min_volume_today=10,
             max_bid_ask_pct=0.50, min_absolute_bid=0.05,
         )
-        if result_strong and result_std:
+        if result_strong.selected and result_std.selected:
             # STRONG targets 0.40, STD targets 0.30 — strong should pick closer to ITM
-            assert result_strong.delta >= result_std.delta - 0.05
+            assert result_strong.selected.delta >= result_std.selected.delta - 0.05
 
 
 class TestScoringAndReturn:
-    def test_returns_strike_selection_dataclass(self):
+    def test_returns_strike_selection_result_dataclass(self):
         rows = make_chain()
         result = select_strike(
             rows, "DIRECTIONAL_STD", 380.0, "LONG_CALL", EXPIRY,
             min_open_interest=100, min_volume_today=10,
             max_bid_ask_pct=0.50, min_absolute_bid=0.05,
         )
-        if result is not None:
-            assert isinstance(result, StrikeSelection)
-            assert result.score >= 0
-            assert result.score <= 1.0
-            assert "delta_fit" in result.score_breakdown
-            assert "liquidity" in result.score_breakdown
-            assert "spread_tightness" in result.score_breakdown
-            assert "theta_efficiency" in result.score_breakdown
+        assert isinstance(result, StrikeSelectionResult)
+        if result.selected is not None:
+            assert isinstance(result.selected, StrikeSelection)
+            assert result.selected.score >= 0
+            assert result.selected.score <= 1.0
+            assert "delta_fit" in result.selected.score_breakdown
+            assert "liquidity" in result.selected.score_breakdown
+            assert "spread_tightness" in result.selected.score_breakdown
+            assert "theta_efficiency" in result.selected.score_breakdown
 
     def test_headroom_computed(self):
         rows = make_chain()
@@ -218,22 +224,50 @@ class TestScoringAndReturn:
             min_open_interest=100, min_volume_today=10,
             max_bid_ask_pct=0.50, min_absolute_bid=0.05,
         )
-        if result is not None:
-            assert "volume" in result.liquidity_headroom
-            assert "oi" in result.liquidity_headroom
+        if result.selected is not None:
+            assert "volume" in result.selected.liquidity_headroom
+            assert "oi" in result.selected.liquidity_headroom
             # volume=300/10=30x headroom
-            assert result.liquidity_headroom["volume"] > 1.0
+            assert result.selected.liquidity_headroom["volume"] > 1.0
 
-    def test_none_when_empty_chain(self):
+    def test_empty_chain_returns_result_with_none_selected(self):
         result = select_strike([], "DIRECTIONAL_STD", 380.0, "LONG_CALL", EXPIRY)
-        assert result is None
+        assert isinstance(result, StrikeSelectionResult)
+        assert result.selected is None
 
-    def test_unknown_archetype_returns_none(self):
+    def test_unknown_archetype_returns_result_with_none_selected(self):
         rows = make_chain()
         result = select_strike(
             rows, "UNKNOWN_ARCHETYPE", 380.0, "LONG_CALL", EXPIRY,
         )
-        assert result is None
+        assert isinstance(result, StrikeSelectionResult)
+        assert result.selected is None
+
+    def test_rejection_audit_always_present(self):
+        """rejection_audit is populated even when a strike is successfully selected."""
+        rows = make_chain()
+        result = select_strike(
+            rows, "DIRECTIONAL_STD", 380.0, "LONG_CALL", EXPIRY,
+            min_open_interest=100, min_volume_today=10,
+            max_bid_ask_pct=0.50, min_absolute_bid=0.05,
+        )
+        assert isinstance(result.rejection_audit, dict)
+        assert "total_candidates" in result.rejection_audit
+        assert "filter_eliminations" in result.rejection_audit
+        assert "per_strike" in result.rejection_audit
+
+    def test_target_strike_attempted_is_nearest_to_spot(self):
+        """target_strike_attempted = strike in step1 closest to spot."""
+        rows = make_chain()
+        spot = 380.0
+        result = select_strike(
+            rows, "DIRECTIONAL_STD", spot, "LONG_CALL", EXPIRY,
+            min_open_interest=100, min_volume_today=10,
+            max_bid_ask_pct=0.50, min_absolute_bid=0.05,
+        )
+        assert result.target_strike_attempted is not None
+        # Should be the call strike nearest to 380
+        assert abs(result.target_strike_attempted - spot) <= 10.0
 
 
 class TestThetaCap:
@@ -249,7 +283,8 @@ class TestThetaCap:
             min_open_interest=100, min_volume_today=10,
             max_bid_ask_pct=0.50, min_absolute_bid=0.05,
         )
-        assert result is None
+        assert result.selected is None
+        assert result.rejection_audit["filter_eliminations"]["theta_cap"] > 0
 
 
 class TestVolPlayArchetype:
@@ -264,4 +299,38 @@ class TestVolPlayArchetype:
             min_open_interest=100, min_volume_today=10,
             max_bid_ask_pct=0.50, min_absolute_bid=0.05,
         )
-        assert result is None
+        assert result.selected is None
+        assert result.rejection_audit["filter_eliminations"]["vega_floor"] > 0
+
+
+class TestRejectionAuditContent:
+    def test_per_strike_list_populated_on_liquidity_fail(self):
+        """When liquidity filter kills rows, per_strike has entries with LIQUIDITY filter_killed."""
+        rows = make_chain(include_liquid=False)  # all OI=10, volume=5
+        result = select_strike(
+            rows, "DIRECTIONAL_STD", 380.0, "LONG_CALL", EXPIRY,
+            min_open_interest=500, min_volume_today=50,
+            max_bid_ask_pct=0.15, min_absolute_bid=0.10,
+        )
+        per_strike = result.rejection_audit["per_strike"]
+        assert len(per_strike) > 0
+        assert all(e["filter_killed"] == "LIQUIDITY" for e in per_strike)
+        # Each entry has required fields
+        for entry in per_strike:
+            assert "strike" in entry
+            assert "option_type" in entry
+            assert "filter_reason" in entry
+
+    def test_per_strike_list_populated_on_delta_fail(self):
+        """When delta filter kills rows, per_strike has entries with DELTA_BAND filter_killed."""
+        rows = make_chain()
+        for r in rows:
+            if r.option_type == "CALL":
+                r.delta = 0.95
+        result = select_strike(
+            rows, "DIRECTIONAL_STD", 380.0, "LONG_CALL", EXPIRY,
+            min_open_interest=100, min_volume_today=10,
+            max_bid_ask_pct=0.50, min_absolute_bid=0.05,
+        )
+        per_strike = result.rejection_audit["per_strike"]
+        assert any(e["filter_killed"] == "DELTA_BAND" for e in per_strike)
