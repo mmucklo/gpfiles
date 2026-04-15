@@ -20,7 +20,7 @@ from ingestion.tv_feed import validate_spot_price, get_tv_cache, TVFeedError
 from ingestion.ibkr_feed import get_ibkr_feed
 from data.logger import DataLogger
 from config.archetypes import get_archetype, MODEL_ARCHETYPE_MAP, ARCHETYPES
-from strike_selector import select_strike, StrikeSelection
+from strike_selector import select_strike, StrikeSelection, StrikeSelectionResult
 from heartbeat import emit_heartbeat_async, set_nats_conn, emit_rejection
 
 # ── Notional account size: NEVER use portfolio NAV for sizing. ───────────────
@@ -268,6 +268,23 @@ def _write_publisher_metrics() -> None:
             }, fh)
     except OSError:
         pass  # non-fatal — metrics file is best-effort
+
+def _chain_row_to_dict(r) -> dict:
+    """Serialize an OptionRow to a JSON-safe dict for chain_snapshot storage."""
+    return {
+        "strike": r.strike,
+        "option_type": r.option_type,
+        "volume": r.volume,
+        "open_interest": r.open_interest,
+        "bid": r.bid,
+        "ask": r.ask,
+        "delta": r.delta,
+        "gamma": r.gamma,
+        "theta": r.theta,
+        "vega": r.vega,
+        "iv": r.implied_volatility,
+    }
+
 
 class SignalPublisher:
     """
@@ -744,6 +761,7 @@ async def broadcast_loop():
             strike_meta: StrikeSelection | None = None
             chain_iv = 0.0
             strike = 0.0
+            chain_rows: list = []  # pre-init so exception handler can reference it
 
             try:
                 _nearest = get_chain_cache().nearest_expiry_with_liquidity(min_dte=0)
@@ -756,7 +774,7 @@ async def broadcast_loop():
                     else "LONG_PUT" if opt_type == "PUT" and action == "BUY"
                     else "SHORT_PUT"
                 )
-                strike_meta = select_strike(
+                _sel_result: StrikeSelectionResult = select_strike(
                     chain_rows=chain_rows,
                     archetype_name=archetype_name,
                     spot=spot,
@@ -767,12 +785,41 @@ async def broadcast_loop():
                     max_bid_ask_pct=_LIQ_MAX_SPR,
                     min_absolute_bid=_LIQ_MIN_BID,
                 )
+                strike_meta = _sel_result.selected
                 if strike_meta is None:
                     print(f"[STRIKE-REJECT] {model.name} {opt_type} {archetype_name}: "
                           f"no strike passed all filters (expiry={chain_expiry})")
+                    # Build rich reason_detail from rejection audit
+                    _audit = _sel_result.rejection_audit
+                    _elim = _audit.get("filter_eliminations", {})
+                    _total = _audit.get("total_candidates", 0)
+                    _parts = [f"{k}={v}" for k, v in _elim.items() if v > 0]
+                    _reason_detail = (
+                        f"{_total} candidates rejected: {', '.join(_parts)}"
+                        if _parts else f"{_total} candidates, all rejected by unknown filter"
+                    )
+                    _top20 = sorted(chain_rows, key=lambda r: r.open_interest, reverse=True)[:20]
+                    _macro_str = intel.get("macro_regime", {}).get("regime", "NEUTRAL")
                     emit_rejection(
                         model=model.name, opt_type=opt_type, archetype=archetype_name,
                         reason="no_strike_passed_filters", expiry=chain_expiry,
+                        model_id=model.name,
+                        direction=direction.name,
+                        confidence=confidence,
+                        ticker="TSLA",
+                        option_type=opt_type,
+                        expiration_date=chain_expiry,
+                        reason_code="no_strike_passed_filters",
+                        reason_detail=_reason_detail,
+                        spot_at_rejection=spot,
+                        target_strike_attempted=_sel_result.target_strike_attempted,
+                        chain_snapshot=json.dumps([_chain_row_to_dict(r) for r in _top20]),
+                        strike_selector_breakdown=json.dumps(_audit.get("per_strike", [])),
+                        chop_regime_at_rejection=chop_label,
+                        regime_context=json.dumps({
+                            "macro_regime": _macro_str,
+                            "correlation_regime": corr_regime,
+                        }),
                     )
                     continue
                 strike = strike_meta.strike
@@ -785,9 +832,24 @@ async def broadcast_loop():
                     f"[STRIKE-SELECT-FAIL] {model.name} {opt_type} {archetype_name}: "
                     f"strike_selector raised exception (expiry={chain_expiry}): {_se}"
                 )
+                _macro_str_exc = intel.get("macro_regime", {}).get("regime", "NEUTRAL")
                 emit_rejection(
                     model=model.name, opt_type=opt_type, archetype=archetype_name,
                     reason=f"strike_selector_exception:{_se}", expiry=chain_expiry,
+                    model_id=model.name,
+                    direction=direction.name,
+                    confidence=confidence,
+                    ticker="TSLA",
+                    option_type=opt_type,
+                    expiration_date=chain_expiry,
+                    reason_code="strike_selector_exception",
+                    reason_detail=str(_se),
+                    spot_at_rejection=spot,
+                    chop_regime_at_rejection=chop_label,
+                    regime_context=json.dumps({
+                        "macro_regime": _macro_str_exc,
+                        "correlation_regime": corr_regime,
+                    }),
                 )
                 continue
 
