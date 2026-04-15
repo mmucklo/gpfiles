@@ -431,7 +431,6 @@ export const SystemHealthBadge = ({ summary, onClick, ariaExpanded }: SystemHeal
   if (!summary) return null;
 
   const { total, ok, degraded, error } = summary;
-  const allOk = error === 0 && degraded === 0;
   const anyError = error > 0;
 
   let bg = '#1a7f37';
