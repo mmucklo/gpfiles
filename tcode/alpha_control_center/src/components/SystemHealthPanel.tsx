@@ -424,13 +424,13 @@ export interface HealthSummary {
 export interface SystemHealthBadgeProps {
   summary: HealthSummary | null;
   onClick?: () => void;
+  ariaExpanded?: boolean;
 }
 
-export const SystemHealthBadge = ({ summary, onClick }: SystemHealthBadgeProps) => {
+export const SystemHealthBadge = ({ summary, onClick, ariaExpanded }: SystemHealthBadgeProps) => {
   if (!summary) return null;
 
   const { total, ok, degraded, error } = summary;
-  const allOk = error === 0 && degraded === 0;
   const anyError = error > 0;
 
   let bg = '#1a7f37';
@@ -452,12 +452,10 @@ export const SystemHealthBadge = ({ summary, onClick }: SystemHealthBadgeProps) 
       style={{ background: bg, border: `1px solid ${border}` }}
       onClick={onClick}
       aria-label={`System health: ${label}`}
+      aria-expanded={ariaExpanded}
+      aria-haspopup="dialog"
       data-testid="system-health-badge"
-      title={allOk
-        ? `All ${total} components healthy`
-        : anyError
-        ? `${error} component${error > 1 ? 's' : ''} in ERROR state — click for details`
-        : `${degraded} component${degraded > 1 ? 's' : ''} degraded — click for details`}
+      title="System Health — click for per-component detail"
     >
       {label}
     </button>

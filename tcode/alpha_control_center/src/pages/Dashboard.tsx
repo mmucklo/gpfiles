@@ -4872,6 +4872,8 @@ const RejectionAuditFeed = ({ onOpenPanel }: { onOpenPanel: () => void }) => {
                     fontSize: '0.72rem',
                 }}
                 aria-expanded={open}
+                aria-label={`${open ? 'Collapse' : 'Expand'} recent rejection events`}
+                title="Toggle recent rejection events"
             >
                 <span style={{ transform: open ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s', fontSize: '0.6rem' }}>▶</span>
                 <span>Recent rejection events ({events.length})</span>
