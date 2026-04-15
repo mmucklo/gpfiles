@@ -76,10 +76,10 @@ class TestStrikeSelectionIntegration:
             min_open_interest=100, min_volume_today=10,
             max_bid_ask_pct=0.50, min_absolute_bid=0.05,
         )
-        assert result is not None
-        assert result.strike > 0
-        assert result.greeks_source == "computed_bs"
-        assert result.score > 0
+        assert result.selected is not None
+        assert result.selected.strike > 0
+        assert result.selected.greeks_source == "computed_bs"
+        assert result.selected.score > 0
 
     def test_meta_attached_to_selection(self):
         """StrikeSelection has score_breakdown and liquidity_headroom."""
@@ -90,9 +90,9 @@ class TestStrikeSelectionIntegration:
             min_open_interest=100, min_volume_today=10,
             max_bid_ask_pct=0.50, min_absolute_bid=0.05,
         )
-        assert result is not None
-        assert "delta_fit" in result.score_breakdown
-        assert result.liquidity_headroom["volume"] >= 1.0
+        assert result.selected is not None
+        assert "delta_fit" in result.selected.score_breakdown
+        assert result.selected.liquidity_headroom["volume"] >= 1.0
 
     def test_no_strike_when_all_fail_liquidity(self):
         from strike_selector import select_strike
@@ -104,7 +104,8 @@ class TestStrikeSelectionIntegration:
             min_open_interest=100, min_volume_today=50,
             max_bid_ask_pct=0.50, min_absolute_bid=0.05,
         )
-        assert result is None
+        assert result.selected is None
+        assert result.rejection_audit["filter_eliminations"]["liquidity"] > 0
 
     def test_put_direction_selects_puts(self):
         from strike_selector import select_strike
@@ -114,6 +115,6 @@ class TestStrikeSelectionIntegration:
             min_open_interest=100, min_volume_today=10,
             max_bid_ask_pct=0.50, min_absolute_bid=0.05,
         )
-        if result is not None:
-            assert result.contract_type == "PUT"
-            assert result.delta < 0
+        if result.selected is not None:
+            assert result.selected.contract_type == "PUT"
+            assert result.selected.delta < 0
