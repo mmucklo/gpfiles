@@ -55,9 +55,24 @@ import { Shield, Menu, Home, Share2, Map, HelpCircle } from 'lucide-react';
 import Dashboard from './pages/Dashboard';
 import Architecture from './pages/Architecture';
 import Gastown from './pages/Gastown';
+import RegimeMonitor from './components/RegimeMonitor';
 import { useDataFetching } from './hooks';
 
 const API_BASE = '/api/config';
+
+// ── Phase 16: Market-hours theme ──────────────────────────────────────────────
+// Returns 'open' | 'premarket' | 'afterhours'
+function getMarketState(): 'open' | 'premarket' | 'afterhours' {
+  const now = new Date();
+  const et = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const h = et.getHours(), m = et.getMinutes();
+  const t = h * 60 + m;
+  const wd = et.getDay();
+  if (wd === 0 || wd === 6) return 'afterhours';
+  if (t >= 570 && t < 960) return 'open';       // 9:30–16:00
+  if (t >= 240 && t < 570) return 'premarket';  // 4:00–9:30
+  return 'afterhours';
+}
 
 function App() {
   const [config, setConfig] = useState({
@@ -81,6 +96,21 @@ function App() {
   const [showHealthModal, setShowHealthModal] = useState(false);
 
   const brokerStatus = useDataFetching('/api/broker/status', 10000, null);
+
+  // Phase 16: market-hours theme — update body CSS var every 30s
+  const [marketState, setMarketState] = useState(() => getMarketState());
+  useEffect(() => {
+    const apply = (state: string) => {
+      document.body.dataset.marketState = state;
+    };
+    apply(marketState);
+    const t = setInterval(() => {
+      const s = getMarketState();
+      setMarketState(s);
+      apply(s);
+    }, 30000);
+    return () => clearInterval(t);
+  }, [marketState]);
 
   useEffect(() => {
     fetchConfig();
@@ -403,6 +433,37 @@ function App() {
         )}
 
         <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+            {/* Phase 16: Regime monitor badge + market state */}
+            <RegimeMonitor compact />
+            {(() => {
+              const stateConfig = {
+                open:       { label: 'MARKET OPEN',  color: '#3fb950', bg: 'rgba(63,185,80,0.12)', dot: true },
+                premarket:  { label: 'PRE-MARKET',   color: '#79c0ff', bg: 'rgba(121,192,255,0.12)', dot: false },
+                afterhours: { label: 'AFTER HOURS',  color: '#d29922', bg: 'rgba(210,153,34,0.12)', dot: false },
+              }[marketState];
+              return (
+                <span
+                  data-testid="market-state-badge"
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', gap: '0.3rem',
+                    padding: '0.2rem 0.6rem', borderRadius: '5px', fontSize: '0.72rem',
+                    fontWeight: 700, letterSpacing: '0.06em',
+                    color: stateConfig.color, background: stateConfig.bg,
+                    border: `1px solid ${stateConfig.color}30`,
+                  }}
+                  aria-label={`Market state: ${marketState}`}
+                >
+                  {stateConfig.dot && (
+                    <span style={{
+                      width: 6, height: 6, borderRadius: '50%', background: stateConfig.color,
+                      flexShrink: 0, animation: 'market-open-pulse 2s ease-in-out infinite',
+                    }} />
+                  )}
+                  {stateConfig.label}
+                </span>
+              );
+            })()}
+
             {/* Integrity Status — three traffic lights */}
             <IntegrityStatus onStatusChange={handleIntegrityChange} />
 

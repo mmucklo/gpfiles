@@ -62,6 +62,14 @@ _CHOP_CACHE_TTL = 60
 STALENESS_MAX_SECONDS = 300  # 5 minutes
 DIVERGENCE_MAX_PCT = 0.5     # 0.5% max IBKR vs TV divergence
 
+# ── Phase 16: Human-in-the-loop approval queue ───────────────────────────────
+# When HUMAN_APPROVAL_REQUIRED=1 (default), signals are emitted to
+# tsla.alpha.proposals (with TTL) instead of tsla.alpha.signals.
+# The Go engine holds proposals in an approval queue; the user must click
+# EXECUTE before an order is placed.
+HUMAN_APPROVAL_REQUIRED: bool = os.getenv("HUMAN_APPROVAL_REQUIRED", "1") == "1"
+PROPOSAL_TTL_SEC: int = int(os.getenv("PROPOSAL_TTL_SEC", "60"))
+
 def check_data_gates(spot_sources: dict) -> tuple[bool, str]:
     """Return (ok, reason). If not ok, do not publish signal."""
     import time
@@ -353,11 +361,83 @@ class SignalPublisher:
             "strike_selection_meta": getattr(signal, "strike_selection_meta", None),
         }
         
-        await self.nc.publish("tsla.alpha.signals", json.dumps(payload).encode())
+        if HUMAN_APPROVAL_REQUIRED:
+            # Phase 16: emit to proposals subject — human must click EXECUTE
+            import uuid as _uuid
+            from datetime import timezone as _tz
+            from datetime import datetime as _dt
+            proposal_id = str(_uuid.uuid4())
+            now_iso = _dt.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            expires_iso = _dt.fromtimestamp(
+                _dt.now(_tz.utc).timestamp() + PROPOSAL_TTL_SEC, tz=_tz.utc
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            # Fetch regime snapshot for context
+            regime_snapshot: dict = {}
+            try:
+                from regime_classifier import get_cached
+                regime_snapshot = get_cached() or {}
+            except Exception:
+                pass
+
+            # Determine strategy label from strategy_code
+            _strategy_label_map = {
+                "STRAT-001": "GAMMA_SCALP",
+                "STRAT-002": "MOMENTUM",
+                "STRAT-003": "MOMENTUM",
+                "STRAT-004": "MOMENTUM",
+                "STRAT-005": "WAVE_RIDER",
+                "STRAT-006": "MOMENTUM",
+                "STRAT-007": "MOMENTUM",
+            }
+            strategy_label = _strategy_label_map.get(
+                str(payload.get("strategy_code", "")).split(" ")[0],
+                regime_snapshot.get("recommended_strategy", "MOMENTUM"),
+            )
+
+            # Build leg spec (single-leg for now; multi-leg added by ibkr_order.py)
+            legs = [{
+                "strike": payload.get("recommended_strike"),
+                "type": payload.get("option_type", "CALL"),
+                "action": payload.get("action", "BUY"),
+                "quantity": payload.get("quantity", 1),
+                "fill_price": None,  # filled on execute
+            }]
+            if payload.get("is_spread") and payload.get("long_strike"):
+                legs.append({
+                    "strike": payload.get("long_strike"),
+                    "type": payload.get("option_type", "CALL"),
+                    "action": "SELL" if payload.get("action") == "BUY" else "BUY",
+                    "quantity": payload.get("quantity", 1),
+                    "fill_price": None,
+                })
+
+            proposal = {
+                "id": proposal_id,
+                "ts_created": now_iso,
+                "ts_expires": expires_iso,
+                "status": "pending",
+                "strategy": strategy_label,
+                "direction": payload.get("direction", "BULLISH"),
+                "legs": legs,
+                "entry_price": payload.get("target_limit_price"),
+                "stop_price": payload.get("stop_loss_price"),
+                "target_price": payload.get("take_profit_price"),
+                "kelly_fraction": payload.get("kelly_wager_pct"),
+                "quantity": payload.get("quantity"),
+                "confidence": payload.get("confidence"),
+                "regime_snapshot": regime_snapshot,
+                "signals_contributing": [payload.get("model_id", "")],
+                "raw_signal": payload,
+            }
+            await self.nc.publish("tsla.alpha.proposals", json.dumps(proposal).encode())
+        else:
+            await self.nc.publish("tsla.alpha.signals", json.dumps(payload).encode())
+
         # Update Task 2 Metrics
         SIGNAL_SENT_COUNT.inc()
         SIGNAL_CONFIDENCE_GAUGE.set(signal.confidence)
-        
+
         # Ensure message is dispatched
         await self.nc.flush()
 

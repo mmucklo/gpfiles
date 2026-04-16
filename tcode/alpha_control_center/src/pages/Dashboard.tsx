@@ -7,6 +7,10 @@ import { SkeletonCard, SkeletonTable } from '../components/SkeletonLoader';
 import { computeEconomics, formatRR, rrColorClass } from '../lib/signal_economics';
 import TermLabel from '../components/TermLabel';
 import RejectedSignalsPanel from '../components/RejectedSignalsPanel';
+// Phase 16: Intraday Cockpit panels
+import MorningBriefing from '../components/MorningBriefing';
+import TradeApprovalQueue from '../components/TradeApprovalQueue';
+import LivePnLPanel from '../components/LivePnLPanel';
 
 // ============================================================
 //  Types
@@ -5361,6 +5365,29 @@ const Dashboard = ({ brokerStatus, integrityRed = false }: { brokerStatus: Broke
             >
                 <PreMarketPanel intel={intel} isLoading={intelLoading} />
             </CollapsiblePanel>
+
+            {/* ── Phase 16: Intraday Cockpit ───────────────────────────────── */}
+            <CollapsiblePanel
+                storageKey="dashboard_morning_briefing_open"
+                title="🌅 MORNING BRIEFING — REGIME & STRATEGY"
+            >
+                <MorningBriefing />
+            </CollapsiblePanel>
+
+            <CollapsiblePanel
+                storageKey="dashboard_approval_queue_open"
+                title="⚡ TRADE APPROVAL QUEUE — HUMAN IN THE LOOP"
+            >
+                <TradeApprovalQueue brokerMode={brokerStatus?.mode} />
+            </CollapsiblePanel>
+
+            <CollapsiblePanel
+                storageKey="dashboard_pnl_open"
+                title="💰 LIVE P&L — TODAY"
+            >
+                <LivePnLPanel />
+            </CollapsiblePanel>
+            {/* ──────────────────────────────────────────────────────────────── */}
 
             {/* Zone 2: 4-Column Trading Grid */}
             <div className="dashboard-grid">

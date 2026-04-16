@@ -1354,6 +1354,443 @@ Each gate elimination is recorded in the \`strike_selector_breakdown\` JSON blob
     related: ["STRIKE_SELECT_FAIL", "LIQUIDITY_REJECT", "GREEKS_UNAVAILABLE"],
     phase_note: "Concept formalized in Phase 14.3 drill-down UI.",
   },
+
+  // ── Phase 16: Intraday Cockpit ─────────────────────────────────────────────
+
+  IRON_CONDOR: {
+    term: "IRON_CONDOR",
+    display: "Iron Condor",
+    short: "4-leg strategy: sell OTM call spread + sell OTM put spread. Profits when the underlying stays in a range.",
+    long: `**Iron Condor** collects premium by selling two spreads:
+- SELL OTM put + BUY further OTM put (put spread)
+- SELL OTM call + BUY further OTM call (call spread)
+
+Max profit = net credit (underlying expires between short strikes).
+Max loss = wider spread width − net credit.
+
+Best in: flat/ranging markets, after earnings IV crush, low-VIX environments.`,
+    formula: "max_gain = net_credit × 100 × qty; max_loss = (spread_width − net_credit) × 100 × qty",
+    trading_impact: "Recommended regime: FLAT. Theta positive — time decay earns premium each day.",
+    related: ["JADE_LIZARD", "STRADDLE", "REGIME_CLASSIFIER", "NET_CREDIT", "MAX_LOSS"],
+  },
+
+  VERTICAL_SPREAD: {
+    term: "VERTICAL_SPREAD",
+    display: "Vertical Spread",
+    short: "2-leg directional play: buy one strike, sell another same expiry. Defined risk with capped upside.",
+    long: `**Vertical Spread** is a directional trade with defined risk:
+- **Call debit spread** (bullish): BUY lower call, SELL higher call → pay net debit
+- **Put debit spread** (bearish): BUY higher put, SELL lower put → pay net debit
+
+Max loss = debit paid. Max gain = spread width − debit.`,
+    formula: "max_loss = debit × 100 × qty; max_gain = (strike_width − debit) × 100 × qty",
+    trading_impact: "Recommended regime: TRENDING. Directional plays with risk-defined structure.",
+    related: ["MOMENTUM", "IRON_CONDOR", "NET_DEBIT"],
+  },
+
+  JADE_LIZARD: {
+    term: "JADE_LIZARD",
+    display: "Jade Lizard",
+    short: "3-leg: short put + short call spread. Net credit > call spread width eliminates all upside risk.",
+    long: `**Jade Lizard** combines a short put with a short call spread:
+- SELL OTM put
+- SELL OTM call + BUY further OTM call
+
+When net_credit > call_spread_width → **zero upside risk**. Only downside risk remains if stock collapses below the short put.
+
+Best in: slightly bullish outlook, willing to own the stock if assigned.`,
+    formula: "no_upside_risk = net_credit > call_spread_width",
+    trading_impact: "Recommended regime: FLAT / slightly bullish. More premium than condor in mild bull markets.",
+    related: ["IRON_CONDOR", "STRADDLE", "NET_CREDIT"],
+  },
+
+  STRADDLE: {
+    term: "STRADDLE",
+    display: "Straddle",
+    short: "Buy ATM call + ATM put. Profits when the underlying makes a large move in either direction.",
+    long: `**Long Straddle**: Buy ATM call + ATM put at same strike and expiry.
+
+Profits when stock moves significantly (earnings, FOMC, major catalyst).
+Loses when stock stays flat and IV crush destroys premium.
+
+**Short Straddle**: sell both — profits from time decay in calm markets (high risk).`,
+    formula: "breakeven_up = strike + debit; breakeven_down = strike − debit",
+    trading_impact: "Recommended regime: EVENT_DRIVEN. Place before catalysts, exit after the move.",
+    related: ["IRON_CONDOR", "REGIME_CLASSIFIER", "CATALYST_CALENDAR"],
+  },
+
+  GAMMA_SCALP: {
+    term: "GAMMA_SCALP",
+    display: "Gamma Scalp",
+    short: "Long ATM options + repeated delta-hedging to harvest gamma P&L from intraday volatility.",
+    long: `**Gamma Scalp**: buy ATM options (long gamma), continuously delta-hedge to zero. Each stock move generates P&L via the gamma term.
+
+Profitable when realized vol > implied vol (options are cheap).
+Requires active management every 15–30 min.
+Theta (time decay) is the cost — gamma P&L must exceed it.`,
+    formula: "daily_gamma_pnl ≈ 0.5 × gamma × (Δspot)²; must exceed daily_theta_cost",
+    trading_impact: "Recommended regime: TRENDING (vol expanding). Advanced strategy, high touch.",
+    related: ["STRADDLE", "IRON_CONDOR"],
+  },
+
+  WAVE_RIDER: {
+    term: "WAVE_RIDER",
+    display: "Wave Rider",
+    short: "Mean-reversion scalp: fade short-term extremes with defined risk in choppy conditions.",
+    long: `**Wave Rider** fades short-term price extremes:
+1. Identify overbought/oversold (RSI, VWAP deviation)
+2. Enter contra the move with defined-risk spreads
+3. Target 30–60 min hold, exit at first reversion signal
+
+Best in CHOPPY / MIXED regimes. Trending markets will run against the fade — use ATR stops.`,
+    trading_impact: "Recommended regime: CHOPPY. Tight stops required — don't let fades become bagholders.",
+    related: ["IRON_CONDOR", "MOMENTUM", "REGIME_CLASSIFIER"],
+  },
+
+  MOMENTUM: {
+    term: "MOMENTUM",
+    display: "Momentum",
+    short: "Directional options play (calls or puts) riding a confirmed intraday trend with ATR-based stops.",
+    long: `**Momentum** rides an established intraday trend:
+- Long calls in uptrends (price > VWAP, volume confirms)
+- Long puts in downtrends
+- ATR-based stop loss for defined risk
+- Target: trend continuation or first sign of exhaustion
+
+Best in TRENDING regime, post-open breakouts, gap-and-go setups.`,
+    trading_impact: "Recommended regime: TRENDING. Kelly sizing scales with regime confidence.",
+    related: ["WAVE_RIDER", "REGIME_CLASSIFIER", "ATR_STOP"],
+  },
+
+  TRADE_PROPOSAL: {
+    term: "TRADE_PROPOSAL",
+    display: "Trade Proposal",
+    short: "A signal that passed all engine gates — waits for your EXECUTE click before any order reaches IBKR.",
+    long: `**Trade Proposal** is the human-in-the-loop gate added in Phase 16.
+
+Every qualifying signal is held in the approval queue until you act:
+- Strategy, direction, legs, entry/stop/target prices
+- Kelly sizing (contracts, dollar risk)
+- Confidence score + regime at proposal time
+- Contributing signal sources
+
+Click **EXECUTE** to place the order. Proposals expire after 60 seconds if unacted.`,
+    related: ["APPROVAL_QUEUE", "PROPOSAL_TTL", "KELLY_FRACTION"],
+  },
+
+  APPROVAL_QUEUE: {
+    term: "APPROVAL_QUEUE",
+    display: "Approval Queue",
+    short: "The Trade Approval Queue panel — pending trade proposals awaiting EXECUTE or SKIP.",
+    long: `**Approval Queue** shows all pending proposals from the engine.
+
+**Actions per card:**
+- **EXECUTE**: places order immediately via IBKR
+- **SKIP**: dismisses (logged as skipped)
+- **ADJUST**: modify contracts, stops, or strategy before executing
+
+Expired proposals (> 60s old) are greyed with reason. Running totals show pending / executed / skipped counts.`,
+    related: ["TRADE_PROPOSAL", "PROPOSAL_TTL"],
+  },
+
+  PROPOSAL_TTL: {
+    term: "PROPOSAL_TTL",
+    display: "Proposal TTL",
+    short: "Time-to-live for a trade proposal (default 60s). After expiry the proposal is dismissed — price has moved.",
+    long: `**Proposal TTL** limits how long a trade proposal stays valid.
+
+Default: **60 seconds** (PROPOSAL_TTL_SEC env var).
+
+After the TTL, the proposal expires automatically — the signal conditions (entry price, spread) are no longer valid.`,
+    formula: "ts_expires = ts_created + PROPOSAL_TTL_SEC",
+    related: ["TRADE_PROPOSAL", "APPROVAL_QUEUE"],
+  },
+
+  ATR_STOP: {
+    term: "ATR_STOP",
+    display: "ATR Stop",
+    short: "Stop loss set as a multiple of ATR (Average True Range) — wider in volatile markets, tighter when calm.",
+    long: `**ATR Stop** adapts to market volatility:
+
+stop_distance = multiplier × ATR(14)
+
+Example: if ATR = $2.50 and multiplier = 1.5×, stop is $3.75 below entry.
+
+**Advantage**: avoids premature stops in volatile markets while keeping tight stops in calm conditions.`,
+    formula: "stop_distance = multiplier × ATR(14); ATR = Wilder's moving average of True Range over 14 periods",
+    trading_impact: "Used in MOMENTUM proposals. Default multiplier: 1.5× (configurable per archetype).",
+    related: ["TRAILING_STOP", "TIME_STOP"],
+  },
+
+  TRAILING_STOP: {
+    term: "TRAILING_STOP",
+    display: "Trailing Stop",
+    short: "Stop that moves up with the price as a trade profits — locks in gains while letting winners run.",
+    long: `**Trailing Stop** ratchets up with the trade:
+
+Entry $2.00, initial stop $1.50. As price rises to $3.00, stop moves to $2.25 (25% trail). Stop never moves back down.
+
+The asymmetric ratchet lets you capture extended moves while protecting accumulated gains.`,
+    related: ["ATR_STOP", "TIME_STOP"],
+  },
+
+  TIME_STOP: {
+    term: "TIME_STOP",
+    display: "Time Stop",
+    short: "Exit a position at a specific time (e.g., 15:45 ET) regardless of P&L to avoid overnight risk.",
+    long: `**Time Stop** exits by the clock, not by price:
+
+- 0DTE positions: exit by 15:45 ET before close
+- Scalps: exit after 60 min if neither TP nor SL triggered
+
+Prevents overnight risk on options that expire worthless if held.`,
+    related: ["ATR_STOP", "TRAILING_STOP"],
+  },
+
+  DAILY_PNL_TARGET: {
+    term: "DAILY_PNL_TARGET",
+    display: "Daily P&L Target",
+    short: "The session's profit goal ($10,000). The progress bar shows how far you are toward this target.",
+    long: `**Daily P&L Target** is the goal for the trading day: **$10,000**.
+
+The Live P&L panel shows a motivating progress bar toward this target. When hit, the system flags it and optionally halts new proposals to lock the gain.
+
+Configured via DAILY_PNL_TARGET env var (default $10,000).`,
+    formula: "target_pct = (total_pnl / daily_target) × 100",
+    related: ["CIRCUIT_BREAKER", "KELLY_FRACTION", "WATERFALL_CHART"],
+  },
+
+  CIRCUIT_BREAKER: {
+    term: "CIRCUIT_BREAKER",
+    display: "Circuit Breaker",
+    short: "Automatic trading halt when daily losses exceed the limit (-$2,500 default). No new proposals until tomorrow.",
+    long: `**Circuit Breaker** is a hard stop on further trading when the daily loss limit is hit.
+
+Default: -$2,500/day (DAILY_LOSS_LIMIT env var).
+
+**Guardrail bar colors:**
+- Green: < 50% of limit used
+- Amber: 50–75% used
+- Red: 75–90% used
+- Flashing: > 90% (imminent trip)
+- TRIGGERED: no new trades until tomorrow
+
+Resets at midnight ET.`,
+    formula: "trip_condition = total_daily_pnl ≤ DAILY_LOSS_LIMIT",
+    related: ["DAILY_PNL_TARGET", "CONSECUTIVE_LOSS_LIMIT"],
+  },
+
+  CONSECUTIVE_LOSS_LIMIT: {
+    term: "CONSECUTIVE_LOSS_LIMIT",
+    display: "Consecutive Loss Limit",
+    short: "Halts trading after 3 consecutive losing trades — prevents revenge trading spiral.",
+    long: `**Consecutive Loss Limit** counts losses in a row. After 3 consecutive losses, no new proposals are generated until the next day or a manual reset.
+
+The counter resets to 0 on any winning trade.
+
+**Purpose**: prevent the revenge-trading cycle where each loss spawns increasingly reckless trades.`,
+    formula: "halt = consecutive_loss_count >= 3",
+    related: ["CIRCUIT_BREAKER", "DAILY_PNL_TARGET"],
+  },
+
+  REGIME_CLASSIFIER: {
+    term: "REGIME_CLASSIFIER",
+    display: "Regime Classifier",
+    short: "Classifies the day's trading environment from 7 signals: TRENDING, FLAT, CHOPPY, EVENT_DRIVEN, or UNCERTAIN.",
+    long: `**Regime Classifier** runs at market open and every 30 min, scoring 7 factors:
+
+1. Pre-market bias (NQ/ES futures, Asia/Europe)
+2. Macro regime (VIX, SPY trend)
+3. VIX term structure
+4. Correlation regime (TSLA vs QQQ)
+5. Intraday chop score
+6. EV sector divergence
+7. Catalyst calendar
+
+The composite score maps to one of 5 regimes, each with a strategy recommendation.`,
+    trading_impact: "Regime drives strategy selection, Kelly multiplier, and chop gating.",
+    related: ["MORNING_BRIEFING", "STRATEGY_LOCK", "MACRO_REGIME"],
+  },
+
+  MORNING_BRIEFING: {
+    term: "MORNING_BRIEFING",
+    display: "Morning Briefing",
+    short: "Pre-market panel: regime classification, one-click strategy selector, and catalyst calendar.",
+    long: `**Morning Briefing** is the cockpit's opening panel. Components:
+
+- **Regime Classification**: today's regime + confidence + factor breakdown
+- **Strategy Selector**: one-click buttons for each strategy (system highlights its recommendation)
+- **Catalyst Calendar**: today's events with impact levels and countdowns
+- **Daily Game Plan**: free-text for your personal morning thesis
+
+Refreshes every 30 min during market hours.`,
+    related: ["REGIME_CLASSIFIER", "STRATEGY_LOCK", "CATALYST_CALENDAR"],
+  },
+
+  STRATEGY_LOCK: {
+    term: "STRATEGY_LOCK",
+    display: "Strategy Lock",
+    short: "Confirms your selected strategy for the session. Mid-day changes require an explicit pivot action.",
+    long: `**Strategy Lock** prevents accidental mid-day strategy switches.
+
+After clicking a strategy button and locking:
+- All proposals use this strategy's parameters
+- Changing requires clicking a different strategy + explicitly re-locking
+- The locked strategy shows in the header badge
+
+Strategy pivots are intentional — the UI requires active confirmation.`,
+    related: ["MORNING_BRIEFING", "REGIME_CLASSIFIER", "TRADE_PROPOSAL"],
+  },
+
+  CATALYST_CALENDAR: {
+    term: "CATALYST_CALENDAR",
+    display: "Catalyst Calendar",
+    short: "Today's scheduled market-moving events: earnings, FOMC decisions, and other major catalysts.",
+    long: `**Catalyst Calendar** lists events expected to impact TSLA and broader markets today.
+
+Sources:
+- yfinance earnings calendar (TSLA + major names)
+- FOMC calendar (FOMC_DATE env var)
+- Custom catalysts (CUSTOM_CATALYSTS_TODAY env var)
+
+Impact levels: **high** (market-moving), **medium**, **low**.
+Countdown shows time until each event.
+
+High-impact events push regime toward EVENT_DRIVEN and recommend STRADDLE strategy.`,
+    related: ["MORNING_BRIEFING", "REGIME_CLASSIFIER", "STRADDLE"],
+  },
+
+  WATERFALL_CHART: {
+    term: "WATERFALL_CHART",
+    display: "Waterfall Chart",
+    short: "Bar chart where each bar = one trade — shows how P&L built through the day.",
+    long: `**Waterfall Chart** is the visual story of the trading day.
+
+Each bar = one executed trade:
+- Green bar: winning trade
+- Red bar: losing trade
+- X-axis: time of day
+- Y-axis: cumulative P&L
+
+Hover any bar for trade details. The waterfall shows **how** you made or lost money, not just the final number.`,
+    related: ["DAILY_PNL_TARGET", "CIRCUIT_BREAKER"],
+  },
+
+  KELLY_FRACTION: {
+    term: "KELLY_FRACTION",
+    display: "Kelly Fraction",
+    short: "Optimal bet size as % of account from edge (confidence) and payoff ratio. System uses fractional Kelly.",
+    long: `**Kelly Fraction** is the mathematically optimal position size.
+
+Formula: f = (b×p − q) / b
+- b = net payoff ratio (reward ÷ risk)
+- p = win probability (model confidence)
+- q = 1 − p
+
+The system uses **25–50% of full Kelly** (fractional Kelly) to account for model uncertainty.`,
+    formula: "kelly_f = (b×p − q) / b; position_size = fractional_kelly × f × notional",
+    trading_impact: "Higher confidence → larger size. RISK_OFF regime multiplier halves Kelly sizing.",
+    related: ["DAILY_PNL_TARGET", "TRADE_PROPOSAL", "FRACTIONAL_KELLY"],
+  },
+
+  COMBO_LEG: {
+    term: "COMBO_LEG",
+    display: "Combo Leg",
+    short: "One leg of a multi-leg options order — strike, type (call/put), action (buy/sell), quantity, conId.",
+    long: `**Combo Leg** is how IBKR represents each component of a multi-leg trade.
+
+Required fields:
+- conId: IBKR's unique contract ID (qualified via reqContractDetails)
+- ratio: quantity multiplier (usually 1)
+- action: BUY or SELL
+- exchange: SMART
+
+All legs together form a BAG contract for atomic execution.`,
+    related: ["IRON_CONDOR", "JADE_LIZARD", "VERTICAL_SPREAD", "BAG_CONTRACT"],
+  },
+
+  BAG_CONTRACT: {
+    term: "BAG_CONTRACT",
+    display: "BAG Contract",
+    short: "IBKR combo contract for multi-leg strategies — secType='BAG'. All legs execute atomically at net price.",
+    long: `**BAG Contract** is IBKR's mechanism for multi-leg strategies (condors, spreads, jade lizards).
+
+secType = "BAG", comboLegs[] lists each leg's conId, ratio, action, exchange.
+
+IBKR fills all legs or none — no partial fills that leave you with naked positions.`,
+    related: ["COMBO_LEG", "IRON_CONDOR", "JADE_LIZARD"],
+  },
+
+  NET_CREDIT: {
+    term: "NET_CREDIT",
+    display: "Net Credit",
+    short: "Premium received when selling a multi-leg strategy. Your maximum gain if the underlying stays in range.",
+    long: `**Net Credit** is the premium collected when opening a credit strategy (condor, jade lizard).
+
+For a condor collecting $1.20/contract:
+- You receive $120/contract upfront
+- Max gain = $120/contract
+- Max loss = (spread_width − $1.20) × $100
+
+The credit is your buffer: stock can move against you by up to this amount and you still profit.`,
+    related: ["IRON_CONDOR", "JADE_LIZARD", "MAX_LOSS", "MAX_GAIN", "NET_DEBIT"],
+  },
+
+  NET_DEBIT: {
+    term: "NET_DEBIT",
+    display: "Net Debit",
+    short: "Premium paid for a long spread or straddle. Your maximum loss if the trade goes completely against you.",
+    long: `**Net Debit** is what you pay to enter a long-options strategy.
+
+For a call spread paying $0.80/contract:
+- You pay $80/contract
+- Max loss = $80/contract (both options expire worthless)
+- Max gain = (spread_width − $0.80) × $100`,
+    related: ["VERTICAL_SPREAD", "STRADDLE", "NET_CREDIT"],
+  },
+
+  MAX_LOSS: {
+    term: "MAX_LOSS",
+    display: "Max Loss",
+    short: "The worst-case dollar loss if the trade goes completely against you — always defined for spread strategies.",
+    long: `**Max Loss** is the absolute worst outcome for a defined-risk trade.
+
+- Long vertical: net_debit × 100 × qty
+- Iron condor: (wider_spread_width − net_credit) × 100 × qty
+- Jade lizard: (short_put_strike − net_credit) × 100 × qty
+
+All spread strategies have a hard max loss — you know your risk before entry.`,
+    related: ["MAX_GAIN", "NET_CREDIT", "NET_DEBIT", "KELLY_FRACTION"],
+  },
+
+  MAX_GAIN: {
+    term: "MAX_GAIN",
+    display: "Max Gain",
+    short: "The best-case dollar profit if the trade goes perfectly in your favor at expiry.",
+    long: `**Max Gain** is the maximum profit from a defined-risk strategy.
+
+- Long vertical: (spread_width − net_debit) × 100 × qty
+- Iron condor / jade lizard: net_credit × 100 × qty
+
+For credit strategies, max gain requires the stock to expire between the short strikes.`,
+    related: ["MAX_LOSS", "NET_CREDIT", "NET_DEBIT"],
+  },
+
+  POP: {
+    term: "POP",
+    display: "POP",
+    short: "Probability of Profit — statistical estimate the trade expires profitable, derived from option delta.",
+    long: `**Probability of Profit (POP)** estimates the likelihood of a profitable expiry.
+
+For a short option: POP ≈ 1 − |delta| of the sold strike.
+Example: sell 0.20-delta call → POP ≈ 80%.
+
+Multi-leg structures combine the individual probabilities.
+
+**Caveat**: POP assumes log-normal distribution. Real markets have fat tails — earnings, catalysts, and black swans occur more often than Black-Scholes implies.`,
+    formula: "POP_short_option ≈ 1 − |delta_sold|",
+    related: ["IRON_CONDOR", "NET_CREDIT", "KELLY_FRACTION"],
+  },
 };
 
 /**

@@ -959,6 +959,280 @@ def global_cancel(host: str, port: int, client_id: int) -> dict:
         _disconnect(ib)
 
 
+# ── Phase 16: Multi-leg order support ────────────────────────────────────────
+
+
+def _qualify_option_con_id(ib, symbol: str, strike: float, right: str, expiry: str) -> int:
+    """
+    Qualify a single option contract and return its conId.
+    Required before building ComboLeg objects.
+    """
+    from ib_insync import Option
+    contract = Option(symbol, _expiry_to_ib(expiry), strike, right, "SMART")
+    qualified = ib.qualifyContracts(contract)
+    if not qualified:
+        raise ValueError(
+            f"Could not qualify {symbol} {strike} {right} {expiry} — check symbol/expiry"
+        )
+    return qualified[0].conId
+
+
+def _build_bag_contract(symbol: str, legs: list[dict]) -> "Contract":
+    """
+    Build an IBKR BAG (combo) contract from a list of leg dicts:
+      {conId, ratio, action, exchange}
+    """
+    from ib_insync import Contract, ComboLeg
+    bag = Contract()
+    bag.symbol   = symbol
+    bag.secType  = "BAG"
+    bag.currency = "USD"
+    bag.exchange = "SMART"
+    bag.comboLegs = []
+    for leg in legs:
+        combo_leg = ComboLeg()
+        combo_leg.conId    = leg["conId"]
+        combo_leg.ratio    = leg.get("ratio", 1)
+        combo_leg.action   = leg["action"]   # "BUY" | "SELL"
+        combo_leg.exchange = leg.get("exchange", "SMART")
+        bag.comboLegs.append(combo_leg)
+    return bag
+
+
+def place_condor(
+    host: str,
+    port: int,
+    client_id: int,
+    symbol: str,
+    expiry: str,
+    sell_put: float,
+    buy_put: float,
+    sell_call: float,
+    buy_call: float,
+    quantity: int,
+    net_credit_limit: float = 0.0,
+) -> dict:
+    """
+    Place an iron condor (4-leg combo):
+      SELL put@sell_put, BUY put@buy_put, SELL call@sell_call, BUY call@buy_call.
+
+    Returns JSON with legOrderIds, netCredit, maxLoss, maxGain.
+    """
+    from ib_insync import LimitOrder
+
+    ib = _connect(host, port, client_id)
+    try:
+        sell_put_id  = _qualify_option_con_id(ib, symbol, sell_put,  "P", expiry)
+        buy_put_id   = _qualify_option_con_id(ib, symbol, buy_put,   "P", expiry)
+        sell_call_id = _qualify_option_con_id(ib, symbol, sell_call, "C", expiry)
+        buy_call_id  = _qualify_option_con_id(ib, symbol, buy_call,  "C", expiry)
+
+        legs = [
+            {"conId": sell_put_id,  "ratio": 1, "action": "SELL"},
+            {"conId": buy_put_id,   "ratio": 1, "action": "BUY"},
+            {"conId": sell_call_id, "ratio": 1, "action": "SELL"},
+            {"conId": buy_call_id,  "ratio": 1, "action": "BUY"},
+        ]
+        bag = _build_bag_contract(symbol, legs)
+
+        put_width  = sell_put  - buy_put
+        call_width = buy_call  - sell_call
+        max_loss   = round((max(put_width, call_width) - net_credit_limit) * 100 * quantity, 2)
+        max_gain   = round(net_credit_limit * 100 * quantity, 2)
+
+        if net_credit_limit <= 0:
+            from ib_insync import MarketOrder
+            order = MarketOrder("BUY", quantity)
+        else:
+            order = LimitOrder("BUY", quantity, net_credit_limit)
+            order.tif = "DAY"
+
+        trade = ib.placeOrder(bag, order)
+        ib.sleep(ORDER_WAIT_SEC)
+
+        order_id = trade.order.orderId
+        logger.info(
+            "place_condor: orderId=%d symbol=%s expiry=%s quantity=%d",
+            order_id, symbol, expiry, quantity,
+        )
+
+        result = {
+            "order_id":      order_id,
+            "strategy":      "IRON_CONDOR",
+            "symbol":        symbol,
+            "expiry":        expiry,
+            "legs": [
+                {"role": "sell_put",   "strike": sell_put,  "conId": sell_put_id},
+                {"role": "buy_put",    "strike": buy_put,   "conId": buy_put_id},
+                {"role": "sell_call",  "strike": sell_call, "conId": sell_call_id},
+                {"role": "buy_call",   "strike": buy_call,  "conId": buy_call_id},
+            ],
+            "quantity":      quantity,
+            "net_credit":    net_credit_limit,
+            "max_loss":      max_loss,
+            "max_gain":      max_gain,
+            "status":        trade.orderStatus.status,
+            "timestamp":     _now_iso(),
+        }
+        logger.info("place_condor result: %s", json.dumps(result))
+        return result
+    finally:
+        _disconnect(ib)
+
+
+def place_vertical(
+    host: str,
+    port: int,
+    client_id: int,
+    symbol: str,
+    expiry: str,
+    buy_strike: float,
+    sell_strike: float,
+    option_type: str,
+    quantity: int,
+    net_debit_limit: float = 0.0,
+) -> dict:
+    """
+    Place a vertical spread (2-leg combo):
+      BUY option@buy_strike, SELL option@sell_strike.
+
+    For a call debit spread: buy_strike < sell_strike.
+    For a put debit spread:  buy_strike > sell_strike.
+    Returns JSON with orderIds, maxLoss, maxGain.
+    """
+    from ib_insync import LimitOrder
+
+    right = _right(option_type)
+    ib = _connect(host, port, client_id)
+    try:
+        buy_con_id  = _qualify_option_con_id(ib, symbol, buy_strike,  right, expiry)
+        sell_con_id = _qualify_option_con_id(ib, symbol, sell_strike, right, expiry)
+
+        legs = [
+            {"conId": buy_con_id,  "ratio": 1, "action": "BUY"},
+            {"conId": sell_con_id, "ratio": 1, "action": "SELL"},
+        ]
+        bag = _build_bag_contract(symbol, legs)
+
+        width   = abs(buy_strike - sell_strike)
+        max_loss = round(net_debit_limit * 100 * quantity, 2) if net_debit_limit > 0 else round(width * 100 * quantity, 2)
+        max_gain = round((width - net_debit_limit) * 100 * quantity, 2) if net_debit_limit > 0 else 0.0
+
+        if net_debit_limit <= 0:
+            from ib_insync import MarketOrder
+            order = MarketOrder("BUY", quantity)
+        else:
+            order = LimitOrder("BUY", quantity, net_debit_limit)
+            order.tif = "DAY"
+
+        trade = ib.placeOrder(bag, order)
+        ib.sleep(ORDER_WAIT_SEC)
+
+        order_id = trade.order.orderId
+        logger.info(
+            "place_vertical: orderId=%d symbol=%s %s expiry=%s quantity=%d",
+            order_id, symbol, option_type, expiry, quantity,
+        )
+
+        result = {
+            "order_id":       order_id,
+            "strategy":       "VERTICAL",
+            "symbol":         symbol,
+            "expiry":         expiry,
+            "option_type":    option_type.upper(),
+            "legs": [
+                {"role": "buy",  "strike": buy_strike,  "conId": buy_con_id},
+                {"role": "sell", "strike": sell_strike, "conId": sell_con_id},
+            ],
+            "quantity":       quantity,
+            "net_debit":      net_debit_limit,
+            "max_loss":       max_loss,
+            "max_gain":       max_gain,
+            "status":         trade.orderStatus.status,
+            "timestamp":      _now_iso(),
+        }
+        logger.info("place_vertical result: %s", json.dumps(result))
+        return result
+    finally:
+        _disconnect(ib)
+
+
+def place_jade_lizard(
+    host: str,
+    port: int,
+    client_id: int,
+    symbol: str,
+    expiry: str,
+    sell_put: float,
+    sell_call: float,
+    buy_call: float,
+    quantity: int,
+    net_credit_limit: float = 0.0,
+) -> dict:
+    """
+    Place a jade lizard (3-leg: short put + short call spread):
+      SELL put@sell_put, SELL call@sell_call, BUY call@buy_call.
+    Net credit must exceed the call spread width to eliminate upside risk.
+    Returns JSON with orderIds, maxLoss, maxGain.
+    """
+    from ib_insync import LimitOrder
+
+    ib = _connect(host, port, client_id)
+    try:
+        sell_put_id  = _qualify_option_con_id(ib, symbol, sell_put,  "P", expiry)
+        sell_call_id = _qualify_option_con_id(ib, symbol, sell_call, "C", expiry)
+        buy_call_id  = _qualify_option_con_id(ib, symbol, buy_call,  "C", expiry)
+
+        legs = [
+            {"conId": sell_put_id,  "ratio": 1, "action": "SELL"},
+            {"conId": sell_call_id, "ratio": 1, "action": "SELL"},
+            {"conId": buy_call_id,  "ratio": 1, "action": "BUY"},
+        ]
+        bag = _build_bag_contract(symbol, legs)
+
+        call_width  = buy_call - sell_call
+        max_loss    = round((sell_put - call_width + net_credit_limit) * 100 * quantity, 2)
+        max_gain    = round(net_credit_limit * 100 * quantity, 2)
+
+        if net_credit_limit <= 0:
+            from ib_insync import MarketOrder
+            order = MarketOrder("BUY", quantity)
+        else:
+            order = LimitOrder("BUY", quantity, net_credit_limit)
+            order.tif = "DAY"
+
+        trade = ib.placeOrder(bag, order)
+        ib.sleep(ORDER_WAIT_SEC)
+
+        order_id = trade.order.orderId
+        logger.info(
+            "place_jade_lizard: orderId=%d symbol=%s expiry=%s quantity=%d",
+            order_id, symbol, expiry, quantity,
+        )
+
+        result = {
+            "order_id":    order_id,
+            "strategy":    "JADE_LIZARD",
+            "symbol":      symbol,
+            "expiry":      expiry,
+            "legs": [
+                {"role": "sell_put",   "strike": sell_put,  "conId": sell_put_id},
+                {"role": "sell_call",  "strike": sell_call, "conId": sell_call_id},
+                {"role": "buy_call",   "strike": buy_call,  "conId": buy_call_id},
+            ],
+            "quantity":    quantity,
+            "net_credit":  net_credit_limit,
+            "max_loss":    max_loss,
+            "max_gain":    max_gain,
+            "status":      trade.orderStatus.status,
+            "timestamp":   _now_iso(),
+        }
+        logger.info("place_jade_lizard result: %s", json.dumps(result))
+        return result
+    finally:
+        _disconnect(ib)
+
+
 # ── CLI entry point ───────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -971,6 +1245,8 @@ def main() -> None:
             "place", "cancel", "cancel_order", "status", "open_orders",
             "expiry_close", "global_cancel",
             "close_position", "schedule_close",
+            # Phase 16: multi-leg
+            "place_condor", "place_vertical", "place_jade_lizard",
         ],
     )
     parser.add_argument("--symbol",         default="TSLA")
@@ -993,6 +1269,19 @@ def main() -> None:
     parser.add_argument("--mode",           default="IBKR_PAPER",
                         help="IBKR_PAPER only (IBKR_LIVE is blocked)")
     parser.add_argument("--client-id",      type=int, default=3, dest="client_id")
+    # Phase 16: multi-leg order params
+    parser.add_argument("--sell-put",       type=float, default=0.0, dest="sell_put")
+    parser.add_argument("--buy-put",        type=float, default=0.0, dest="buy_put")
+    parser.add_argument("--sell-call",      type=float, default=0.0, dest="sell_call")
+    parser.add_argument("--buy-call",       type=float, default=0.0, dest="buy_call")
+    parser.add_argument("--buy-strike",     type=float, default=0.0, dest="buy_strike")
+    parser.add_argument("--sell-strike",    type=float, default=0.0, dest="sell_strike")
+    parser.add_argument("--type",           type=str, default="CALL", dest="opt_type",
+                        help="Option type for vertical spread: CALL or PUT")
+    parser.add_argument("--net-credit",     type=float, default=0.0, dest="net_credit",
+                        help="Net credit limit for condor/jade_lizard")
+    parser.add_argument("--net-debit",      type=float, default=0.0, dest="net_debit",
+                        help="Net debit limit for vertical spread")
     args = parser.parse_args()
 
     # Normalise mode vocabulary
@@ -1133,6 +1422,55 @@ def main() -> None:
 
         elif args.command == "global_cancel":
             result = global_cancel(host, port, client_id)
+
+        # ── Phase 16: multi-leg commands ──────────────────────────────────────
+        elif args.command == "place_condor":
+            for flag, val in [
+                ("--sell-put", args.sell_put), ("--buy-put", args.buy_put),
+                ("--sell-call", args.sell_call), ("--buy-call", args.buy_call),
+                ("--expiry", args.expiry), ("--quantity", args.quantity),
+            ]:
+                if not val:
+                    raise ValueError(f"{flag} is required for place_condor")
+            result = place_condor(
+                host, port, client_id,
+                args.symbol, args.expiry,
+                args.sell_put, args.buy_put,
+                args.sell_call, args.buy_call,
+                args.quantity,
+                net_credit_limit=args.net_credit,
+            )
+
+        elif args.command == "place_vertical":
+            for flag, val in [
+                ("--buy-strike", args.buy_strike), ("--sell-strike", args.sell_strike),
+                ("--expiry", args.expiry), ("--quantity", args.quantity),
+            ]:
+                if not val:
+                    raise ValueError(f"{flag} is required for place_vertical")
+            result = place_vertical(
+                host, port, client_id,
+                args.symbol, args.expiry,
+                args.buy_strike, args.sell_strike,
+                args.opt_type, args.quantity,
+                net_debit_limit=args.net_debit,
+            )
+
+        elif args.command == "place_jade_lizard":
+            for flag, val in [
+                ("--sell-put", args.sell_put), ("--sell-call", args.sell_call),
+                ("--buy-call", args.buy_call), ("--expiry", args.expiry),
+                ("--quantity", args.quantity),
+            ]:
+                if not val:
+                    raise ValueError(f"{flag} is required for place_jade_lizard")
+            result = place_jade_lizard(
+                host, port, client_id,
+                args.symbol, args.expiry,
+                args.sell_put, args.sell_call, args.buy_call,
+                args.quantity,
+                net_credit_limit=args.net_credit,
+            )
 
         else:
             raise ValueError(f"Unknown command: {args.command!r}")

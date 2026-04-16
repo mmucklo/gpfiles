@@ -1,0 +1,272 @@
+/* Phase 16 — Live P&L Panel */
+
+.pnl-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+/* ── Headline ── */
+.pnl-headline {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 10px;
+  padding: 1.25rem;
+}
+
+.pnl-amount {
+  font-size: 3rem;
+  font-weight: 900;
+  letter-spacing: -0.02em;
+  line-height: 1;
+  margin-bottom: 0.5rem;
+  transition: color 0.3s;
+}
+
+.pnl-amount.positive { color: #3fb950; }
+.pnl-amount.negative { color: #f85149; }
+.pnl-amount.zero     { color: #8b949e; }
+
+/* ★ Motivating progress bar toward $10k target */
+.pnl-target-bar-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin-top: 0.75rem;
+}
+
+.pnl-target-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.75rem;
+  color: #8b949e;
+}
+
+.pnl-target-label .target-val { color: #79c0ff; font-weight: 700; }
+
+.pnl-target-track {
+  height: 14px;
+  background: #21262d;
+  border-radius: 7px;
+  overflow: hidden;
+  position: relative;
+}
+
+.pnl-target-fill {
+  height: 100%;
+  border-radius: 7px;
+  background: linear-gradient(90deg, #1a7f37, #3fb950);
+  transition: width 0.6s ease;
+  position: relative;
+  overflow: hidden;
+}
+
+/* Animated shimmer on the bar */
+.pnl-target-fill::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.12), transparent);
+  animation: bar-shimmer 2s ease infinite;
+}
+
+@keyframes bar-shimmer {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(200%); }
+}
+
+.pnl-target-fill.danger {
+  background: linear-gradient(90deg, #7d1414, #f85149);
+}
+
+.pnl-target-fill.warning {
+  background: linear-gradient(90deg, #7d4e00, #d29922);
+}
+
+/* ── Waterfall chart container ── */
+.pnl-waterfall {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 10px;
+  padding: 1.25rem;
+}
+
+.pnl-chart-container {
+  margin-top: 0.75rem;
+  width: 100%;
+  height: 200px;
+}
+
+/* Recharts tooltip custom style */
+.pnl-tooltip {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 0.6rem 0.9rem;
+  font-size: 0.78rem;
+}
+
+.pnl-tooltip-label {
+  color: #8b949e;
+  margin-bottom: 0.3rem;
+}
+
+.pnl-tooltip-val.pos { color: #3fb950; }
+.pnl-tooltip-val.neg { color: #f85149; }
+
+/* ── Strategy breakdown ── */
+.pnl-breakdown {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 10px;
+  padding: 1.25rem;
+}
+
+.pnl-breakdown-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 1rem;
+  align-items: center;
+  margin-top: 0.75rem;
+}
+
+.pnl-donut-container {
+  width: 120px;
+  height: 120px;
+  flex-shrink: 0;
+}
+
+.pnl-breakdown-table {
+  width: 100%;
+  font-size: 0.78rem;
+  border-collapse: collapse;
+}
+
+.pnl-breakdown-table th {
+  color: #8b949e;
+  text-align: left;
+  padding: 0.2rem 0.5rem 0.4rem 0;
+  font-weight: 600;
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid #21262d;
+}
+
+.pnl-breakdown-table td {
+  padding: 0.3rem 0.5rem 0.3rem 0;
+  color: #c9d1d9;
+  border-bottom: 1px solid #0d1117;
+}
+
+.pnl-breakdown-table .td-pnl.pos { color: #3fb950; font-weight: 700; }
+.pnl-breakdown-table .td-pnl.neg { color: #f85149; font-weight: 700; }
+
+/* ── Guardrail bars ── */
+.pnl-guardrails {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 10px;
+  padding: 1.25rem;
+}
+
+.guardrail-item {
+  margin-top: 0.75rem;
+}
+
+.guardrail-label-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.75rem;
+  margin-bottom: 0.3rem;
+}
+
+.guardrail-label { color: #8b949e; }
+.guardrail-value { color: #c9d1d9; font-weight: 600; }
+
+.guardrail-track {
+  height: 8px;
+  background: #21262d;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.guardrail-fill {
+  height: 100%;
+  border-radius: 4px;
+  background: #3fb950;
+  transition: width 0.4s ease, background 0.3s;
+}
+
+.guardrail-fill.warn    { background: #d29922; }
+.guardrail-fill.danger  { background: #f85149; }
+.guardrail-fill.flashing {
+  animation: guardrail-flash 0.5s ease-in-out infinite;
+}
+
+@keyframes guardrail-flash {
+  0%, 100% { background: #f85149; }
+  50%       { background: #7d1414; }
+}
+
+/* Circuit breaker banner */
+.circuit-breaker-banner {
+  background: #6e1919;
+  border: 2px solid #f85149;
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  animation: cb-pulse 1s ease-in-out infinite;
+}
+
+@keyframes cb-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(248, 81, 73, 0.3); }
+  50%       { box-shadow: 0 0 12px 4px rgba(248, 81, 73, 0.2); }
+}
+
+.circuit-breaker-banner .cb-icon { font-size: 1.5rem; }
+.circuit-breaker-banner .cb-text { color: #f85149; font-weight: 800; font-size: 0.9rem; letter-spacing: 0.05em; }
+.circuit-breaker-banner .cb-sub  { color: #ffa657; font-size: 0.75rem; margin-top: 0.1rem; }
+
+/* Panel title */
+.pnl-panel-title {
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: #8b949e;
+  text-transform: uppercase;
+  margin-bottom: 0.4rem;
+}
+
+.pnl-updated {
+  font-size: 0.7rem;
+  color: #6e7681;
+}
+
+.pnl-updated.stale { color: #f85149; }
+
+/* Consecutive losses */
+.consec-loss-pips {
+  display: flex;
+  gap: 0.3rem;
+  margin-top: 0.4rem;
+}
+
+.consec-loss-pip {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #21262d;
+  border: 1px solid #30363d;
+}
+
+.consec-loss-pip.filled { background: #f85149; border-color: #f85149; }
+
+/* Responsive */
+@media (max-width: 768px) {
+  .pnl-amount { font-size: 2.2rem; }
+  .pnl-breakdown-grid { grid-template-columns: 1fr; }
+  .pnl-donut-container { margin: 0 auto; }
+  .pnl-chart-container { height: 150px; }
+}
