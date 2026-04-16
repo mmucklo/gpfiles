@@ -255,6 +255,11 @@ func main() {
 		configHandler.ServeSignalRejectionDetail(w, r)
 	})
 
+	// Phase 16.1: Publisher pause gate
+	mux.HandleFunc("/api/system/pause-status", configHandler.ServePauseStatus)
+	mux.HandleFunc("/api/system/pause", configHandler.ServePause)
+	mux.HandleFunc("/api/system/unpause", configHandler.ServeUnpause)
+
 	// System heartbeats (Phase 13.6)
 	mux.HandleFunc("/api/system/heartbeats", configHandler.ServeSystemHeartbeats)
 	mux.HandleFunc("/api/system/alerts", configHandler.ServeSystemAlerts)

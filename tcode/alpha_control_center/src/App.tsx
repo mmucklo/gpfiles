@@ -51,6 +51,7 @@ export class RootErrorBoundary extends Component<{ children: ReactNode }, EBStat
 import IntegrityStatus from './components/IntegrityStatus';
 import HelpPanel from './components/HelpPanel';
 import SystemHealthPanel, { SystemHealthBadge, type HealthSummary } from './components/SystemHealthPanel';
+import PauseOverlay, { PauseCountdown, type PauseStatus } from './components/PauseOverlay';
 import { Shield, Menu, Home, Share2, Map, HelpCircle } from 'lucide-react';
 import Dashboard from './pages/Dashboard';
 import Architecture from './pages/Architecture';
@@ -94,6 +95,19 @@ function App() {
   const [notionalPendingRestart, setNotionalPendingRestart] = useState(false);
   const [showNotionalDrill, setShowNotionalDrill] = useState(false);
   const [showHealthModal, setShowHealthModal] = useState(false);
+
+  // Phase 16.1: Pause state (synced with PauseOverlay via callback)
+  const [pauseStatus, setPauseStatus] = useState<PauseStatus>({ paused: true, unpause_until: null, remaining_sec: 0 });
+
+  const handlePause = async () => {
+    try {
+      const r = await fetch('/api/system/pause', { method: 'POST' });
+      if (r.ok) {
+        const s: PauseStatus = await r.json();
+        setPauseStatus(s);
+      }
+    } catch { /* ignore */ }
+  };
 
   const brokerStatus = useDataFetching('/api/broker/status', 10000, null);
 
@@ -227,6 +241,9 @@ function App() {
 
   return (
     <div className="app-container">
+      {/* Phase 16.1: Pause overlay — covers entire dashboard when publisher is paused */}
+      <PauseOverlay onStatusChange={setPauseStatus} />
+
       {showSettings && <div className="drawer-overlay" onClick={() => setShowSettings(false)} />}
       {showHelp && <HelpPanel onClose={() => setShowHelp(false)} />}
 
@@ -433,6 +450,8 @@ function App() {
         )}
 
         <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+            {/* Phase 16.1: Polling countdown timer — shown when active */}
+            <PauseCountdown status={pauseStatus} onPause={handlePause} />
             {/* Phase 16: Regime monitor badge + market state */}
             <RegimeMonitor compact />
             {(() => {

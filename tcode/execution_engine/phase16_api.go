@@ -418,7 +418,7 @@ func executeProposalOrder(p *TradeProposal, qty int, mode string) (map[string]in
 	tp := fmt.Sprintf("%.4f", p.TargetPrice)
 	sl := fmt.Sprintf("%.4f", p.StopPrice)
 	qtyStr := fmt.Sprintf("%d", qty)
-	clientID := NextClientID()
+	clientID := AllocateClientID()
 
 	args := []string{
 		"alpha_engine/ingestion/ibkr_order.py", "place",

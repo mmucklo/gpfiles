@@ -70,6 +70,47 @@ DIVERGENCE_MAX_PCT = 0.5     # 0.5% max IBKR vs TV divergence
 HUMAN_APPROVAL_REQUIRED: bool = os.getenv("HUMAN_APPROVAL_REQUIRED", "1") == "1"
 PROPOSAL_TTL_SEC: int = int(os.getenv("PROPOSAL_TTL_SEC", "60"))
 
+# ── Phase 16.1: API pause gate ────────────────────────────────────────────────
+# Default: paused on startup. User must click ACTIVATE in the dashboard to start
+# polling. This prevents runaway Tradier API calls when nobody is watching.
+# State is stored in a shared JSON file; the Go API writes it, publisher reads it.
+_PAUSE_STATE_FILE = os.getenv("PUBLISHER_PAUSE_STATE_FILE", "/tmp/tsla_alpha_pause_state.json")
+_PUBLISHER_AUTO_PAUSE: bool = os.getenv("PUBLISHER_AUTO_PAUSE", "true").lower() != "false"
+
+
+def _read_pause_state() -> dict:
+    """Read pause state from shared file. Returns {"paused": bool, "unpause_until": str|None}."""
+    import datetime as _dt
+    try:
+        with open(_PAUSE_STATE_FILE) as _f:
+            state = json.load(_f)
+        # Check if unpause_until has expired
+        unpause_until_str = state.get("unpause_until")
+        if not state.get("paused", True) and unpause_until_str:
+            unpause_until = _dt.datetime.fromisoformat(unpause_until_str.replace("Z", "+00:00"))
+            now_utc = _dt.datetime.now(_dt.timezone.utc)
+            if now_utc > unpause_until:
+                # Timer expired — re-pause and write back
+                _write_pause_state(paused=True, unpause_until=None)
+                return {"paused": True, "unpause_until": None}
+        return state
+    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        # No state file → default to paused
+        return {"paused": True, "unpause_until": None}
+
+
+def _write_pause_state(paused: bool, unpause_until) -> None:
+    """Write pause state to shared file."""
+    state = {
+        "paused": paused,
+        "unpause_until": unpause_until.isoformat().replace("+00:00", "Z") if unpause_until else None,
+    }
+    try:
+        with open(_PAUSE_STATE_FILE, "w") as _f:
+            json.dump(state, _f)
+    except Exception as _e:
+        print(f"[PAUSE] Failed to write pause state: {_e}")
+
 def check_data_gates(spot_sources: dict) -> tuple[bool, str]:
     """Return (ok, reason). If not ok, do not publish signal."""
     import time
@@ -503,6 +544,19 @@ async def broadcast_loop():
 
     print("Intelligence Engine: SELECTIVE SNIPER Mode Active (REAL PRICING).")
 
+    # Phase 16.1: Initialize pause state file on startup (paused by default)
+    if _PUBLISHER_AUTO_PAUSE:
+        _initial_state = _read_pause_state()
+        if not os.path.exists(_PAUSE_STATE_FILE):
+            # First run — write the default paused state
+            _write_pause_state(paused=True, unpause_until=None)
+            print("[PAUSE] Publisher starting in PAUSED state. Click ACTIVATE in the dashboard to begin polling.")
+        elif not _initial_state.get("paused", True):
+            # State file exists and says active — respect it (user may have pre-activated)
+            print("[PAUSE] Publisher starting ACTIVE (pre-existing pause state file).")
+        else:
+            print("[PAUSE] Publisher starting in PAUSED state. Click ACTIVATE in the dashboard to begin polling.")
+
     # Startup: attempt IBKR connection (primary data source)
     try:
         _ibkr = get_ibkr_feed()
@@ -529,6 +583,14 @@ async def broadcast_loop():
     SIGNAL_COOLDOWN = 300  # 5 minutes between same signal
 
     while True:
+        # Phase 16.1: Pause gate — skip all external API calls when paused.
+        # Heartbeat still emits so the system health panel stays green.
+        _pause = _read_pause_state()
+        if _pause.get("paused", True):
+            await emit_heartbeat_async("publisher", status="ok", detail="PAUSED — awaiting user activation", logger=_logger)
+            await asyncio.sleep(5)
+            continue
+
         # Reload NOTIONAL_ACCOUNT_SIZE if the Go API wrote a reload marker
         global NOTIONAL
         _reload_path = "/tmp/notional_reload"

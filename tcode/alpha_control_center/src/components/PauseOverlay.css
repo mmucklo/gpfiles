@@ -1,0 +1,188 @@
+/* ── PauseOverlay — Phase 16.1 ─────────────────────────────────────────────── */
+
+.pause-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 500; /* above all panels, below modals (modals use 1000+) */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: pause-overlay-fadein 0.3s ease;
+}
+
+@keyframes pause-overlay-fadein {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* Dimmed backdrop — dashboard visible behind at 0.3 opacity */
+.pause-overlay__backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(13, 17, 23, 0.82);
+  backdrop-filter: blur(2px);
+}
+
+/* Floating card */
+.pause-overlay__card {
+  position: relative;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 12px;
+  padding: 2.5rem 3rem;
+  max-width: 460px;
+  width: 90%;
+  text-align: center;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+}
+
+.pause-overlay__icon {
+  font-size: 3rem;
+  line-height: 1;
+  opacity: 0.85;
+}
+
+.pause-overlay__title {
+  margin: 0;
+  font-size: 1.8rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  color: #c9d1d9;
+}
+
+.pause-overlay__desc {
+  margin: 0;
+  color: #8b949e;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.pause-overlay__last-data {
+  margin: 0;
+  color: #6e7681;
+  font-size: 0.8rem;
+}
+
+/* ACTIVATE button */
+.pause-overlay__activate {
+  margin-top: 0.5rem;
+  padding: 0.75rem 2rem;
+  background: #1a7f37;
+  border: 2px solid #3fb950;
+  border-radius: 8px;
+  color: white;
+  font-size: 1rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  cursor: pointer;
+  width: 100%;
+  transition: background 0.15s, transform 0.1s;
+}
+
+.pause-overlay__activate:hover:not(:disabled) {
+  background: #238636;
+  transform: translateY(-1px);
+}
+
+.pause-overlay__activate:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.pause-overlay__activate:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Duration chips */
+.pause-overlay__chips {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.pause-overlay__chip {
+  padding: 0.3rem 0.8rem;
+  background: #21262d;
+  border: 1px solid #30363d;
+  border-radius: 20px;
+  color: #8b949e;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.pause-overlay__chip:hover {
+  background: #2d333b;
+  border-color: #484f58;
+  color: #c9d1d9;
+}
+
+.pause-overlay__chip--active {
+  background: rgba(63, 185, 80, 0.15);
+  border-color: #3fb950;
+  color: #3fb950;
+}
+
+/* ── Countdown header widget ─────────────────────────────────────────────────── */
+
+.pause-countdown {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.25rem 0.75rem;
+  background: rgba(63, 185, 80, 0.1);
+  border: 1px solid rgba(63, 185, 80, 0.3);
+  border-radius: 6px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: #3fb950;
+  white-space: nowrap;
+}
+
+.pause-countdown--warning {
+  background: rgba(210, 153, 34, 0.12);
+  border-color: rgba(210, 153, 34, 0.4);
+  color: #d29922;
+}
+
+.pause-countdown__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #3fb950;
+  flex-shrink: 0;
+  animation: pause-dot-pulse 1.5s ease-in-out infinite;
+}
+
+.pause-countdown--warning .pause-countdown__dot {
+  background: #d29922;
+}
+
+@keyframes pause-dot-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.4; transform: scale(0.75); }
+}
+
+.pause-countdown__pause-btn {
+  background: none;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  color: inherit;
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 1px 6px;
+  cursor: pointer;
+  opacity: 0.8;
+  transition: opacity 0.15s;
+}
+
+.pause-countdown__pause-btn:hover {
+  opacity: 1;
+}
