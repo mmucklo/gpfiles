@@ -307,3 +307,111 @@ body {
   transform: scale(0.98);
   filter: brightness(0.9);
 }
+
+/* ── Phase 16: Market-hours theme ────────────────────────────────────────── */
+
+/* Market open: subtle green pulse dot animation */
+@keyframes market-open-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(63,185,80,0.6); }
+  50%       { opacity: 0.7; box-shadow: 0 0 0 3px rgba(63,185,80,0); }
+}
+
+/* Flash-on-insert for new rows / cards */
+@keyframes flash-insert {
+  0%   { background-color: rgba(210, 153, 34, 0.35); }
+  100% { background-color: transparent; }
+}
+
+.flash-insert {
+  animation: flash-insert 2s ease forwards;
+}
+
+/* Market state CSS custom properties on body */
+body[data-market-state="open"] .header {
+  border-bottom-color: rgba(63,185,80,0.25);
+}
+
+body[data-market-state="premarket"] .header {
+  border-bottom-color: rgba(121,192,255,0.2);
+}
+
+body[data-market-state="afterhours"] .header {
+  border-bottom-color: rgba(48,54,61,1);
+}
+
+/* ── Responsive breakpoints ─────────────────────────────────────────────────
+   375px  — mobile (single-column, full-width panels)
+   768px  — tablet (single-column, slightly relaxed padding)
+   1440px — laptop (default)
+   1920px — widescreen (wider content column)
+──────────────────────────────────────────────────────────────────────────── */
+
+/* Mobile — 375px */
+@media (max-width: 480px) {
+  .header {
+    padding: 0.6rem 0.75rem;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+
+  .header h1 {
+    font-size: 0.95rem;
+  }
+
+  .main-content {
+    padding: 0.5rem 0.5rem;
+  }
+
+  /* Stack header badges vertically */
+  .header > div:last-child {
+    flex-wrap: wrap;
+    gap: 0.3rem;
+  }
+
+  /* Compact panels */
+  .collapsible-panel {
+    margin-bottom: 0.5rem;
+    border-radius: 6px;
+  }
+
+  /* Trade approval cards go full-width */
+  .proposal-card {
+    min-width: 0;
+  }
+
+  /* P&L headline smaller on mobile */
+  .pnl-amount {
+    font-size: 2rem !important;
+  }
+}
+
+/* Tablet — 768px */
+@media (min-width: 481px) and (max-width: 900px) {
+  .header {
+    padding: 0.75rem 1rem;
+  }
+
+  .main-content {
+    padding: 0.75rem 1rem;
+  }
+
+  .pnl-amount {
+    font-size: 2.5rem !important;
+  }
+}
+
+/* Widescreen — 1920px+ */
+@media (min-width: 1920px) {
+  .main-content {
+    max-width: 1800px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  .header {
+    max-width: 1800px;
+    margin-left: auto;
+    margin-right: auto;
+    width: 100%;
+  }
+}
