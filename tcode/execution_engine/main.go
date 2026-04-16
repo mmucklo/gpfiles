@@ -228,6 +228,20 @@ func main() {
 	mux.HandleFunc("/api/positions/close", configHandler.ServePositionsClose)
 	mux.HandleFunc("/api/config/notional", configHandler.ServeNotionalConfig)
 
+	// Phase 16: Intraday Cockpit
+	mux.HandleFunc("/api/morning-briefing", configHandler.ServeMorningBriefing)
+	mux.HandleFunc("/api/strategy/select", configHandler.ServeStrategySelect)
+	mux.HandleFunc("/api/strategy/current", configHandler.ServeStrategyCurrent)
+	mux.HandleFunc("/api/trades/proposed", configHandler.ServeTradesProposed)
+	mux.HandleFunc("/api/trades/proposed/", func(w http.ResponseWriter, r *http.Request) {
+		configHandler.ServeTradeProposalAction(w, r)
+	})
+	mux.HandleFunc("/api/trades/ledger", configHandler.ServeTradeLedger)
+	mux.HandleFunc("/api/trades/pnl/strategy-breakdown", configHandler.ServeTradePnLStrategyBreakdown)
+	mux.HandleFunc("/api/trades/pnl", configHandler.ServeTradePnL)
+	mux.HandleFunc("/api/regime/current", configHandler.ServeRegimeCurrent)
+	mux.HandleFunc("/api/regime/override", configHandler.ServeRegimeOverride)
+
 	// Signal feedback & cancel (Phase 13)
 	mux.HandleFunc("/api/signals/feedback/recent", configHandler.ServeSignalFeedbackRecent)
 	mux.HandleFunc("/api/signals/feedback/digest", configHandler.ServeSignalFeedbackDigest)
@@ -312,6 +326,9 @@ func main() {
 
 	subscriber.Start()
 	defer subscriber.Close()
+
+	// Phase 16: subscribe to proposals queue (human-in-the-loop approval)
+	StartProposalSubscription(subscriber)
 
 	// Phase 13: keep cancelled-signal cache current (10s refresh from DB)
 	StartCancelRefreshLoop()
