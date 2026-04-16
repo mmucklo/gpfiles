@@ -156,3 +156,63 @@ CREATE TABLE IF NOT EXISTS system_alerts (
     status    TEXT    NOT NULL,   -- "error" | "degraded"
     message   TEXT    NOT NULL
 );
+
+-- trade_ledger: Phase 16 — human-approved trade record with full context.
+-- Every executed trade flows through the approval queue before landing here.
+CREATE TABLE IF NOT EXISTS trade_ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_entry TEXT NOT NULL,
+    ts_exit TEXT,
+    strategy TEXT NOT NULL,          -- MOMENTUM | CONDOR | VERTICAL | JADE_LIZARD | STRADDLE | GAMMA_SCALP
+    regime_at_entry TEXT,            -- TRENDING | FLAT | CHOPPY | EVENT_DRIVEN | UNCERTAIN
+    regime_at_exit TEXT,
+    direction TEXT,                  -- BULLISH | BEARISH | NEUTRAL
+    legs TEXT NOT NULL,              -- JSON array of {strike, type, action, quantity, fill_price}
+    entry_price REAL,               -- net debit/credit per unit
+    exit_price REAL,
+    quantity INTEGER,
+    commission REAL,
+    gross_pnl REAL,
+    net_pnl REAL,
+    hold_duration_sec INTEGER,
+    stop_type TEXT,                  -- TP | SL | TIME_STOP | MANUAL | TRAILING
+    signals_contributing TEXT,       -- JSON array of signal fingerprints
+    confidence_at_entry REAL,
+    kelly_fraction REAL,
+    human_override TEXT,             -- "approved" | "adjusted:qty=5" | "skipped" | "override:direction=BEARISH"
+    slippage REAL,                   -- expected fill - actual fill
+    tags TEXT,                       -- JSON array: ["winner", "cut-early", "hit-TP"]
+    notes TEXT                       -- user's post-trade comment
+);
+CREATE INDEX IF NOT EXISTS idx_trade_ledger_ts ON trade_ledger(ts_entry);
+CREATE INDEX IF NOT EXISTS idx_trade_ledger_strategy ON trade_ledger(strategy);
+
+-- trade_proposals: Phase 16 — incoming proposals awaiting human approval.
+-- Proposals expire after PROPOSAL_TTL_SEC (default 60s) if not acted on.
+CREATE TABLE IF NOT EXISTS trade_proposals (
+    id TEXT PRIMARY KEY,             -- UUID
+    ts_created TEXT NOT NULL,        -- ISO 8601 UTC
+    ts_expires TEXT NOT NULL,        -- ts_created + TTL
+    status TEXT NOT NULL DEFAULT 'pending',  -- pending | executed | skipped | expired | adjusted
+    strategy TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    legs TEXT NOT NULL,              -- JSON array of leg specs
+    entry_price REAL,
+    stop_price REAL,
+    target_price REAL,
+    kelly_fraction REAL,
+    quantity INTEGER,
+    confidence REAL,
+    regime_snapshot TEXT,            -- JSON regime state at proposal time
+    signals_contributing TEXT,       -- JSON array
+    raw_signal TEXT                  -- original NATS message JSON
+);
+CREATE INDEX IF NOT EXISTS idx_trade_proposals_status ON trade_proposals(status, ts_created DESC);
+
+-- selected_strategy: Phase 16 — user's locked strategy for the session.
+CREATE TABLE IF NOT EXISTS selected_strategy (
+    id INTEGER PRIMARY KEY CHECK (id = 1),  -- singleton row
+    strategy TEXT NOT NULL,
+    locked_at TEXT NOT NULL,
+    locked_by TEXT NOT NULL DEFAULT 'user'
+);
