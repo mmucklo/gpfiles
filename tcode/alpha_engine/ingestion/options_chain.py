@@ -3,12 +3,15 @@ TSLA Alpha Engine: Real-Time Options Chain Ingestion
 Fetches the TSLA options chain and provides strike selection anchored to real
 market data with liquidity filtering.
 
-Source priority:
-  - OFF-HOURS + IBKR connected: IBKR (paper account) — OI/bid/ask available 24h
-  - IN-HOURS or IBKR unavailable: yfinance (reliable during market hours)
+Source priority (controlled by OPTIONS_CHAIN_SOURCE env var):
+  - "tradier" (default / "auto"): Tradier real-time chain with native greeks
+  - "yfinance": yfinance fallback (no native greeks)
+  - "ibkr": IBKR paper account (requires OPRA subscription)
+  - "auto": Tradier → yfinance → IBKR cascade
 
 Cache TTL: 60s — balances freshness vs. rate-limit safety.
 """
+import os
 import time
 import logging
 from dataclasses import dataclass, field
@@ -245,17 +248,141 @@ class OptionsChainCache:
     # ── expiry list ───────────────────────────────────────────────────────────
 
     def _get_expiry_list(self) -> list:
+        """Return expiration dates from Tradier (primary) or yfinance (fallback)."""
         now = time.time()
         if now - self._expiry_ts < self.CACHE_TTL and self._expiry_list:
             return self._expiry_list
+
+        source_env = os.getenv("OPTIONS_CHAIN_SOURCE", "auto")
+
+        # Tradier expiry discovery (preferred)
+        if source_env in ("tradier", "auto"):
+            try:
+                from ingestion.tradier_chain import get_expirations
+                dates = get_expirations(self.ticker)
+                if dates:
+                    self._expiry_list = dates
+                    self._expiry_ts = now
+                    logger.debug("Tradier expirations for %s: %d dates", self.ticker, len(dates))
+                    return self._expiry_list
+            except RuntimeError as exc:
+                if "401" in str(exc) or "Unauthorized" in str(exc):
+                    logger.error("Tradier expirations: auth failure — %s", exc)
+                    if source_env == "tradier":
+                        raise
+                else:
+                    logger.warning("Tradier expirations failed (%s); falling back to yfinance", exc)
+            except Exception as exc:
+                logger.warning("Tradier expirations failed (%s); falling back to yfinance", exc)
+
+        # yfinance fallback
         try:
             t = yf.Ticker(self.ticker)
             self._expiry_list = list(t.options)
             self._expiry_ts = now
-            logger.debug(f"Fetched {len(self._expiry_list)} expiry dates for {self.ticker}")
+            logger.debug(f"Fetched {len(self._expiry_list)} expiry dates for {self.ticker} (yfinance)")
         except Exception as e:
             logger.warning(f"Failed to fetch expiry list: {e}")
         return self._expiry_list
+
+    # ── Tradier chain (real-time, native greeks) ──────────────────────────────
+
+    def _fetch_chain_tradier(self, expiry: str) -> list[OptionRow]:
+        """
+        Fetch option chain from Tradier with native greeks.
+
+        Maps Tradier's response fields to OptionRow.  Rows with greeks from
+        Tradier have greeks_source="tradier" — enrich_greeks() skips them.
+        Rows where Tradier greeks are null (very illiquid contracts) get
+        greeks_source="unavailable" — no BS fallback (per spec).
+
+        Returns an empty list on any failure (fallback to yfinance/IBKR applies).
+        """
+        try:
+            from ingestion.tradier_chain import get_chain as tradier_get_chain
+        except ImportError:
+            logger.warning("tradier_chain module not available")
+            return []
+
+        try:
+            raw_opts = tradier_get_chain(self.ticker, expiry)
+        except RuntimeError as exc:
+            if "401" in str(exc) or "Unauthorized" in str(exc):
+                logger.error("Tradier chain: auth failure — %s", exc)
+                raise  # propagate auth failure — caller decides fallback
+            logger.warning("Tradier chain fetch failed for %s %s: %s", self.ticker, expiry, exc)
+            return []
+        except Exception as exc:
+            logger.warning("Tradier chain fetch failed for %s %s: %s", self.ticker, expiry, exc)
+            return []
+
+        if not raw_opts:
+            return []
+
+        rows: list[OptionRow] = []
+        for opt in raw_opts:
+            try:
+                greeks = opt.get("greeks") or {}
+
+                # Determine greeks availability
+                delta = greeks.get("delta")
+                gamma = greeks.get("gamma")
+                theta = greeks.get("theta")
+                vega  = greeks.get("vega")
+
+                # mid_iv is Tradier's implied vol estimate (mid-market)
+                mid_iv = greeks.get("mid_iv") or greeks.get("smv_vol") or 0.0
+                try:
+                    mid_iv = float(mid_iv) if mid_iv is not None else 0.0
+                except (TypeError, ValueError):
+                    mid_iv = 0.0
+
+                # Greeks source: "tradier" if at least delta is present, else "unavailable"
+                if delta is not None:
+                    greeks_source = "tradier"
+                    try:
+                        delta = float(delta)
+                        gamma = float(gamma) if gamma is not None else None
+                        theta = float(theta) if theta is not None else None
+                        vega  = float(vega)  if vega  is not None else None
+                    except (TypeError, ValueError):
+                        greeks_source = "unavailable"
+                        delta = gamma = theta = vega = None
+                else:
+                    # Very illiquid contract — Tradier doesn't compute greeks
+                    greeks_source = "unavailable"
+                    delta = gamma = theta = vega = None
+
+                opt_type_raw = (opt.get("option_type") or "").lower()
+                opt_type = "CALL" if opt_type_raw == "call" else "PUT"
+
+                row = OptionRow(
+                    strike=float(opt["strike"]),
+                    option_type=opt_type,
+                    expiration_date=expiry,
+                    bid=float(opt.get("bid") or 0) or 0.0,
+                    ask=float(opt.get("ask") or 0) or 0.0,
+                    last_price=float(opt.get("last") or 0) or 0.0,
+                    volume=int(opt.get("volume") or 0) or 0,
+                    open_interest=int(opt.get("open_interest") or 0) or 0,
+                    implied_volatility=mid_iv,
+                    delta=delta,
+                    gamma=gamma,
+                    theta=theta,
+                    vega=vega,
+                    greeks_source=greeks_source,
+                )
+                rows.append(row)
+            except (KeyError, TypeError, ValueError) as exc:
+                logger.debug("Tradier chain row parse error: %s — row: %s", exc, opt)
+                continue
+
+        logger.info(
+            "Tradier chain: %d contracts loaded for %s %s (greeks_native=%d)",
+            len(rows), self.ticker, expiry,
+            sum(1 for r in rows if r.greeks_source == "tradier"),
+        )
+        return rows
 
     # ── IBKR chain (off-hours, 24h data from paper account) ──────────────────
 
@@ -492,36 +619,68 @@ class OptionsChainCache:
         """
         Return cached (or fresh) option rows for `expiry`.
 
-        Source selection:
-          - Off-hours + IBKR connected → IBKR snapshot (bid/ask available 24h)
-          - In-hours or IBKR unavailable → yfinance
+        Source priority controlled by OPTIONS_CHAIN_SOURCE env var:
+          "tradier" → Tradier only, fail loud if unavailable
+          "yfinance" → yfinance only
+          "ibkr"    → IBKR only (requires OPRA subscription)
+          "auto"    → Tradier → yfinance → IBKR cascade (default)
         """
         now = time.time()
         cached = self._cache.get(expiry)
         if cached and now - cached[0] < self.CACHE_TTL:
             return cached[1]
 
+        source_env = os.getenv("OPTIONS_CHAIN_SOURCE", "auto")
         rows: list[OptionRow] = []
-        source = "yfinance"
+        source = "unavailable"
 
-        # Prefer IBKR when off-hours: yfinance returns stale/zero OI off-hours
-        if not _is_us_market_hours():
-            ibkr_rows = self._fetch_chain_ibkr(expiry)
-            if ibkr_rows:
-                rows  = ibkr_rows
-                source = "ibkr"
+        # ── 1. Tradier (preferred) ────────────────────────────────────────────
+        if source_env in ("tradier", "auto"):
+            try:
+                rows = self._fetch_chain_tradier(expiry)
+                if rows:
+                    source = "tradier"
+            except RuntimeError as exc:
+                if "401" in str(exc) or "Unauthorized" in str(exc):
+                    logger.error("Tradier auth failure — cannot fetch chain: %s", exc)
+                    if source_env == "tradier":
+                        raise RuntimeError(
+                            f"Tradier chain empty/failed for {expiry} and OPTIONS_CHAIN_SOURCE=tradier (no fallback)"
+                        ) from exc
+                # non-auth error: fall through to next source
+            if not rows and source_env == "tradier":
+                raise RuntimeError(
+                    f"Tradier chain empty for {expiry} and OPTIONS_CHAIN_SOURCE=tradier (no fallback)"
+                )
 
-        if not rows:
-            # In-hours or IBKR unavailable: use yfinance
+        # ── 2. yfinance fallback ──────────────────────────────────────────────
+        if not rows and source_env in ("yfinance", "auto"):
             try:
                 rows = self._fetch_chain(expiry)
-                source = "yfinance"
+                if rows:
+                    source = "yfinance"
             except Exception as e:
-                logger.warning(f"Chain fetch failed for {expiry}: {e}")
-                return cached[1] if cached else []
+                logger.warning("yfinance chain fetch failed for %s: %s", expiry, e)
 
-        # Enrich with greeks (BS-compute from IV; IBKR rows already have greeks from modelGreeks)
-        if rows:
+        # ── 3. IBKR fallback (requires OPRA subscription) ────────────────────
+        if not rows and source_env in ("ibkr", "auto"):
+            try:
+                rows = self._fetch_chain_ibkr(expiry)
+                if rows:
+                    source = "ibkr"
+            except Exception as e:
+                logger.warning("IBKR chain fetch failed for %s: %s", expiry, e)
+
+        if not rows:
+            logger.warning("All chain sources empty for %s", expiry)
+            return cached[1] if cached else []
+
+        # ── Enrich greeks — skip rows that already have native greeks ─────────
+        # Tradier rows with greeks_source="tradier" already have delta/gamma/theta/vega.
+        # enrich_greeks() internally skips rows where greeks_source == "ibkr";
+        # we extend that skip to "tradier" rows here for efficiency.
+        needs_enrich = any(r.greeks_source not in ("tradier", "ibkr") for r in rows)
+        if needs_enrich:
             from datetime import date as _d
             try:
                 exp_date = _d.fromisoformat(expiry)
@@ -533,14 +692,24 @@ class OptionsChainCache:
                 _spot, _ = get_spot_with_fallback(self.ticker)
             except Exception:
                 _spot = 0.0
+            # Temporarily mark tradier rows so enrich_greeks skips them
+            tradier_rows = [r for r in rows if r.greeks_source == "tradier"]
+            for r in tradier_rows:
+                r.greeks_source = "ibkr"  # borrow the skip sentinel
             try:
                 enrich_greeks(rows, spot=_spot, ttm_years=ttm)
             except Exception as _ge:
                 logger.warning("enrich_greeks call failed for %s: %s", expiry, _ge)
+            finally:
+                # Restore tradier label
+                for r in tradier_rows:
+                    r.greeks_source = "tradier"
 
         self._cache[expiry] = (now, rows)
         logger.info("Options chain loaded: %s — %d contracts (source=%s)", expiry, len(rows), source)
         _hb("options_chain_api", status="ok", detail=f"expiry:{expiry} contracts:{len(rows)} source:{source}")
+        if source == "tradier":
+            _hb("tradier_chain", status="ok", detail=f"expiries=1 rows={len(rows)}")
         return rows
 
     # ── public API ────────────────────────────────────────────────────────────

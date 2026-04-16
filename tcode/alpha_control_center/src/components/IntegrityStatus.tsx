@@ -50,7 +50,16 @@ function chainStatus(data: IntegrityData['chain']): TrafficLight {
   // Stale chain is only an error during market hours
   if (marketHours && data.age_sec > 300) return 'red';
   if (marketHours && data.age_sec > 120) return 'amber';
+  // Tradier source with fresh data → green; fallback sources → amber (degraded)
+  if (data.source === 'yfinance' && data.entry_count > 0) return 'amber';
   return 'green';
+}
+
+function chainSourceBadgeClass(source: string): string {
+  if (source === 'tradier') return 'ok';
+  if (source === 'ibkr') return 'ok';
+  if (source === 'yfinance') return 'warn';
+  return 'err';
 }
 
 function executionStatus(data: IntegrityData['execution']): TrafficLight {
@@ -195,7 +204,19 @@ const IntegrityPanel = ({ data, loading, onClose, openSection }: PanelProps) => 
                 <tbody>
                   <tr>
                     <td>Source</td>
-                    <td>{data.chain.source || 'yfinance'}</td>
+                    <td>
+                      <span
+                        className={`integrity-src-badge ${chainSourceBadgeClass(data.chain.source || 'yfinance')}`}
+                        data-testid="chain-source-badge"
+                        title={data.chain.source === 'tradier'
+                          ? 'Tradier — real-time options with native greeks'
+                          : data.chain.source === 'ibkr'
+                            ? 'IBKR — requires OPRA subscription'
+                            : 'yfinance — fallback; native greeks unavailable'}
+                      >
+                        {(data.chain.source || 'yfinance').toUpperCase()}
+                      </span>
+                    </td>
                   </tr>
                   <tr>
                     <td>Entry Count</td>
@@ -213,10 +234,19 @@ const IntegrityPanel = ({ data, loading, onClose, openSection }: PanelProps) => 
                   </tr>
                 </tbody>
               </table>
-              <p className="integrity-rule">Rule: chain data &gt;5 min stale during market hours turns this panel RED.</p>
+              <p className="integrity-rule">
+                Rule: chain data &gt;5 min stale during market hours turns this panel RED.
+                GREEN requires Tradier as source; yfinance fallback shows AMBER (no native greeks).
+              </p>
               {cStatus === 'amber' && data.chain.entry_count === 0 && !isUSMarketHours() && (
                 <p className="integrity-rule" style={{ color: '#e6a200' }}>
                   Chain data empty — market closed. Fresh chain arrives {nextMarketOpenLabel()}.
+                </p>
+              )}
+              {cStatus === 'amber' && data.chain.source === 'yfinance' && data.chain.entry_count > 0 && (
+                <p className="integrity-rule" style={{ color: '#e6a200' }}>
+                  Chain source is yfinance (fallback) — greeks computed via Black-Scholes, not native.
+                  Check TRADIER_API_TOKEN and OPTIONS_CHAIN_SOURCE env vars.
                 </p>
               )}
             </div>
@@ -410,8 +440,8 @@ const IntegrityStatus = ({ onStatusChange }: IntegrityStatusProps) => {
         </Indicator>
         <Indicator label="CHAIN" status={cSt} onClick={() => openPanel('chain')}>
           {data && (
-            <span className="integrity-detail">
-              {data.chain.age_sec > 0 ? `${Math.round(data.chain.age_sec)}s` : 'fresh'}
+            <span className="integrity-detail" data-testid="chain-source-inline">
+              {(data.chain.source || 'yf').toUpperCase()}
             </span>
           )}
         </Indicator>

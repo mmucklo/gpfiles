@@ -1306,6 +1306,34 @@ Note: the inverse (**true negative**) = rejection was correct, the trade would h
     phase_note: "Tag added in Phase 14.3.",
   },
 
+  TRADIER: {
+    term: "TRADIER",
+    display: "Tradier",
+    short: "Brokerage and market data provider supplying real-time options chain quotes with native greeks (delta, gamma, theta, vega).",
+    long: `**Tradier** is a brokerage and market data platform used as the primary options chain data source for the TSLA Alpha Engine.
+
+**Why Tradier instead of IBKR for chain data?**
+IBKR paper accounts require an OPRA market data subscription to return options chain data. Without it, \`reqSecDefOptParams\` returns empty expirations — the root cause of the Error 321 wave in Phases 12–14.
+
+Tradier provides:
+- **Real-time options chain** with all strikes and expirations for TSLA
+- **Native greeks** (delta, gamma, theta, vega) computed by Tradier — no Black-Scholes fallback needed
+- **Free real-time data** with a funded brokerage account
+
+**Data flow:**
+1. Publisher calls \`tradier_chain.get_expirations("TSLA")\` once per cycle
+2. Fetches chain for next 4 expiries via \`get_chain(symbol, expiration, greeks=true)\`
+3. OptionRows with \`greeks_source="tradier"\` bypass the BS-compute enrichment step (performance win)
+4. IBKR is retained for **order execution only**
+
+**Rate limit:** 120 req/min. Publisher issues ~10–17 req/min — well within limit.`,
+    formula: "OPTIONS_CHAIN_SOURCE=tradier → Tradier only; =auto → Tradier → yfinance → IBKR cascade",
+    source: "ingestion/tradier_chain.py · TRADIER_API_TOKEN env var",
+    trading_impact: "Tradier as chain source eliminates STRIKE_SELECT_FAIL caused by IBKR OPRA gaps. Native greeks also remove BS-compute latency from the publisher cycle.",
+    related: ["STRIKE_SELECT_FAIL", "GREEKS_UNAVAILABLE", "CANDIDATE_STRIKE"],
+    phase_note: "Introduced in Phase 15 — replaces IBKR as options chain source.",
+  },
+
   CANDIDATE_STRIKE: {
     term: "CANDIDATE_STRIKE",
     display: "Candidate Strike",
