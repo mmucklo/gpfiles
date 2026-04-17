@@ -3,14 +3,19 @@ TSLA Alpha Engine: Multi-Model Consensus Layer
 Enforces corroboration between independent probabilistic models to mitigate hallucinations.
 """
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, date, timedelta
 from enum import Enum, auto
 from typing import List, Dict, Optional
 import numpy as np
 
 
 def compute_expiry(dte_str: str) -> str:
-    """Convert '7DTE', '14DTE', '0DTE' to next valid Friday >= N days from today."""
+    """Convert '7DTE', '14DTE', '0DTE' to next valid Friday >= N days from today.
+
+    DEPRECATED: Use find_best_expiry() instead.  This function guesses a Friday
+    which may not match any actual Tradier expiration (TSLA has daily expirations).
+    Retained as a last-resort fallback only.
+    """
     try:
         days = int(dte_str.replace('DTE', '').strip())
     except ValueError:
@@ -20,6 +25,75 @@ def compute_expiry(dte_str: str) -> str:
     days_until_friday = (4 - target.weekday()) % 7
     expiry = target + timedelta(days=days_until_friday)
     return expiry.strftime('%Y-%m-%d')
+
+
+def find_best_expiry(dte_target: int) -> str:
+    """Return the actual Tradier expiry date closest to dte_target days from today.
+
+    Fetches the real expiry list from the options chain cache (Tradier-sourced).
+    Picks the candidate whose DTE is closest to dte_target, preferring candidates
+    at or above the target over those below (i.e., sort key: (abs(dte - target), -(dte))).
+
+    Falls back to compute_expiry() if the chain cache is unavailable.
+    """
+    try:
+        from ingestion.options_chain import get_chain_cache
+        expiries = get_chain_cache()._get_expiry_list()
+    except Exception:
+        expiries = []
+
+    today = date.today()
+    candidates = []
+    for exp_str in expiries:
+        try:
+            exp_date = date.fromisoformat(exp_str)
+        except ValueError:
+            continue
+        dte = (exp_date - today).days
+        if dte >= max(dte_target - 2, 0):  # allow 2-day fudge below target
+            candidates.append((abs(dte - dte_target), -dte, exp_str))
+
+    if candidates:
+        candidates.sort()
+        chosen = candidates[0][2]
+        return chosen
+
+    # Absolute fallback: nearest future expiry in the list
+    future = [e for e in expiries if date.fromisoformat(e) >= today]
+    if future:
+        import logging
+        logging.getLogger("consensus").warning(
+            "find_best_expiry(%d): no candidate within ±2 days of target; "
+            "falling back to nearest future expiry %s", dte_target, future[0]
+        )
+        return future[0]
+
+    # Last resort: calendar-based Friday estimate (no Tradier data)
+    import logging
+    logging.getLogger("consensus").warning(
+        "find_best_expiry(%d): no expiry list available; using compute_expiry fallback",
+        dte_target,
+    )
+    return compute_expiry(f"{dte_target}DTE")
+
+
+def find_best_expiry_for_archetype(archetype_name: str) -> str:
+    """Return the actual Tradier expiry best matching the archetype's prefer_ttm_days range.
+
+    Reads the GreeksProfile for the archetype to get (min_dte, max_dte) and targets
+    the midpoint.  Falls back to 7DTE if the archetype has no Greeks profile.
+    """
+    try:
+        from config.archetypes import get_greeks_profile
+        profile = get_greeks_profile(archetype_name)
+        if profile and profile.prefer_ttm_days:
+            min_dte, max_dte = profile.prefer_ttm_days
+            target = (min_dte + max_dte) // 2
+        else:
+            target = 7
+    except Exception:
+        target = 7
+    return find_best_expiry(target)
 
 class ModelType(Enum):
     SENTIMENT = auto()    # NLP-based sentiment from news/social

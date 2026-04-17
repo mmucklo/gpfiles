@@ -13,7 +13,7 @@ from ib_insync import util as ib_util
 ib_util.patchAsyncio()  # allow ib.connect() from within a running event loop
 from datetime import date as _date
 from prometheus_client import start_http_server, Counter, Gauge, Histogram
-from consensus import ModelSignal, SignalDirection, ModelType, compute_expiry
+from consensus import ModelSignal, SignalDirection, ModelType, compute_expiry, find_best_expiry, find_best_expiry_for_archetype
 from ingestion.pricing import MultiSourcePricing
 from ingestion.options_chain import get_chain_cache
 from ingestion.tv_feed import validate_spot_price, get_tv_cache, TVFeedError
@@ -369,7 +369,11 @@ class SignalPublisher:
         try:
             if _date.fromisoformat(signal.expiration_date) < _date.today():
                 print(f"[WARN] Recomputing stale expiration_date {signal.expiration_date} for {signal.recommended_expiry}")
-                signal = dataclasses.replace(signal, expiration_date=compute_expiry(signal.recommended_expiry))
+                try:
+                    _days = int(str(signal.recommended_expiry).replace('DTE', '').strip())
+                except (ValueError, AttributeError):
+                    _days = 7
+                signal = dataclasses.replace(signal, expiration_date=find_best_expiry(_days))
         except (ValueError, AttributeError):
             pass
 
@@ -899,16 +903,16 @@ async def broadcast_loop():
                     action = "SELL" if vix_now > 25 and confidence > 0.8 else "BUY"
 
             # ── Phase 14: Greeks-aware strike selection ──────────────────────
-            chain_expiry = compute_expiry(archetype_expiry_str)
+            # Use find_best_expiry_for_archetype so the expiry is always a real
+            # Tradier-listed date matching the archetype's DTE preference, rather
+            # than a guessed Friday that may not exist in the chain.
+            chain_expiry = find_best_expiry_for_archetype(archetype_name)
             strike_meta: StrikeSelection | None = None
             chain_iv = 0.0
             strike = 0.0
             chain_rows: list = []  # pre-init so exception handler can reference it
 
             try:
-                _nearest = get_chain_cache().nearest_expiry_with_liquidity(min_dte=0)
-                if _nearest:
-                    chain_expiry = _nearest
                 chain_rows = get_chain_cache().get_chain(chain_expiry)
                 sel_direction = (
                     "LONG_CALL" if opt_type == "CALL" and action == "BUY"
@@ -1148,7 +1152,7 @@ async def broadcast_loop():
                 recommended_expiry=archetype_expiry_str,
                 option_type=opt_type,
                 action=action,
-                expiration_date=chain_expiry if chain_expiry else compute_expiry(archetype_expiry_str),
+                expiration_date=chain_expiry if chain_expiry else find_best_expiry_for_archetype(archetype_name),
                 target_limit_price=float(limit_price),
                 take_profit_price=float(take_profit_price),
                 stop_loss_price=float(stop_loss_price),
