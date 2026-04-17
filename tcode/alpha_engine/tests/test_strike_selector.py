@@ -274,7 +274,7 @@ class TestThetaCap:
     def test_rejects_high_theta_burn(self):
         """Rows with theta burn > max_theta_pct_premium should be filtered."""
         rows = make_chain()
-        # Set theta to burn 50% of premium daily — way above 5% cap
+        # Set theta to burn 50% of premium daily — way above 20% cap (DIRECTIONAL_STD)
         for r in rows:
             if r.option_type == "CALL":
                 r.theta = -r.mid_price * 0.50

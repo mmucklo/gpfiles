@@ -56,21 +56,21 @@ GREEKS_PROFILES: dict[str, GreeksProfile] = {
     "DIRECTIONAL_STRONG": GreeksProfile(
         target_delta_abs=0.40,
         delta_tolerance=0.07,
-        max_theta_pct_premium=0.06,   # 6% daily theta burn cap
+        max_theta_pct_premium=0.25,   # Relaxed 2026-04-17 for intraday scalping — theta irrelevant at <1hr hold times
         min_vega_for_vol_play=0.0,    # N/A for directional
         prefer_ttm_days=(5, 14),
     ),
     "DIRECTIONAL_STD": GreeksProfile(
         target_delta_abs=0.30,
         delta_tolerance=0.05,
-        max_theta_pct_premium=0.05,   # 5% daily theta burn cap
+        max_theta_pct_premium=0.20,   # Relaxed 2026-04-17 for intraday scalping — theta irrelevant at <1hr hold times
         min_vega_for_vol_play=0.0,
         prefer_ttm_days=(7, 21),
     ),
     "MEAN_REVERT": GreeksProfile(
         target_delta_abs=0.35,
         delta_tolerance=0.05,
-        max_theta_pct_premium=0.05,
+        max_theta_pct_premium=0.20,   # Relaxed 2026-04-17 for intraday scalping — theta irrelevant at <1hr hold times
         min_vega_for_vol_play=0.0,
         prefer_ttm_days=(5, 10),
     ),
@@ -84,7 +84,7 @@ GREEKS_PROFILES: dict[str, GreeksProfile] = {
     "VOL_PLAY": GreeksProfile(
         target_delta_abs=0.50,
         delta_tolerance=0.10,
-        max_theta_pct_premium=0.04,   # 4% — long vega, want low theta burn
+        max_theta_pct_premium=0.10,   # Relaxed 2026-04-17 for intraday scalping — still conservative for long-vega
         min_vega_for_vol_play=0.10,   # require vega >= 0.10 per contract
         prefer_ttm_days=(21, 45),     # long vega benefits from longer duration
     ),
