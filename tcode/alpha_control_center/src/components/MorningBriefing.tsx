@@ -239,7 +239,8 @@ const MorningBriefing: React.FC<Props> = ({ compact = false }) => {
           </div>
 
           {(data?.factors?.length ?? 0) > 4 && (
-            <button className="briefing-expand-toggle" onClick={() => setExpanded(v => !v)}>
+            <button className="briefing-expand-toggle" onClick={() => setExpanded(v => !v)}
+              aria-label={expanded ? 'Show fewer factors' : `Show ${(data?.factors?.length ?? 0) - 4} more factors`}>
               {expanded ? '▲ Show less' : `▼ +${(data?.factors?.length ?? 0) - 4} more factors`}
             </button>
           )}

@@ -318,7 +318,19 @@ interface IntelPremarket {
     europe?: { STOXX50E: IntelIndexEntry; GDAXI: IntelIndexEntry; FTSE: IntelIndexEntry };
     asia?: { N225: IntelIndexEntry; HSI: IntelIndexEntry; SSE: IntelIndexEntry };
     fx?: { USDJPY: IntelIndexEntry; EURUSD: IntelIndexEntry; DXY: IntelIndexEntry };
-    tsla_premarket?: { change_pct: number; volume: number; ok: boolean };
+    tsla_premarket?: {
+        current_price: number | null;
+        regular_close: number | null;
+        premarket_change_pct: number;
+        premarket_volume: number;
+        after_hours_change_pct: number;
+        after_hours_close: number | null;
+        bid: number | null;
+        ask: number | null;
+        spread_pct: number | null;
+        source: string;
+        ok: boolean;
+    };
     composite_bias?: string;
     confidence?: number;
     rationale?: string;
@@ -3928,6 +3940,12 @@ const PreMarketPanel = ({ intel, isLoading }: { intel: Intel | null; isLoading?:
         return <span style={{ color: pct >= 0 ? '#3fb950' : '#f85149' }}>{sign}{pct.toFixed(2)}%</span>;
     };
 
+    const fmtVol = (v: number) => {
+        if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
+        if (v >= 1_000) return `${(v / 1_000).toFixed(0)}K`;
+        return v.toLocaleString();
+    };
+
     return (
         <div className="intel-panel" data-testid="premarket-panel" aria-label="Pre-Market Intelligence">
             {drillTarget && (
@@ -3972,18 +3990,54 @@ const PreMarketPanel = ({ intel, isLoading }: { intel: Intel | null; isLoading?:
                             )}
                             {drillTarget === 'TSLA' && pm && (
                                 <>
+                                    {pm.tsla_premarket?.current_price != null && (
+                                        <div className="fill-row">
+                                            <span>Current price</span>
+                                            <span>${pm.tsla_premarket.current_price.toFixed(2)}</span>
+                                        </div>
+                                    )}
+                                    {pm.tsla_premarket?.regular_close != null && (
+                                        <div className="fill-row">
+                                            <span>Regular-session close</span>
+                                            <span>${pm.tsla_premarket.regular_close.toFixed(2)}</span>
+                                        </div>
+                                    )}
                                     <div className="fill-row">
-                                        <span>Extended-hours change</span>
-                                        <span>{changePctLabel(pm.tsla_premarket_change_pct)}</span>
+                                        <span>Pre-market change</span>
+                                        <span>{changePctLabel(pm.tsla_premarket?.premarket_change_pct ?? pm.tsla_premarket_change_pct)}</span>
                                     </div>
                                     <div className="fill-row">
-                                        <span>Extended-hours volume</span>
-                                        <span>{pm.tsla_premarket_volume > 0 ? pm.tsla_premarket_volume.toLocaleString() : 'No pre/post activity'}</span>
+                                        <span>Pre-market volume</span>
+                                        <span>
+                                            {(() => {
+                                                const vol = pm.tsla_premarket?.premarket_volume ?? pm.tsla_premarket_volume;
+                                                return vol > 0 ? fmtVol(vol) : 'No pre/post activity';
+                                            })()}
+                                        </span>
                                     </div>
+                                    {pm.tsla_premarket?.after_hours_close != null && (
+                                        <div className="fill-row">
+                                            <span>After-hours close</span>
+                                            <span>${pm.tsla_premarket.after_hours_close.toFixed(2)}</span>
+                                        </div>
+                                    )}
+                                    <div className="fill-row">
+                                        <span>After-hours move</span>
+                                        <span>{changePctLabel(pm.tsla_premarket?.after_hours_change_pct ?? 0)}</span>
+                                    </div>
+                                    {pm.tsla_premarket?.bid != null && pm.tsla_premarket?.ask != null && (
+                                        <div className="fill-row">
+                                            <span>Bid / Ask</span>
+                                            <span style={{fontSize:'11px'}}>
+                                                ${pm.tsla_premarket.bid.toFixed(2)} / ${pm.tsla_premarket.ask.toFixed(2)}
+                                                {pm.tsla_premarket.spread_pct != null && ` — spread ${pm.tsla_premarket.spread_pct.toFixed(3)}%`}
+                                            </span>
+                                        </div>
+                                    )}
                                     {pm.overnight_catalyst && (
                                         <div className="fill-row"><span>Catalyst</span><span>{pm.overnight_catalyst}</span></div>
                                     )}
-                                    <div className="fill-row"><span>Source</span><span style={{fontSize:'11px'}}>yfinance TSLA prepost=True (1d)</span></div>
+                                    <div className="fill-row"><span>Source</span><span style={{fontSize:'11px'}}>{pm.tsla_premarket?.source ?? 'yfinance'}</span></div>
                                 </>
                             )}
                             {drillTarget === 'Futures' && pm && (
@@ -4023,23 +4077,42 @@ const PreMarketPanel = ({ intel, isLoading }: { intel: Intel | null; isLoading?:
                 {/* TSLA Pre/Post */}
                 <div className="intel-card" role="region" aria-label="TSLA Extended Hours"
                      style={{cursor:'pointer'}} onClick={() => setDrillTarget('TSLA')}>
-                    <Tooltip text="TSLA extended-hours price change vs prior close. Click for detail.">
+                    <Tooltip text="TSLA pre-market price vs regular-session close. Click for detail.">
                         <div className="intel-card-title">TSLA Pre/Post</div>
                     </Tooltip>
                     {pm ? (
                         <>
                             <div className="intel-row">
-                                <span className="intel-label">Change</span>
-                                <span>{changePctLabel(pm.tsla_premarket_change_pct)}</span>
-                            </div>
-                            <div className="intel-row">
-                                <span className="intel-label">Volume</span>
-                                <span style={{color:'#8b949e'}}>
-                                    {pm.tsla_premarket_volume > 0
-                                        ? pm.tsla_premarket_volume.toLocaleString()
-                                        : 'No pre/post activity'}
+                                <span className="intel-label">Pre-Mkt</span>
+                                <span>
+                                    {pm.tsla_premarket?.current_price != null
+                                        ? <>${pm.tsla_premarket.current_price.toFixed(2)} {changePctLabel(pm.tsla_premarket.premarket_change_pct)}</>
+                                        : changePctLabel(pm.tsla_premarket_change_pct)}
                                 </span>
                             </div>
+                            <div className="intel-row">
+                                <span className="intel-label">PM Vol</span>
+                                <span style={{color:'#8b949e'}}>
+                                    {pm.tsla_premarket?.premarket_volume != null
+                                        ? (pm.tsla_premarket.premarket_volume > 0 ? fmtVol(pm.tsla_premarket.premarket_volume) : 'No pre/post activity')
+                                        : (pm.tsla_premarket_volume > 0 ? fmtVol(pm.tsla_premarket_volume) : 'No pre/post activity')}
+                                </span>
+                            </div>
+                            {pm.tsla_premarket?.after_hours_change_pct !== undefined && (
+                                <div className="intel-row">
+                                    <span className="intel-label" style={{color:'#6e7681'}}>After-Hrs</span>
+                                    <span style={{opacity:0.75}}>{changePctLabel(pm.tsla_premarket.after_hours_change_pct)}</span>
+                                </div>
+                            )}
+                            {pm.tsla_premarket?.bid != null && pm.tsla_premarket?.ask != null && (
+                                <div className="intel-row">
+                                    <span className="intel-label" style={{color:'#6e7681'}}>Bid/Ask</span>
+                                    <span style={{color:'#8b949e',fontSize:'11px'}}>
+                                        ${pm.tsla_premarket.bid.toFixed(2)} / ${pm.tsla_premarket.ask.toFixed(2)}
+                                        {pm.tsla_premarket.spread_pct != null && ` (${pm.tsla_premarket.spread_pct.toFixed(3)}%)`}
+                                    </span>
+                                </div>
+                            )}
                         </>
                     ) : (
                         <div style={{color:'#8b949e',fontSize:'12px'}}>No pre/post activity — awaiting data</div>

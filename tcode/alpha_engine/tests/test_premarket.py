@@ -48,15 +48,22 @@ class TestPremarketStructure(unittest.TestCase):
             closes = remapped.get(symbol, [100.0, 100.0])
             hist = _make_hist(closes)
 
-            def history(period="2d", prepost=False):
-                if prepost:
-                    return _make_hist([closes[0]] + closes)  # 3-row for TSLA prepost
+            def history(period="2d", prepost=False, **_kw):
                 return hist
 
             t.history.side_effect = history
+            # spec=[] means any attribute access raises AttributeError,
+            # so fast_info.previous_close triggers the history(period="2d") fallback.
+            t.fast_info = MagicMock(spec=[])
             return t
 
-        with patch("yfinance.Ticker", side_effect=mock_ticker):
+        mock_quote = {
+            "last": 388.9, "bid": 387.76, "ask": 388.05,
+            "volume": 173028, "prevclose": 388.9,
+        }
+
+        with patch("yfinance.Ticker", side_effect=mock_ticker), \
+             patch("ingestion.tradier_chain.get_quotes", return_value=mock_quote):
             # Force cache misses so _fetch_premarket() and _fetch_dxy() both run
             import ingestion.premarket as pm
             import ingestion.macro_regime as mr
@@ -97,8 +104,57 @@ class TestPremarketStructure(unittest.TestCase):
         """Backward-compat: publisher.py reads these flat fields."""
         r = self._run_with_mock_yf({})
         for key in ("futures_bias", "es_change_pct", "nq_change_pct",
-                    "europe_direction", "tsla_premarket_change_pct"):
+                    "europe_direction", "tsla_premarket_change_pct",
+                    "tsla_premarket_volume"):
             self.assertIn(key, r, f"Missing legacy field: {key}")
+
+    def test_tsla_premarket_enriched_shape(self):
+        """tsla_premarket dict has the Phase 16.5 enriched fields."""
+        r = self._run_with_mock_yf({"TSLA": [388.20, 388.90]})
+        tp = r["tsla_premarket"]
+        for key in ("current_price", "regular_close", "premarket_change_pct",
+                    "premarket_volume", "after_hours_change_pct", "after_hours_close",
+                    "bid", "ask", "spread_pct", "source", "ok"):
+            self.assertIn(key, tp, f"Missing tsla_premarket key: {key}")
+        self.assertTrue(tp["ok"])
+        self.assertEqual(tp["source"], "tradier+yfinance")
+
+    def test_tsla_premarket_change_uses_regular_close(self):
+        """premarket_change_pct is (current - regular_close) / regular_close, not vs after-hours close."""
+        # regular_close = 388.20 (iloc[-2] of 2d hist), current = 388.9 (Tradier last)
+        # expected = (388.9 - 388.20) / 388.20 * 100 ≈ 0.18%
+        r = self._run_with_mock_yf({"TSLA": [388.20, 388.90]})
+        tp = r["tsla_premarket"]
+        self.assertIsNotNone(tp["regular_close"])
+        self.assertAlmostEqual(tp["regular_close"], 388.20, places=1)
+        self.assertAlmostEqual(tp["premarket_change_pct"], 0.18, places=1)
+
+    def test_tsla_premarket_volume_from_tradier(self):
+        """premarket_volume comes from Tradier quote, not yfinance sum."""
+        r = self._run_with_mock_yf({})
+        tp = r["tsla_premarket"]
+        self.assertEqual(tp["premarket_volume"], 173028)
+        # Legacy flat field must also be correct
+        self.assertEqual(r["tsla_premarket_volume"], 173028)
+
+    def test_tsla_after_hours_derivation(self):
+        """after_hours_change_pct = (tradier_prevclose - regular_close) / regular_close."""
+        # Mock: TSLA 2d hist = [388.20, 388.90]; Tradier prevclose = 388.9
+        # after_hours_change = (388.9 - 388.20) / 388.20 * 100 ≈ 0.18%
+        r = self._run_with_mock_yf({"TSLA": [388.20, 388.90]})
+        tp = r["tsla_premarket"]
+        self.assertAlmostEqual(tp["after_hours_change_pct"], 0.18, places=1)
+        self.assertAlmostEqual(tp["after_hours_close"], 388.9, places=1)
+
+    def test_tsla_bid_ask_spread(self):
+        """spread_pct computed from Tradier bid/ask."""
+        # bid=387.76, ask=388.05, mid=387.905, spread=(0.29/387.905)*100≈0.075%
+        r = self._run_with_mock_yf({})
+        tp = r["tsla_premarket"]
+        self.assertAlmostEqual(tp["bid"], 387.76, places=2)
+        self.assertAlmostEqual(tp["ask"], 388.05, places=2)
+        self.assertIsNotNone(tp["spread_pct"])
+        self.assertAlmostEqual(tp["spread_pct"], 0.075, places=2)
 
     def test_composite_bias_bullish_all_up(self):
         """All regions up → BULLISH bias."""

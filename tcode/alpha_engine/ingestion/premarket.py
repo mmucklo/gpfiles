@@ -114,18 +114,82 @@ def _fetch_premarket() -> dict:
         }
 
         # ── TSLA pre/post-market ───────────────────────────────────────────
-        tsla_premarket: dict = {"change_pct": 0.0, "volume": 0, "ok": False}
+        tsla_premarket: dict = {
+            "current_price": None, "regular_close": None,
+            "premarket_change_pct": 0.0, "premarket_volume": 0,
+            "after_hours_change_pct": 0.0, "after_hours_close": None,
+            "bid": None, "ask": None, "spread_pct": None,
+            "source": "unavailable", "ok": False,
+        }
         try:
-            tsla_hist = yf.Ticker("TSLA").history(period="1d", prepost=True)
-            if not tsla_hist.empty:
-                vol = int(tsla_hist["Volume"].sum())
-                chg = 0.0
-                if len(tsla_hist) >= 2:
-                    cur = float(tsla_hist["Close"].iloc[-1])
-                    prv = float(tsla_hist["Close"].iloc[0])
-                    if prv > 0:
-                        chg = round((cur - prv) / prv * 100, 2)
-                tsla_premarket = {"change_pct": chg, "volume": vol, "ok": True}
+            from ingestion.tradier_chain import get_quotes as _get_quotes
+
+            # 1. Regular session close from yfinance
+            tsla_ticker = yf.Ticker("TSLA")
+            regular_close: float | None = None
+            try:
+                rc = tsla_ticker.fast_info.previous_close
+                regular_close = float(rc)
+            except Exception:
+                hist2 = tsla_ticker.history(period="2d")
+                if len(hist2) >= 2:
+                    regular_close = float(hist2["Close"].iloc[-2])
+                elif len(hist2) == 1:
+                    regular_close = float(hist2["Close"].iloc[0])
+
+            # 2. Real-time quote from Tradier (current price + pre-market volume)
+            quote = _get_quotes("TSLA")
+            current_price: float | None = None
+            premarket_volume = 0
+            bid: float | None = None
+            ask: float | None = None
+            tradier_prevclose: float | None = None
+            if quote:
+                last = quote.get("last")
+                bid_v = quote.get("bid")
+                ask_v = quote.get("ask")
+                if last:
+                    current_price = float(last)
+                elif bid_v and ask_v:
+                    current_price = (float(bid_v) + float(ask_v)) / 2
+                premarket_volume = int(quote.get("volume") or 0)
+                bid = float(bid_v) if bid_v else None
+                ask = float(ask_v) if ask_v else None
+                pc = quote.get("prevclose")
+                tradier_prevclose = float(pc) if pc else None
+
+            # 3. Pre-market change vs regular session close
+            premarket_change_pct = 0.0
+            if regular_close and regular_close > 0 and current_price:
+                premarket_change_pct = round((current_price - regular_close) / regular_close * 100, 2)
+
+            # 4. After-hours move: Tradier prevclose IS the after-hours close
+            after_hours_change_pct = 0.0
+            after_hours_close = tradier_prevclose
+            if regular_close and regular_close > 0 and tradier_prevclose:
+                after_hours_change_pct = round(
+                    (tradier_prevclose - regular_close) / regular_close * 100, 2
+                )
+
+            # 5. Bid/ask spread
+            spread_pct: float | None = None
+            if bid and ask and bid > 0:
+                mid = (bid + ask) / 2
+                spread_pct = round((ask - bid) / mid * 100, 3)
+
+            tsla_premarket = {
+                "current_price": round(current_price, 2) if current_price is not None else None,
+                "regular_close": round(regular_close, 2) if regular_close is not None else None,
+                "premarket_change_pct": premarket_change_pct,
+                "premarket_volume": premarket_volume,
+                "after_hours_change_pct": after_hours_change_pct,
+                "after_hours_close": round(after_hours_close, 2) if after_hours_close is not None else None,
+                "bid": round(bid, 2) if bid is not None else None,
+                "ask": round(ask, 2) if ask is not None else None,
+                "spread_pct": spread_pct,
+                "source": "tradier+yfinance",
+                "ok": current_price is not None,
+            }
         except Exception as e:
             logger.debug(f"TSLA pre-market fetch failed: {e}")
 
@@ -259,8 +323,8 @@ def _fetch_premarket() -> dict:
             "es_change_pct": es["change_pct"],
             "nq_change_pct": nq["change_pct"],
             "europe_direction": legacy_europe_direction,
-            "tsla_premarket_change_pct": tsla_premarket["change_pct"],
-            "tsla_premarket_volume": tsla_premarket["volume"],
+            "tsla_premarket_change_pct": tsla_premarket.get("premarket_change_pct", 0.0),
+            "tsla_premarket_volume": tsla_premarket.get("premarket_volume", 0),
             "overnight_catalyst": None,
         }
     except Exception as e:
