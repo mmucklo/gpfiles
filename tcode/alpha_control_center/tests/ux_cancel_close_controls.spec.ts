@@ -12,6 +12,21 @@
  *  - Scheduled-close badge appears on position when OPG order is returned
  *
  * All tests use route interception — no live IBKR gateway required.
+ *
+ * ── Phase 16.6 fix ────────────────────────────────────────────────────────────
+ * Phase 16.1 introduced a PauseOverlay (role=dialog, aria-modal=true) that
+ * renders full-screen and intercepts all pointer events when the dashboard is
+ * in the default "paused" state.  Tests were written before this overlay existed
+ * and never mocked /api/system/pause-status, so every click test timed-out
+ * waiting for modals that could never open.
+ *
+ * Fix applied to setupBaseRoutes():
+ *  1. page.addInitScript → seeds localStorage key 'tsla_pause_state' with an
+ *     active (unpaused) state before the page loads, so the overlay never
+ *     renders on the initial React paint.
+ *  2. page.route on api/system/pause-status → returns { paused: false }
+ *     so PauseOverlay.syncFromBackend() also sees active state.
+ * ─────────────────────────────────────────────────────────────────────────────
  */
 
 import { test, expect, Page } from '@playwright/test';
@@ -73,6 +88,29 @@ async function setupBaseRoutes(page: Page, {
     closeResult?: object;
     brokerMode?: string;
 }) {
+    // Bypass PauseOverlay: seed localStorage before page load so the overlay
+    // never renders (avoids the flash between initial paint and fetch resolve).
+    // Use unpause_until: null so no countdown interval fires — avoids constant
+    // App re-renders that were causing click-action timeouts with the Date mock.
+    await page.addInitScript(() => {
+        const active = { paused: false, unpause_until: null, remaining_sec: 0 };
+        localStorage.setItem('tsla_pause_state', JSON.stringify(active));
+    });
+
+    // Playwright 1.59 is LIFO: last-registered route wins when multiple patterns match.
+    // Register catch-all FIRST (lowest priority) so every specific route below overrides it.
+    // Abort keeps App error-handlers intact — no JSON parse crashes from empty {} bodies.
+    // This prevents ANY unmocked API call from reaching the live server (which returns
+    // paused:true and would re-show PauseOverlay mid-test).
+    await page.route('**/api/**', (route) => route.abort());
+
+    // Specific routes (registered after catch-all) win due to LIFO ordering.
+    // Also mock the backend so syncFromBackend() confirms active state.
+    await page.route('**/api/system/pause-status', (route) =>
+        route.fulfill({ status: 200, contentType: 'application/json',
+            body: JSON.stringify({ paused: false, unpause_until: null, remaining_sec: 0 }) })
+    );
+
     await page.route('**/api/orders/pending', (route) =>
         route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(pendingOrders) })
     );
@@ -107,12 +145,20 @@ async function setupBaseRoutes(page: Page, {
 }
 
 async function waitForPendingPanel(page: Page) {
+    // Confirm PauseOverlay is detached (removed from DOM) before interacting.
+    // On initial React paint status.paused=true so the overlay is briefly in the DOM;
+    // after the useEffect reads localStorage it returns null and detaches.
+    // 'detached' (not 'hidden') is the correct state because the component removes
+    // the DOM node entirely rather than hiding it with CSS.
+    await page.locator('[data-testid="pause-overlay"]').waitFor({ state: 'detached', timeout: 10_000 });
     const panel = page.locator('[role="region"][aria-label*="Pending Orders"]');
     await panel.waitFor({ state: 'visible', timeout: 20_000 });
     return panel;
 }
 
 async function waitForPositionsPanel(page: Page) {
+    // Same PauseOverlay guard as waitForPendingPanel.
+    await page.locator('[data-testid="pause-overlay"]').waitFor({ state: 'detached', timeout: 10_000 });
     const panel = page.locator('[role="region"][aria-label*="Trading Floor"]');
     await panel.waitFor({ state: 'visible', timeout: 20_000 });
     return panel;
@@ -150,7 +196,7 @@ test.describe('Cancel Pending Order', () => {
 
         // Confirm modal should appear
         const modal = page.locator('[role="dialog"][aria-label*="Confirm cancel order"]');
-        await expect(modal).toBeVisible({ timeout: 5_000 });
+        await expect(modal).toBeVisible({ timeout: 8_000 });
         await expect(modal).toContainText('Cancel Order #1001');
     });
 
@@ -169,7 +215,7 @@ test.describe('Cancel Pending Order', () => {
         await cancelBtn.click({ force: true });
 
         const modal = page.locator('[role="dialog"][aria-label*="Confirm cancel order"]');
-        await modal.waitFor({ state: 'visible', timeout: 5_000 });
+        await modal.waitFor({ state: 'visible', timeout: 8_000 });
 
         // Click the "Confirm Cancel" button
         const confirmBtn = modal.locator('button[aria-label*="Confirm cancel order"]');
@@ -196,7 +242,7 @@ test.describe('Cancel Pending Order', () => {
         // First click opens modal
         await cancelBtn.click({ force: true });
         const modal = page.locator('[role="dialog"][aria-label*="Confirm cancel order"]');
-        await modal.waitFor({ state: 'visible', timeout: 5_000 });
+        await modal.waitFor({ state: 'visible', timeout: 8_000 });
 
         // Close modal
         await modal.locator('button[aria-label="Close cancel dialog"]').click({ force: true });
@@ -259,7 +305,7 @@ test.describe('Close Position', () => {
 
         // Modal should mention "Market closed" and OPG scheduling
         const modal = page.locator('[role="dialog"][aria-label*="Confirm close position"]');
-        await modal.waitFor({ state: 'visible', timeout: 5_000 });
+        await modal.waitFor({ state: 'visible', timeout: 8_000 });
         await expect(modal).toContainText('Market closed');
         await expect(modal).toContainText('MKT OPG');
     });
@@ -295,7 +341,7 @@ test.describe('Close Position', () => {
         await closeBtn.click({ force: true });
 
         const modal = page.locator('[role="dialog"][aria-label*="Confirm close position"]');
-        await modal.waitFor({ state: 'visible', timeout: 5_000 });
+        await modal.waitFor({ state: 'visible', timeout: 8_000 });
         await expect(modal).toContainText('Market open');
         await expect(modal).toContainText('MKT DAY');
     });
@@ -308,7 +354,11 @@ test.describe('Close Position', () => {
         const pendingOrders = { active: [], cancelled: [], source: 'IBKR_PAPER', cap: 2 };
         const ibkrPositions = [makeIBKRPosition()];
 
-        // Slow response: stalls for 3s so we can observe the disabled state
+        // setupBaseRoutes must come first: it registers the catch-all with lowest LIFO
+        // priority. The slow route is registered AFTER so it wins (LIFO = last wins).
+        await setupBaseRoutes(page, { pendingOrders, ibkrPositions });
+        // Slow response: stalls for 3s so we can observe the disabled state.
+        // Registered after setupBaseRoutes so it overrides the catch-all abort for this URL.
         await page.route('**/api/positions/close', async (route) => {
             await new Promise(r => setTimeout(r, 3000));
             await route.fulfill({
@@ -316,7 +366,6 @@ test.describe('Close Position', () => {
                 body: JSON.stringify({ order_id: 55, status: 'Submitted', scheduled_for: null, timestamp: new Date().toISOString() }),
             });
         });
-        await setupBaseRoutes(page, { pendingOrders, ibkrPositions });
 
         await page.goto(BASE_URL, { waitUntil: 'load' });
         const panel = await waitForPositionsPanel(page);
@@ -327,11 +376,11 @@ test.describe('Close Position', () => {
         // Click close button → modal opens
         await closeBtn.click({ force: true });
         const modal = page.locator('[role="dialog"][aria-label*="Confirm close position"]');
-        await modal.waitFor({ state: 'visible', timeout: 5_000 });
+        await modal.waitFor({ state: 'visible', timeout: 8_000 });
 
         // Confirm the close → triggers slow fetch, button enters disabled state
         const confirmBtn = modal.locator('button[aria-label="Confirm close position"]');
-        await confirmBtn.waitFor({ state: 'visible', timeout: 5_000 });
+        await confirmBtn.waitFor({ state: 'visible', timeout: 8_000 });
         await confirmBtn.click({ force: true });
 
         // While fetch is in-flight: close button must be disabled
@@ -355,7 +404,7 @@ test.describe('Close Position', () => {
         await closeBtn.click({ force: true });
 
         const modal = page.locator('[role="dialog"][aria-label*="Confirm close position"]');
-        await modal.waitFor({ state: 'visible', timeout: 5_000 });
+        await modal.waitFor({ state: 'visible', timeout: 8_000 });
 
         // Confirm button should initially be disabled with countdown text
         const confirmBtn = modal.locator('button[aria-label*="Wait"]');
@@ -396,7 +445,7 @@ test.describe('Close Position', () => {
         await closeBtn.click({ force: true });
 
         const modal = page.locator('[role="dialog"][aria-label*="Confirm close position"]');
-        await modal.waitFor({ state: 'visible', timeout: 5_000 });
+        await modal.waitFor({ state: 'visible', timeout: 8_000 });
 
         const confirmBtn = modal.locator('button[aria-label="Confirm close position"]');
         await confirmBtn.waitFor({ state: 'visible', timeout: 8_000 });
