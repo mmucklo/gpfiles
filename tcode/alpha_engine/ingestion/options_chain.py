@@ -631,6 +631,7 @@ class OptionsChainCache:
             return cached[1]
 
         source_env = os.getenv("OPTIONS_CHAIN_SOURCE", "auto")
+        logger.info("get_chain: source_env=%s, expiry=%s, ticker=%s", source_env, expiry, self.ticker)
         rows: list[OptionRow] = []
         source = "unavailable"
 
@@ -640,6 +641,7 @@ class OptionsChainCache:
                 rows = self._fetch_chain_tradier(expiry)
                 if rows:
                     source = "tradier"
+                    logger.info("get_chain: tradier returned %d rows for %s", len(rows), expiry)
             except RuntimeError as exc:
                 if "401" in str(exc) or "Unauthorized" in str(exc):
                     logger.error("Tradier auth failure — cannot fetch chain: %s", exc)

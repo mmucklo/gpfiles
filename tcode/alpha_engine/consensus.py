@@ -139,6 +139,8 @@ class ModelSignal:
     quantity: int = 0
     confidence_rationale: str = "No rationale provided."
     implied_volatility: float = 0.0
+    strike_selection_meta: dict | None = None
+    chop_label: str = ""
 
 class ConsensusRejection(Exception):
     """Raised when models are in heavy disagreement."""

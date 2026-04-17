@@ -335,6 +335,44 @@ def _chain_row_to_dict(r) -> dict:
     }
 
 
+def _fetch_chain_direct(symbol: str, expiry: str) -> list:
+    """Fetch option chain directly from Tradier, bypassing OptionsChainCache.
+
+    OptionsChainCache.get_chain() dispatch is broken — despite OPTIONS_CHAIN_SOURCE=tradier
+    it returns IBKR data (zero bids, no greeks).  This function calls tradier_chain.get_chain
+    directly and builds OptionRow objects identical to what _fetch_chain_tradier() produces.
+    """
+    from ingestion.tradier_chain import get_chain as _tradier_get_chain
+    from ingestion.options_chain import OptionRow
+
+    raw_opts = _tradier_get_chain(symbol, expiry)
+    rows: list = []
+    for opt in raw_opts:
+        try:
+            greeks = opt.get("greeks") or {}
+            delta = greeks.get("delta")
+            row = OptionRow(
+                strike=float(opt["strike"]),
+                option_type="CALL" if (opt.get("option_type") or "").lower() == "call" else "PUT",
+                expiration_date=expiry,
+                bid=float(opt.get("bid") or 0),
+                ask=float(opt.get("ask") or 0),
+                last_price=float(opt.get("last") or 0),
+                volume=int(opt.get("volume") or 0),
+                open_interest=int(opt.get("open_interest") or 0),
+                implied_volatility=float(greeks.get("mid_iv") or greeks.get("smv_vol") or 0),
+                delta=float(delta) if delta is not None else None,
+                gamma=float(greeks.get("gamma")) if greeks.get("gamma") is not None else None,
+                theta=float(greeks.get("theta")) if greeks.get("theta") is not None else None,
+                vega=float(greeks.get("vega")) if greeks.get("vega") is not None else None,
+                greeks_source="tradier" if delta is not None else "unavailable",
+            )
+            rows.append(row)
+        except (KeyError, TypeError, ValueError):
+            continue
+    return rows
+
+
 class SignalPublisher:
     """
     Publishes signals to the 'tsla.alpha.signals' NATS subject.
@@ -913,7 +951,8 @@ async def broadcast_loop():
             chain_rows: list = []  # pre-init so exception handler can reference it
 
             try:
-                chain_rows = get_chain_cache().get_chain(chain_expiry)
+                # Call Tradier directly — bypasses broken OptionsChainCache dispatch (Phase 16.3)
+                chain_rows = _fetch_chain_direct("TSLA", chain_expiry)
                 sel_direction = (
                     "LONG_CALL" if opt_type == "CALL" and action == "BUY"
                     else "SHORT_CALL" if opt_type == "CALL" and action == "SELL"
@@ -1006,8 +1045,7 @@ async def broadcast_loop():
                 wing_offset = 5.0
                 long_target = strike + wing_offset if opt_type == "CALL" else strike - wing_offset
                 try:
-                    chain = get_chain_cache().get_chain(chain_expiry if chain_expiry else "")
-                    wing_candidates = [r for r in chain if r.option_type == opt_type and r.open_interest >= 50]
+                    wing_candidates = [r for r in chain_rows if r.option_type == opt_type and r.open_interest >= 50]
                     long_strike = (
                         min(wing_candidates, key=lambda r: abs(r.strike - long_target)).strike
                         if wing_candidates else round(long_target / 5.0) * 5.0
@@ -1016,9 +1054,8 @@ async def broadcast_loop():
                     long_strike = round(long_target / 5.0) * 5.0
 
                 try:
-                    chain = get_chain_cache().get_chain(chain_expiry if chain_expiry else "")
-                    short_row = next((r for r in chain if r.option_type == opt_type and abs(r.strike - short_strike) < 0.5), None)
-                    long_row = next((r for r in chain if r.option_type == opt_type and abs(r.strike - long_strike) < 0.5), None)
+                    short_row = next((r for r in chain_rows if r.option_type == opt_type and abs(r.strike - short_strike) < 0.5), None)
+                    long_row = next((r for r in chain_rows if r.option_type == opt_type and abs(r.strike - long_strike) < 0.5), None)
                     limit_price = round(max(0.01, short_row.bid - long_row.ask), 2) if short_row and long_row else round(abs(short_strike - long_strike) * 0.15, 2)
                 except Exception:
                     limit_price = round(abs(short_strike - long_strike) * 0.15, 2)
@@ -1028,8 +1065,7 @@ async def broadcast_loop():
             else:
                 # Single leg — real chain mid price
                 try:
-                    chain = get_chain_cache().get_chain(chain_expiry if chain_expiry else "")
-                    opt_row = next((r for r in chain if r.option_type == opt_type and abs(r.strike - strike) < 0.5), None)
+                    opt_row = next((r for r in chain_rows if r.option_type == opt_type and abs(r.strike - strike) < 0.5), None)
                     limit_price = round(opt_row.mid_price, 2) if opt_row else max(0.05, round(chain_iv * abs(strike - spot) * 0.1, 2))
                 except Exception:
                     limit_price = max(0.05, round(abs(strike - spot) * 0.01 + 0.10, 2))
