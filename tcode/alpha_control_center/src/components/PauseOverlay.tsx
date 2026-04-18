@@ -225,6 +225,7 @@ export default function PauseOverlay({ onStatusChange }: Props) {
               onClick={() => setSelectedDuration(opt.minutes)}
               data-testid={`pause-duration-${opt.label}`}
               aria-pressed={selectedDuration === opt.minutes}
+              aria-label={`Unpause for ${opt.label}`}
             >
               {opt.label}
             </button>

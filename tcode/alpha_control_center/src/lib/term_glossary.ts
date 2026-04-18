@@ -1791,6 +1791,149 @@ Multi-leg structures combine the individual probabilities.
     formula: "POP_short_option ≈ 1 − |delta_sold|",
     related: ["IRON_CONDOR", "NET_CREDIT", "KELLY_FRACTION"],
   },
+
+  // ── Phase 17: Intraday Execution Engine terms ──────────────────────────────
+
+  ATR: {
+    term: "ATR",
+    display: "ATR",
+    short: "Average True Range — volatility measure used to set dynamic stop distances.",
+    long: `**Average True Range (ATR)** is a 14-bar rolling average of the true range (the greatest of: high−low, |high−prev_close|, |low−prev_close|).
+
+Phase 17 uses 1-minute TSLA bars to compute intraday ATR.
+
+**Why ATR-based stops?** Fixed-dollar stops get hit by normal noise; ATR-scaled stops breathe with the market's actual volatility.`,
+    formula: "ATR = avg(true_range, 14 bars);  true_range = max(H−L, |H−C₋₁|, |L−C₋₁|)",
+    related: ["ATR_STOP", "TRAILING_STOP", "STOP_MULTIPLIER"],
+  },
+
+  STOP_MULTIPLIER: {
+    term: "STOP_MULTIPLIER",
+    display: "Stop Multiplier",
+    short: "How many ATRs away from entry the initial stop is placed.",
+    long: `**Stop Multiplier** controls the width of the initial stop: stop = entry ± (ATR × stop_multiplier).
+
+A larger multiplier gives the trade more room to breathe but increases max loss per trade. A smaller multiplier cuts losses faster but may result in more premature exits.
+
+Default: 1.5×. Configurable via DEFAULT_STOP_MULTIPLIER env var or per-strategy override.`,
+    related: ["ATR_STOP", "ATR", "TARGET_MULTIPLIER"],
+  },
+
+  TARGET_MULTIPLIER: {
+    term: "TARGET_MULTIPLIER",
+    display: "Target Multiplier",
+    short: "Reward:risk ratio expressed as ATR multiples. Default 2.0× = 1.5:1 to 2:1 R:R.",
+    long: `**Target Multiplier** sets the take-profit level: target = entry ± (ATR × target_multiplier).
+
+With stop_multiplier=1.5 and target_multiplier=2.0, the trade targets a 1.33:1 reward-to-risk ratio.
+
+For defined-risk strategies (IRON_CONDOR, JADE_LIZARD), the target is set at premium_received × 0.5 (50% profit) rather than an ATR multiple.`,
+    related: ["STOP_MULTIPLIER", "ATR", "ATR_STOP"],
+  },
+
+  DAILY_LOSS_LIMIT: {
+    term: "DAILY_LOSS_LIMIT",
+    display: "Daily Loss Limit",
+    short: "Maximum net loss allowed in a single trading day before the circuit breaker fires a hard stop.",
+    long: `**Daily Loss Limit** ($2,500 default, configurable via DAILY_LOSS_LIMIT env var) triggers a hard stop when daily net P&L drops below −DAILY_LOSS_LIMIT.
+
+Once fired, the publisher is paused and no new trades are accepted for the remainder of the day.`,
+    related: ["CIRCUIT_BREAKER", "HARD_STOP", "SOFT_PAUSE"],
+  },
+
+  SOFT_PAUSE: {
+    term: "SOFT_PAUSE",
+    display: "Soft Pause",
+    short: "Temporary 30-minute trading halt after 3 consecutive losses. Auto-resumes.",
+    long: `**Soft Pause** is the circuit breaker's cooling-off state. It fires after CONSECUTIVE_LOSS_LIMIT losses in a row and lasts CONSECUTIVE_LOSS_PAUSE_MIN minutes (default 30).
+
+During soft pause, the publisher stops generating proposals. The dashboard shows an amber warning banner with a countdown to resume time. The Telegram bot remains active so you can monitor status.`,
+    related: ["CIRCUIT_BREAKER", "CONSECUTIVE_LOSS_LIMIT", "HARD_STOP"],
+  },
+
+  HARD_STOP: {
+    term: "HARD_STOP",
+    display: "Hard Stop",
+    short: "Permanent daily trading halt when daily loss limit is hit. No overrides.",
+    long: `**Hard Stop** fires when daily net P&L reaches −DAILY_LOSS_LIMIT. The publisher is paused for the rest of the trading day.
+
+Unlike soft pause, hard stop does not auto-resume. The system resumes at market open the next day. There is no override — if the daily loss limit is hit, trading stops. Period.`,
+    related: ["CIRCUIT_BREAKER", "DAILY_LOSS_LIMIT", "SOFT_PAUSE"],
+  },
+
+  REALTIME_BARS: {
+    term: "REALTIME_BARS",
+    display: "Realtime Bars",
+    short: "1-minute OHLCV bars fetched from Tradier timesales every 60 seconds.",
+    long: `**Realtime Bars** are 1-minute OHLCV (Open/High/Low/Close/Volume) bars for TSLA fetched from the Tradier /markets/timesales endpoint every 60 seconds.
+
+A rolling window of REALTIME_BAR_WINDOW bars (default 20) is maintained in memory. These bars drive ATR computation, volume ratio, and VWAP for the stop manager.
+
+When the publisher is paused, bar fetching also pauses. On unpause, a backfill call retrieves the missed window in a single request.`,
+    related: ["ATR", "VWAP", "VOLUME_EXPANSION"],
+  },
+
+  VWAP: {
+    term: "VWAP",
+    display: "VWAP",
+    short: "Volume-Weighted Average Price — the average price weighted by volume. Used as a fair value reference.",
+    long: `**VWAP** (Volume-Weighted Average Price) is calculated as sum(price × volume) / sum(volume) over the current bar window.
+
+Intraday traders use VWAP as a dynamic support/resistance level:
+- Price above VWAP = bullish bias
+- Price below VWAP = bearish bias
+
+Phase 17 computes VWAP from the 20-bar realtime window and exposes it via /api/bars/latest.`,
+    formula: "VWAP = Σ(close × volume) / Σ(volume)",
+    related: ["REALTIME_BARS", "VOLUME_EXPANSION"],
+  },
+
+  VOLUME_EXPANSION: {
+    term: "VOLUME_EXPANSION",
+    display: "Volume Expansion",
+    short: "When current bar volume exceeds the 20-bar average — signals a potential breakout or trend acceleration.",
+    long: `**Volume Expansion** is when the current 1-minute bar's volume is significantly higher than the rolling average (volume_ratio > 1.5).
+
+High volume confirms price moves:
+- Breakout on high volume → more likely to sustain
+- Breakout on low volume → more likely to fade
+
+Phase 17 computes volume_ratio = current_volume / avg_20bar_volume and exposes it in /api/bars/latest.`,
+    formula: "volume_ratio = current_bar_volume / mean(last_20_bars_volume)",
+    related: ["REALTIME_BARS", "VWAP", "ATR"],
+  },
+
+  MANAGED_POSITION: {
+    term: "MANAGED_POSITION",
+    display: "Managed Position",
+    short: "An open trade being monitored every bar for ATR stop, trailing stop, target, and time stop.",
+    long: `**Managed Position** is a trade that has been executed and is now tracked by the Phase 17 stop manager.
+
+Every 60 seconds (on each new bar), the stop manager checks four exit conditions in priority order:
+1. Time stop (hard deadline)
+2. Target / take-profit
+3. Trailing stop (ratcheted in profit direction)
+4. Initial stop (cut loss)
+
+When any condition fires, a market order closes the position and the exit is recorded in trade_ledger with the stop_type tag.`,
+    related: ["ATR_STOP", "TRAILING_STOP", "TIME_STOP", "CIRCUIT_BREAKER"],
+  },
+
+  POSITION_MANAGER: {
+    term: "POSITION_MANAGER",
+    display: "Position Manager",
+    short: "Dashboard panel showing open positions with stop/target levels, time countdown, and manual close.",
+    long: `**Position Manager** is the Phase 17 dashboard panel that surfaces open managed positions in real time.
+
+For each position it shows:
+- Contract details + entry price + current unrealized P&L
+- ATR stop level (red), trailing stop (amber), target (green) visualized on a price bar
+- Time remaining until the time stop fires (countdown timer, turns red when <60s)
+- Manual close button ("Close Now") for immediate exit
+
+The circuit breaker banner appears at the top of the panel when a hard stop or soft pause is active.`,
+    related: ["MANAGED_POSITION", "CIRCUIT_BREAKER", "ATR_STOP", "TRAILING_STOP"],
+  },
 };
 
 /**

@@ -1,0 +1,211 @@
+/* Phase 17 — Position Manager panel */
+
+.position-manager {
+  background: #1a1f2e;
+  border: 1px solid #2a3040;
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.position-manager h3 {
+  color: #e0e0e0;
+  font-size: 14px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 0 0 12px;
+}
+
+.position-manager .empty-state {
+  color: #666;
+  font-size: 13px;
+  text-align: center;
+  padding: 20px 0;
+}
+
+/* Individual position card */
+.position-card {
+  background: #11151f;
+  border: 1px solid #2a3040;
+  border-radius: 6px;
+  padding: 12px;
+  margin-bottom: 10px;
+  position: relative;
+}
+
+.position-card.pnl-positive { border-left: 3px solid #26a17b; }
+.position-card.pnl-negative { border-left: 3px solid #e53935; }
+
+.position-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.position-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #e0e0e0;
+}
+
+.position-pnl {
+  font-size: 13px;
+  font-weight: 700;
+}
+.position-pnl.green { color: #26a17b; }
+.position-pnl.red   { color: #e53935; }
+
+.position-meta {
+  display: flex;
+  gap: 12px;
+  font-size: 11px;
+  color: #888;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+/* Stop/target bar visualization */
+.stop-viz {
+  margin: 8px 0;
+  position: relative;
+}
+
+.stop-viz-track {
+  height: 4px;
+  background: #2a3040;
+  border-radius: 2px;
+  position: relative;
+  margin: 0 4px;
+}
+
+.stop-line-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: #666;
+  margin-top: 2px;
+}
+
+.stop-indicator {
+  position: absolute;
+  top: -4px;
+  width: 2px;
+  height: 12px;
+  border-radius: 1px;
+}
+.stop-indicator.initial-stop   { background: #e53935; }
+.stop-indicator.trailing-stop  { background: #ff9800; }
+.stop-indicator.target         { background: #26a17b; }
+.stop-indicator.current-price  { background: #fff; }
+
+/* Time countdown */
+.time-stop-countdown {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #888;
+  margin-top: 6px;
+}
+
+.time-stop-countdown .urgent { color: #ff9800; font-weight: 600; }
+.time-stop-countdown .critical { color: #e53935; font-weight: 700; }
+
+/* Manual close button */
+.close-now-btn {
+  display: block;
+  width: 100%;
+  margin-top: 10px;
+  padding: 6px 12px;
+  background: transparent;
+  border: 1px solid #e53935;
+  border-radius: 4px;
+  color: #e53935;
+  font-size: 12px;
+  cursor: pointer;
+  text-align: center;
+  transition: background 0.15s, color 0.15s;
+}
+.close-now-btn:hover {
+  background: #e53935;
+  color: #fff;
+}
+.close-now-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+  pointer-events: none;
+}
+
+/* Circuit breaker banner */
+.circuit-breaker-banner {
+  border-radius: 6px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  font-size: 13px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.circuit-breaker-banner.hard-stop {
+  background: rgba(229,57,53,0.15);
+  border: 1px solid #e53935;
+  color: #e53935;
+}
+.circuit-breaker-banner.soft-pause {
+  background: rgba(255,152,0,0.12);
+  border: 1px solid #ff9800;
+  color: #ff9800;
+}
+.circuit-breaker-banner.target-reached {
+  background: rgba(38,161,123,0.12);
+  border: 1px solid #26a17b;
+  color: #26a17b;
+}
+
+/* Exit toast notification */
+.exit-toast-container {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.exit-toast {
+  padding: 10px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+  animation: toast-in 0.2s ease-out;
+  pointer-events: auto;
+  max-width: 320px;
+}
+.exit-toast.winner {
+  background: rgba(26,31,46,0.97);
+  border: 1px solid #26a17b;
+  color: #26a17b;
+}
+.exit-toast.loser {
+  background: rgba(26,31,46,0.97);
+  border: 1px solid #e53935;
+  color: #e53935;
+}
+.exit-toast.fading {
+  animation: toast-out 0.3s ease-in forwards;
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(20px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes toast-out {
+  from { opacity: 1; }
+  to   { opacity: 0; transform: translateY(10px); }
+}

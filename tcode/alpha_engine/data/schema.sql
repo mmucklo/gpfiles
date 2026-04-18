@@ -216,3 +216,40 @@ CREATE TABLE IF NOT EXISTS selected_strategy (
     locked_at TEXT NOT NULL,
     locked_by TEXT NOT NULL DEFAULT 'user'
 );
+
+-- Phase 17 — realtime_1min_bars: persisted 1-min TSLA bars from Tradier timesales.
+-- The source column distinguishes from other price_bars sources.
+-- price_bars already exists; this view makes Phase 17 bars queryable by ts range.
+CREATE TABLE IF NOT EXISTS realtime_1min_bars (
+    ts      TEXT    NOT NULL,   -- ISO 8601 local (Tradier format)
+    open    REAL    NOT NULL,
+    high    REAL    NOT NULL,
+    low     REAL    NOT NULL,
+    close   REAL    NOT NULL,
+    volume  INTEGER NOT NULL,
+    vwap    REAL,
+    PRIMARY KEY (ts)
+);
+CREATE INDEX IF NOT EXISTS idx_realtime_bars_ts ON realtime_1min_bars(ts DESC);
+
+-- Phase 17 — managed_positions: tracks ATR stops, trailing levels, time stops.
+-- One row per open/closed managed position (linked to trade_ledger.id).
+CREATE TABLE IF NOT EXISTS managed_positions (
+    trade_id        INTEGER PRIMARY KEY,  -- FK to trade_ledger.id
+    entry_price     REAL    NOT NULL,
+    entry_time      TEXT    NOT NULL,
+    quantity        INTEGER NOT NULL,
+    direction       TEXT    NOT NULL,   -- LONG | SHORT
+    strategy        TEXT    NOT NULL,
+    initial_stop    REAL,
+    current_stop    REAL,
+    target          REAL,
+    time_stop_at    TEXT    NOT NULL,
+    stop_multiplier REAL,
+    target_multiplier REAL,
+    trailing_engaged INTEGER NOT NULL DEFAULT 0,
+    is_open         INTEGER NOT NULL DEFAULT 1,
+    exit_price      REAL,
+    exit_time       TEXT,
+    stop_type       TEXT                -- TP | SL | TIME_STOP | TRAILING | MANUAL
+);

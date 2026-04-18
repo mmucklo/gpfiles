@@ -11,6 +11,8 @@ import RejectedSignalsPanel from '../components/RejectedSignalsPanel';
 import MorningBriefing from '../components/MorningBriefing';
 import TradeApprovalQueue from '../components/TradeApprovalQueue';
 import LivePnLPanel from '../components/LivePnLPanel';
+// Phase 17: Position manager with ATR stops, trailing, circuit breaker
+import PositionManager from '../components/PositionManager';
 
 // ============================================================
 //  Types
@@ -5459,6 +5461,14 @@ const Dashboard = ({ brokerStatus, integrityRed = false }: { brokerStatus: Broke
                 title="💰 LIVE P&L — TODAY"
             >
                 <LivePnLPanel />
+            </CollapsiblePanel>
+
+            {/* Phase 17: Position Manager — ATR stops, trailing, circuit breaker */}
+            <CollapsiblePanel
+                storageKey="dashboard_positions_open"
+                title="📍 POSITION MANAGER"
+            >
+                <PositionManager />
             </CollapsiblePanel>
             {/* ──────────────────────────────────────────────────────────────── */}
 

@@ -255,6 +255,18 @@ func main() {
 		configHandler.ServeSignalRejectionDetail(w, r)
 	})
 
+	// Phase 17: Intraday execution engine
+	mux.HandleFunc("/api/bars/latest", configHandler.ServeBarsLatest)
+	mux.HandleFunc("/api/circuit-breaker", configHandler.ServeCircuitBreaker)
+	mux.HandleFunc("/api/positions/managed", configHandler.ServeManagedPositions)
+	mux.HandleFunc("/api/positions/managed/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/close") {
+			configHandler.ServeManagedPositionClose(w, r)
+		} else {
+			http.NotFound(w, r)
+		}
+	})
+
 	// Phase 16.1: Publisher pause gate
 	mux.HandleFunc("/api/system/pause-status", configHandler.ServePauseStatus)
 	mux.HandleFunc("/api/system/pause", configHandler.ServePause)
