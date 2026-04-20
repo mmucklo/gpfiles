@@ -1,0 +1,325 @@
+/* ============================================================
+   StatusBar — Phase 18 Zone A
+   64px desktop / 48px mobile. Sticky, never scrolls.
+   ============================================================ */
+
+.status-bar {
+  position: sticky;
+  top: 44px; /* stacks below the 44px app-nav-bar header */
+  z-index: 100;
+  height: 64px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 0 1.25rem;
+  background: #0d1117;
+  border-bottom: 1px solid #30363d;
+  font-family: 'Courier New', monospace;
+  overflow: visible; /* allow dropdowns to overflow */
+}
+
+/* ── Sections ────────────────────────────────────────────────── */
+.sb-section {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.sb-left   { flex: 0 0 auto; gap: 0.4rem; flex-direction: column; align-items: flex-start; justify-content: center; min-width: 160px; }
+.sb-center { flex: 1; justify-content: center; gap: 0.5rem; }
+.sb-right  { flex: 0 0 auto; justify-content: flex-end; gap: 0.4rem; }
+
+/* ── P&L block ───────────────────────────────────────────────── */
+.sb-pnl-block {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.sb-pnl-amount {
+  font-size: 1.35rem;
+  font-weight: 900;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+/* ONLY green for profit */
+.sb-pnl-amount.profit { color: #00C853; }
+/* ONLY red for loss */
+.sb-pnl-amount.loss   { color: #FF1744; }
+.sb-pnl-amount.zero   { color: #8b949e; }
+
+.sb-circuit-badge {
+  font-size: 0.65rem;
+  background: rgba(255, 180, 0, 0.18);
+  border: 1px solid #FFB300;
+  color: #FFB300;
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-weight: 700;
+  animation: sb-circuit-pulse 1s ease-in-out infinite;
+}
+@keyframes sb-circuit-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* ── Target progress bar ─────────────────────────────────────── */
+.sb-target-row {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  width: 100%;
+}
+
+.sb-target-track {
+  width: 90px;
+  height: 4px;
+  background: #21262d;
+  border-radius: 2px;
+  overflow: hidden;
+}
+.sb-target-fill {
+  height: 100%;
+  background: #58a6ff;
+  border-radius: 2px;
+  transition: width 0.5s ease;
+}
+.sb-target-fill.halfway  { background: #FFB300; }
+.sb-target-fill.complete { background: #00C853; }
+
+.sb-target-label {
+  font-size: 0.65rem;
+  color: #6e7681;
+  white-space: nowrap;
+}
+
+/* ── Chips (shared) ──────────────────────────────────────────── */
+.sb-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.2rem 0.55rem;
+  border-radius: 5px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  cursor: pointer;
+  border: 1px solid transparent;
+  background: #21262d;
+  color: #c9d1d9;
+  font-family: inherit;
+  line-height: 1.3;
+  transition: background 0.15s;
+}
+.sb-chip:hover {
+  background: #30363d;
+}
+/* non-button chips */
+span.sb-chip {
+  cursor: default;
+}
+span.sb-chip:hover {
+  background: #21262d;
+}
+
+/* ── Position count chip ─────────────────────────────────────── */
+.sb-pos-count {
+  background: #161b22;
+  border-color: #30363d;
+  color: #79c0ff;
+  cursor: pointer;
+}
+.sb-pos-count:hover { background: #21262d; }
+
+/* ── Regime badge ────────────────────────────────────────────── */
+.sb-regime-badge {
+  border-width: 1px;
+  border-style: solid;
+}
+.sb-regime-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.sb-regime-conf {
+  color: #6e7681;
+  font-weight: 400;
+  font-size: 0.65rem;
+  margin-left: 0.15rem;
+}
+
+/* ── Strategy selector ───────────────────────────────────────── */
+.sb-strategy-wrapper {
+  position: relative;
+}
+.sb-strategy-chip {
+  background: #161b22;
+  border-color: #30363d;
+  color: #c9d1d9;
+}
+.sb-dropdown-arrow {
+  margin-left: 0.2rem;
+  font-size: 0.65rem;
+  color: #6e7681;
+}
+.sb-strategy-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 0.3rem;
+  z-index: 200;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.25rem;
+  min-width: 200px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+}
+.sb-strat-opt {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.3rem 0.5rem;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: #8b949e;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.15s;
+  text-align: left;
+}
+.sb-strat-opt:hover  { background: #21262d; color: #c9d1d9; }
+.sb-strat-opt.active { background: rgba(0,200,83,0.12); border-color: #00C853; color: #00C853; }
+
+/* ── Mode badge ──────────────────────────────────────────────── */
+.sb-mode-badge {
+  font-weight: 800;
+}
+.sb-mode-badge.live {
+  background: rgba(255,23,68,0.15);
+  border-color: #FF1744;
+  color: #FF1744;
+  box-shadow: 0 0 6px rgba(255,23,68,0.35);
+}
+.sb-mode-badge.sim {
+  background: rgba(255,179,0,0.12);
+  border-color: #FFB300;
+  color: #FFB300;
+}
+.sb-mode-badge.paper {
+  background: rgba(88,166,255,0.1);
+  border-color: rgba(88,166,255,0.3);
+  color: #58a6ff;
+}
+.sb-disconnected-dot {
+  font-size: 0.8em;
+  margin-left: 0.2rem;
+  color: #FFB300;
+}
+
+/* ── Health badge — NEVER red/green (those are P&L only) ─────── */
+.sb-health-badge {
+  cursor: pointer;
+}
+.sb-health-badge.ok {
+  background: rgba(88,166,255,0.1);
+  border-color: rgba(88,166,255,0.3);
+  color: #79c0ff;
+}
+.sb-health-badge.degraded {
+  background: rgba(255,179,0,0.12);
+  border-color: #FFB300;
+  color: #FFB300;
+  animation: sb-health-flash 2s ease-in-out infinite;
+}
+@keyframes sb-health-flash {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.65; }
+}
+
+/* ── Pause badge ─────────────────────────────────────────────── */
+.sb-pause-badge {
+  background: rgba(255,179,0,0.12);
+  border-color: #FFB300;
+  color: #FFB300;
+  cursor: default;
+}
+
+/* ── Active / pause button ───────────────────────────────────── */
+.sb-active-badge {
+  background: rgba(88,166,255,0.08);
+  border-color: rgba(88,166,255,0.25);
+  color: #58a6ff;
+}
+.sb-active-badge:hover {
+  background: rgba(88,166,255,0.15);
+}
+
+/* ── Catalyst badge ──────────────────────────────────────────── */
+.sb-catalyst-wrapper { position: relative; }
+.sb-catalyst-badge {
+  background: rgba(255,179,0,0.15);
+  border-color: #FFB300;
+  color: #FFB300;
+}
+.sb-catalyst-badge.pulsing {
+  animation: sb-catalyst-pulse 2s ease-in-out infinite;
+}
+@keyframes sb-catalyst-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255,179,0,0.4); }
+  50% { box-shadow: 0 0 0 4px rgba(255,179,0,0); }
+}
+
+.sb-catalyst-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  background: #161b22;
+  border: 1px solid #FFB300;
+  border-radius: 8px;
+  padding: 0.75rem;
+  z-index: 200;
+  min-width: 220px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+}
+.sb-cat-pop-title {
+  font-size: 0.82rem;
+  font-weight: 800;
+  color: #FFB300;
+  margin-bottom: 0.5rem;
+}
+.sb-cat-pop-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.75rem;
+  color: #8b949e;
+  margin-bottom: 0.25rem;
+}
+.sb-cat-pop-row span:last-child { color: #c9d1d9; }
+.sb-cat-impact.high   { color: #FF1744 !important; }
+.sb-cat-impact.medium { color: #FFB300 !important; }
+.sb-cat-impact.low    { color: #58a6ff !important; }
+
+/* ── Mobile (48px) ───────────────────────────────────────────── */
+@media (max-width: 767px) {
+  .status-bar {
+    height: 48px;
+    padding: 0 0.75rem;
+    gap: 0.35rem;
+  }
+  .sb-left { min-width: 100px; }
+  .sb-pnl-amount { font-size: 1rem; }
+  .sb-target-row { display: none; }
+  .sb-regime-conf { display: none; }
+  .sb-center { gap: 0.3rem; }
+  .sb-chip { padding: 0.15rem 0.4rem; font-size: 0.65rem; }
+}

@@ -23,20 +23,31 @@ body {
 }
 
 .header {
-  padding: 1rem 2rem;
+  position: sticky;
+  top: 0;
+  z-index: 200;
+  padding: 0.5rem 1.25rem;
   border-bottom: 1px solid var(--border-color);
   background-color: var(--panel-bg);
   display: flex;
   justify-content: space-between;
   align-items: center;
+  min-height: 44px;
+}
+
+/* Phase 18 slim nav bar */
+.app-nav-bar {
+  height: 44px;
+  padding: 0 1.25rem;
 }
 
 .header h1 {
   margin: 0;
-  font-size: 1.2rem;
+  font-size: 0.95rem;
   font-weight: 600;
   color: var(--accent-color);
   letter-spacing: -0.02em;
+  white-space: nowrap;
 }
 
 .hamburger {
@@ -83,8 +94,13 @@ body {
 
 .main-content {
   flex: 1;
-  padding: 2rem;
-  overflow-x: hidden;
+  padding: 0;
+  overflow-x: clip; /* clip (not hidden) so position:sticky on StatusBar works vs viewport */
+}
+
+/* Phase 18: content inside dashboard uses its own padding */
+.dashboard-content-pad {
+  padding: 0 1.25rem 1.25rem;
 }
 
 .settings-drawer .card {
@@ -158,14 +174,7 @@ body {
   margin-top: 1rem;
 }
 
-.status-bar {
-  padding: 0.5rem 2rem;
-  background-color: var(--panel-bg);
-  border-top: 1px solid var(--border-color);
-  font-size: 0.8rem;
-  display: flex;
-  justify-content: space-between;
-}
+/* .status-bar legacy rule removed — Phase 18 StatusBar component owns this class */
 
 .status-online {
   color: var(--success-color);

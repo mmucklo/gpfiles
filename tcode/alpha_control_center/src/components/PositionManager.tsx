@@ -163,7 +163,7 @@ function CircuitBreakerBanner({ state }: { state: CircuitBreakerState | null }) 
   if (state.status === 'target_reached') {
     return (
       <div className="circuit-breaker-banner target-reached" data-testid="circuit-breaker-banner">
-        🎯 Daily target reached! ${state.daily_pnl.toFixed(0)} profit today.
+        🎯 Daily target reached! ${(state.daily_pnl ?? 0).toFixed(0)} profit today.
       </div>
     );
   }
@@ -297,7 +297,7 @@ export default function PositionManager() {
           Open Positions
           {indicators && (
             <span style={{ float: 'right', fontWeight: 400, color: '#888', fontSize: 11 }}>
-              ATR {indicators.atr.toFixed(3)} · Vol×{indicators.volume_ratio.toFixed(1)}
+              ATR {(indicators.atr ?? 0).toFixed(3)} · Vol×{(indicators.volume_ratio ?? 0).toFixed(1)}
             </span>
           )}
         </h3>
@@ -335,7 +335,7 @@ export default function PositionManager() {
                 </div>
 
                 <div className="position-meta">
-                  <span>Entry: ${pos.entry_price.toFixed(2)}</span>
+                  <span>Entry: ${(pos.entry_price ?? 0).toFixed(2)}</span>
                   {currentPrice > 0 && <span>Now: ${currentPrice.toFixed(2)}</span>}
                   <span>Qty: {pos.quantity}</span>
                 </div>

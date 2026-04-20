@@ -1,0 +1,182 @@
+/* ============================================================
+   MergedPositionsTable — Phase 18 UI Overhaul
+   ============================================================ */
+
+.mpt-container {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 0.75rem 0;
+}
+
+.mpt-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.55rem 1rem;
+  background: #161b22;
+  border-bottom: 1px solid #30363d;
+}
+
+.mpt-title {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: #8b949e;
+  text-transform: uppercase;
+}
+
+.mpt-legend {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  font-size: 0.68rem;
+  color: #6e7681;
+}
+.mpt-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+/* ── Status dot ──────────────────────────────────────────────── */
+.mpt-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+.mpt-status-dot.mpt-status-pending   { background: #FFB300; }
+.mpt-status-dot.mpt-status-open      { background: #58a6ff; }
+.mpt-status-dot.mpt-status-closing   { background: #FF1744; animation: mpt-closing-blink 1s ease-in-out infinite; }
+.mpt-status-dot.mpt-status-cancelled { background: #484f58; }
+
+@keyframes mpt-closing-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* ── Empty state ─────────────────────────────────────────────── */
+.mpt-empty {
+  padding: 2rem;
+  text-align: center;
+  color: #6e7681;
+  font-size: 0.82rem;
+}
+
+/* ── Table ───────────────────────────────────────────────────── */
+.mpt-table-wrapper {
+  overflow-x: auto;
+}
+
+.mpt-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+  font-family: 'Courier New', monospace;
+}
+
+.mpt-table thead tr {
+  background: #161b22;
+}
+.mpt-table th {
+  padding: 0.45rem 0.6rem;
+  text-align: left;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: #6e7681;
+  text-transform: uppercase;
+  border-bottom: 1px solid #30363d;
+  white-space: nowrap;
+}
+
+.mpt-table td {
+  padding: 0.4rem 0.6rem;
+  color: #c9d1d9;
+  border-bottom: 1px solid #21262d;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+/* ── Row states ──────────────────────────────────────────────── */
+.mpt-row-pending   { background: rgba(255,179,0,0.03); }
+.mpt-row-open      { background: rgba(88,166,255,0.03); }
+.mpt-row-closing   { background: rgba(255,23,68,0.04); }
+.mpt-row-cancelled { background: transparent; opacity: 0.5; }
+
+/* ── Status label ────────────────────────────────────────────── */
+.mpt-status-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  margin-left: 0.25rem;
+}
+.mpt-status-pending   { color: #FFB300; }
+.mpt-status-open      { color: #58a6ff; }
+.mpt-status-closing   { color: #FF1744; }
+.mpt-status-cancelled { color: #484f58; }
+
+/* ── P&L cells — ONLY these use green/red ─────────────────────── */
+.pnl-profit { color: #00C853; font-weight: 700; }
+.pnl-loss   { color: #FF1744; font-weight: 700; }
+
+/* ── Direction ───────────────────────────────────────────────── */
+.mpt-direction { font-weight: 600; }
+.mpt-direction.long,
+.mpt-direction.bullish { color: #58a6ff; }
+.mpt-direction.short,
+.mpt-direction.bearish { color: #c9d1d9; }
+
+/* ── Data cells ──────────────────────────────────────────────── */
+.mpt-contract { color: #c9d1d9; font-weight: 600; }
+.mpt-stop     { color: #FF1744; }
+.mpt-target   { color: #00C853; }
+.mpt-timeleft { color: #8b949e; font-variant-numeric: tabular-nums; }
+
+/* ── Action buttons ──────────────────────────────────────────── */
+.mpt-actions { text-align: right; }
+
+.mpt-btn-cancel {
+  padding: 0.2rem 0.6rem;
+  background: rgba(255,179,0,0.1);
+  border: 1px solid rgba(255,179,0,0.4);
+  border-radius: 4px;
+  color: #FFB300;
+  font-size: 0.7rem;
+  font-weight: 700;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.15s;
+}
+.mpt-btn-cancel:hover:not(:disabled) { background: rgba(255,179,0,0.2); }
+.mpt-btn-cancel:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.mpt-btn-close {
+  padding: 0.2rem 0.6rem;
+  background: rgba(88,166,255,0.1);
+  border: 1px solid rgba(88,166,255,0.35);
+  border-radius: 4px;
+  color: #58a6ff;
+  font-size: 0.7rem;
+  font-weight: 700;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.15s;
+}
+.mpt-btn-close:hover:not(:disabled) { background: rgba(88,166,255,0.2); }
+.mpt-btn-close:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.mpt-closing-label {
+  font-size: 0.7rem;
+  color: #FF1744;
+  font-weight: 600;
+}
+
+/* ── Mobile ──────────────────────────────────────────────────── */
+@media (max-width: 767px) {
+  .mpt-legend { display: none; }
+  .mpt-table th:nth-child(n+6) { display: none; } /* hide Current, P&L, Stop, Target, TimeLeft */
+  .mpt-table td:nth-child(n+6) { display: none; }
+}

@@ -1,0 +1,339 @@
+/* ============================================================
+   TabbedReferencePanel — Phase 18 Zone C
+   ============================================================ */
+
+.tabbed-ref-panel {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 0.75rem 0;
+}
+
+/* ── Tab bar ─────────────────────────────────────────────────── */
+.trp-tab-bar {
+  display: flex;
+  background: #161b22;
+  border-bottom: 1px solid #30363d;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.trp-tab-bar::-webkit-scrollbar { display: none; }
+
+.trp-tab-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.55rem 0.9rem;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: #6e7681;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+  white-space: nowrap;
+  font-family: inherit;
+  transition: color 0.15s, border-color 0.15s;
+}
+.trp-tab-btn:hover { color: #c9d1d9; }
+.trp-tab-btn.active {
+  color: #58a6ff;
+  border-bottom-color: #58a6ff;
+  background: rgba(88,166,255,0.05);
+}
+
+/* Dot indicator */
+.trp-dot-indicator {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #FFB300;
+  flex-shrink: 0;
+  animation: trp-dot-pulse 2s ease-in-out infinite;
+}
+@keyframes trp-dot-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.8); }
+}
+
+/* ── Panel body ──────────────────────────────────────────────── */
+.trp-panel-body {
+  padding: 0.75rem 1rem;
+  min-height: 180px;
+}
+
+/* ── Shared tab content styles ───────────────────────────────── */
+.tab-content { }
+
+.tab-empty {
+  color: #6e7681;
+  font-size: 0.82rem;
+  padding: 1.5rem 0;
+  text-align: center;
+}
+
+.tab-grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+}
+@media (max-width: 767px) {
+  .tab-grid-2 { grid-template-columns: 1fr; }
+}
+
+.tab-card {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 0.65rem 0.85rem;
+}
+
+.tab-card-title {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: #8b949e;
+  text-transform: uppercase;
+  margin-bottom: 0.5rem;
+}
+
+.tab-stat-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.78rem;
+  color: #c9d1d9;
+  padding: 0.2rem 0;
+}
+.tab-stat-label {
+  color: #6e7681;
+  font-size: 0.72rem;
+}
+
+/* P&L colors — ONLY for change pct / P&L values */
+.tab-change.pos { color: #00C853; font-weight: 600; }
+.tab-change.neg { color: #FF1744; font-weight: 600; }
+
+.tab-stale {
+  font-size: 0.65rem;
+  color: #484f58;
+  margin-top: 0.35rem;
+}
+
+.tab-description {
+  font-size: 0.72rem;
+  color: #8b949e;
+  margin-top: 0.5rem;
+  line-height: 1.5;
+  border-top: 1px solid #21262d;
+  padding-top: 0.4rem;
+}
+
+/* ── Bar helpers ─────────────────────────────────────────────── */
+.tab-bar-inline {
+  display: inline-block;
+  width: 80px;
+  height: 6px;
+  background: #21262d;
+  border-radius: 3px;
+  overflow: hidden;
+  vertical-align: middle;
+}
+.tab-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.4s;
+}
+
+/* ── VIX badge — amber/blue, NOT profit-red/loss-green ─────── */
+.tab-vix-badge {
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: #21262d;
+  color: #c9d1d9;
+}
+.tab-vix-badge.high    { background: rgba(255,179,0,0.12); color: #FFB300; }
+.tab-vix-badge.extreme { background: rgba(255,119,0,0.15); color: #ff7700; }
+.tab-vix-badge.low     { background: rgba(88,166,255,0.1); color: #58a6ff; }
+.tab-vix-badge.normal  { background: #21262d; color: #8b949e; }
+
+/* ── P/C badge ───────────────────────────────────────────────── */
+.tab-pc-badge {
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+.tab-pc-badge.bullish { background: rgba(0,200,83,0.12); color: #00C853; }
+.tab-pc-badge.bearish { background: rgba(255,23,68,0.12); color: #FF1744; }
+.tab-pc-badge.neutral { background: #21262d; color: #8b949e; }
+
+/* ── Sentiment bar ───────────────────────────────────────────── */
+.tab-sentiment-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.tab-sentiment-track {
+  flex: 1;
+  height: 8px;
+  background: #21262d;
+  border-radius: 4px;
+  overflow: hidden;
+}
+.tab-sentiment-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.5s;
+}
+
+/* ── Urgency labels ──────────────────────────────────────────── */
+.tab-urgent { color: #FF1744; font-weight: 700; }
+.tab-warn   { color: #FFB300; font-weight: 600; }
+
+/* ── Pre-market catalyst note ────────────────────────────────── */
+.tab-catalyst-note {
+  margin-top: 0.5rem;
+  padding: 0.35rem 0.5rem;
+  background: rgba(255,179,0,0.08);
+  border-left: 2px solid #FFB300;
+  border-radius: 0 4px 4px 0;
+  font-size: 0.75rem;
+  color: #FFB300;
+}
+
+/* ── Congress tab ────────────────────────────────────────────── */
+.tab-congress-sig {
+  font-weight: 700;
+}
+.tab-congress-sig.bullish { color: #00C853; }
+.tab-congress-sig.bearish { color: #FF1744; }
+.tab-congress-sig.neutral { color: #8b949e; }
+
+.tab-congress-list {
+  margin-top: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.tab-congress-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto auto;
+  gap: 0.5rem;
+  font-size: 0.72rem;
+  padding: 0.25rem 0;
+  border-bottom: 1px solid #21262d;
+  align-items: center;
+}
+.tab-congress-member { color: #c9d1d9; }
+.tab-congress-txn.buy  { color: #00C853; font-weight: 700; }
+.tab-congress-txn.sell { color: #FF1744; font-weight: 700; }
+.tab-congress-amount { color: #8b949e; }
+.tab-congress-date   { color: #6e7681; }
+
+/* ── Filter row ──────────────────────────────────────────────── */
+.tab-filter-row {
+  display: flex;
+  gap: 0.35rem;
+  margin-bottom: 0.6rem;
+}
+.tab-filter-btn {
+  padding: 0.2rem 0.6rem;
+  background: #21262d;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  color: #6e7681;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.15s;
+}
+.tab-filter-btn:hover  { background: #30363d; color: #c9d1d9; }
+.tab-filter-btn.active {
+  background: rgba(88,166,255,0.12);
+  border-color: #58a6ff;
+  color: #58a6ff;
+}
+
+/* ── Signal list ─────────────────────────────────────────────── */
+.tab-signal-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.tab-signal-row {
+  display: grid;
+  grid-template-columns: 20px 80px 80px 36px 70px 50px;
+  gap: 0.35rem;
+  align-items: center;
+  font-size: 0.75rem;
+  padding: 0.25rem 0.4rem;
+  border-radius: 4px;
+  background: #161b22;
+  border-left: 2px solid transparent;
+}
+.tab-signal-row.bullish { border-left-color: #00C853; }
+.tab-signal-row.bearish { border-left-color: #FF1744; }
+
+.tab-sig-dir.bullish { color: #00C853; }
+.tab-sig-dir.bearish { color: #FF1744; }
+.tab-sig-strat { color: #c9d1d9; font-weight: 600; }
+.tab-sig-type  { color: #8b949e; }
+.tab-sig-conf  { color: #79c0ff; }
+.tab-sig-time  { color: #6e7681; text-align: right; }
+
+.tab-sig-status {
+  font-size: 0.65rem;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-weight: 700;
+}
+.tab-sig-status.submitted,
+.tab-sig-status.sim_filled { background: rgba(0,200,83,0.12); color: #00C853; }
+.tab-sig-status.rejected { background: rgba(255,179,0,0.12); color: #FFB300; }
+.tab-sig-status.failed   { background: rgba(88,166,255,0.1); color: #58a6ff; }
+
+/* ── Activity list ───────────────────────────────────────────── */
+.tab-activity-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.tab-activity-row {
+  display: grid;
+  grid-template-columns: 20px 1fr 80px 50px;
+  gap: 0.35rem;
+  align-items: center;
+  font-size: 0.75rem;
+  padding: 0.25rem 0.4rem;
+  border-radius: 4px;
+  background: #161b22;
+}
+.tab-act-type-badge { font-size: 0.8rem; }
+.tab-act-label { color: #c9d1d9; }
+.tab-act-sub   { color: #6e7681; font-size: 0.7rem; }
+.tab-act-time  { color: #484f58; text-align: right; font-size: 0.7rem; }
+
+/* ── Expander button ─────────────────────────────────────────── */
+.tab-expander {
+  display: block;
+  width: 100%;
+  margin-top: 0.5rem;
+  padding: 0.35rem;
+  background: none;
+  border: 1px dashed #30363d;
+  border-radius: 4px;
+  color: #58a6ff;
+  font-size: 0.75rem;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: center;
+  transition: background 0.15s;
+}
+.tab-expander:hover { background: rgba(88,166,255,0.05); }

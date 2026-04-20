@@ -1,4 +1,5 @@
-/* Phase 16 — Live P&L Panel */
+/* Phase 16 — Live P&L Panel
+   Phase 18: Color conformance — green = profit, red = loss ONLY */
 
 .pnl-panel {
   display: flex;
@@ -23,8 +24,9 @@
   transition: color 0.3s;
 }
 
-.pnl-amount.positive { color: #3fb950; }
-.pnl-amount.negative { color: #f85149; }
+/* Phase 18: Tastytrade color law — profit ONLY green, loss ONLY red */
+.pnl-amount.positive { color: #00C853; }
+.pnl-amount.negative { color: #FF1744; }
 .pnl-amount.zero     { color: #8b949e; }
 
 /* ★ Motivating progress bar toward $10k target */
@@ -111,8 +113,9 @@
   margin-bottom: 0.3rem;
 }
 
-.pnl-tooltip-val.pos { color: #3fb950; }
-.pnl-tooltip-val.neg { color: #f85149; }
+/* Phase 18: profit = #00C853, loss = #FF1744 */
+.pnl-tooltip-val.pos { color: #00C853; }
+.pnl-tooltip-val.neg { color: #FF1744; }
 
 /* ── Strategy breakdown ── */
 .pnl-breakdown {
@@ -158,8 +161,9 @@
   border-bottom: 1px solid #0d1117;
 }
 
-.pnl-breakdown-table .td-pnl.pos { color: #3fb950; font-weight: 700; }
-.pnl-breakdown-table .td-pnl.neg { color: #f85149; font-weight: 700; }
+/* Phase 18: P&L ONLY gets green/red */
+.pnl-breakdown-table .td-pnl.pos { color: #00C853; font-weight: 700; }
+.pnl-breakdown-table .td-pnl.neg { color: #FF1744; font-weight: 700; }
 
 /* ── Guardrail bars ── */
 .pnl-guardrails {
@@ -190,22 +194,24 @@
   overflow: hidden;
 }
 
+/* Phase 18 guardrail colors — loss track uses amber/blue (NOT red, that's P&L only) */
 .guardrail-fill {
   height: 100%;
   border-radius: 4px;
-  background: #3fb950;
+  /* Green bar = loss limit OK (< 50% used) */
+  background: #58a6ff;
   transition: width 0.4s ease, background 0.3s;
 }
 
-.guardrail-fill.warn    { background: #d29922; }
-.guardrail-fill.danger  { background: #f85149; }
+.guardrail-fill.warn    { background: #FFB300; }    /* 50-80% used → amber */
+.guardrail-fill.danger  { background: #ff7700; }    /* 80-90% used → orange */
 .guardrail-fill.flashing {
   animation: guardrail-flash 0.5s ease-in-out infinite;
 }
 
 @keyframes guardrail-flash {
-  0%, 100% { background: #f85149; }
-  50%       { background: #7d1414; }
+  0%, 100% { background: #ff7700; }
+  50%       { background: #FF1744; } /* At 90%+ used, DOES use red — that IS a loss signal */
 }
 
 /* Circuit breaker banner */

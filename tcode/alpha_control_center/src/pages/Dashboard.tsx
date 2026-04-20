@@ -8,11 +8,14 @@ import { computeEconomics, formatRR, rrColorClass } from '../lib/signal_economic
 import TermLabel from '../components/TermLabel';
 import RejectedSignalsPanel from '../components/RejectedSignalsPanel';
 // Phase 16: Intraday Cockpit panels
-import MorningBriefing from '../components/MorningBriefing';
 import TradeApprovalQueue from '../components/TradeApprovalQueue';
 import LivePnLPanel from '../components/LivePnLPanel';
 // Phase 17: Position manager with ATR stops, trailing, circuit breaker
 import PositionManager from '../components/PositionManager';
+// Phase 18: 3-zone layout components
+import StatusBar, { type HealthSummary, type PauseStatus } from '../components/StatusBar';
+import TabbedReferencePanel from '../components/TabbedReferencePanel';
+import MergedPositionsTable from '../components/MergedPositionsTable';
 
 // ============================================================
 //  Types
@@ -1671,7 +1674,8 @@ const BrokerStatusPill = ({ brokerStatus }: { brokerStatus: BrokerStatus | null 
 const DataProvenancePanel = ({ audit }: { audit: DataAudit | null }) => {
     if (!audit) return null;
     const sv = audit.spot_validation;
-    const chainAgeSec = audit.chain_age_sec;
+    if (!sv) return null;
+    const chainAgeSec = audit.chain_age_sec ?? 0;
     const chainStale = chainAgeSec > 300;
 
     // Compute age of spot validation timestamp
@@ -1722,7 +1726,7 @@ const DataProvenancePanel = ({ audit }: { audit: DataAudit | null }) => {
 
             {/* Divergence */}
             <div className={`prov-divergence ${divClass}`}>
-                Δ {sv.divergence_pct.toFixed(3)}%
+                Δ {(sv.divergence_pct ?? 0).toFixed(3)}%
             </div>
 
             <div className="prov-panel-sep" />
@@ -5045,7 +5049,23 @@ const CollapsiblePanel = ({
 //  Main Dashboard Component
 // ============================================================
 
-const Dashboard = ({ brokerStatus, integrityRed = false }: { brokerStatus: BrokerStatus | null; integrityRed?: boolean }) => {
+interface DashboardProps {
+    brokerStatus: BrokerStatus | null;
+    integrityRed?: boolean;
+    healthSummary?: HealthSummary | null;
+    pauseStatus?: PauseStatus;
+    onHealthClick?: () => void;
+    onPause?: () => void;
+}
+
+const Dashboard = ({
+    brokerStatus,
+    integrityRed = false,
+    healthSummary = null,
+    pauseStatus = { paused: false, unpause_until: null, remaining_sec: 0 },
+    onHealthClick = () => {},
+    onPause = () => {},
+}: DashboardProps) => {
     const [signals, setSignals] = useState<Signal[]>([]);
     const [trades, setTrades] = useState<Trade[]>([]);
     const [portfolio, setPortfolio] = useState<Portfolio>({
@@ -5335,12 +5355,31 @@ const Dashboard = ({ brokerStatus, integrityRed = false }: { brokerStatus: Broke
         return () => clearInterval(id);
     }, [fetchAll, fetchPendingOrders, fetchCapEvents]);
 
+    // Ref for scrolling to positions table
+    const positionsRef = useRef<HTMLDivElement>(null);
+    const scrollToPositions = () => {
+        positionsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    };
+
     return (
         <>
             {/* Signal modal */}
             {selectedSignal && (
                 <SignalModal signal={selectedSignal} onClose={() => setSelectedSignal(null)} />
             )}
+
+            {/* ── Zone A: Fixed Status Bar ─────────────────────────────────── */}
+            <StatusBar
+                healthSummary={healthSummary}
+                pauseStatus={pauseStatus}
+                brokerStatus={brokerStatus}
+                onHealthClick={onHealthClick}
+                onPause={onPause}
+                onPositionCountClick={scrollToPositions}
+            />
+
+            {/* ── Main content padded area ──────────────────────────────────── */}
+            <div className="dashboard-content-pad">
 
             {/* Integrity RED warning banner */}
             {integrityRed && (
@@ -5352,7 +5391,7 @@ const Dashboard = ({ brokerStatus, integrityRed = false }: { brokerStatus: Broke
                         border: '1px solid rgba(248,81,73,0.4)',
                         borderRadius: '6px',
                         padding: '8px 16px',
-                        margin: '8px 0 0',
+                        margin: '8px 0',
                         display: 'flex',
                         alignItems: 'center',
                         gap: '10px',
@@ -5362,20 +5401,14 @@ const Dashboard = ({ brokerStatus, integrityRed = false }: { brokerStatus: Broke
                     }}
                 >
                     <span>⛔</span>
-                    <span>INTEGRITY ALERT — Price or chain data integrity check failed. New trades are blocked. Check INTEGRITY indicators in the header.</span>
+                    <span>INTEGRITY ALERT — Price or chain data integrity check failed. New trades are blocked.</span>
                     <button
                         data-testid="new-trade-blocked"
                         disabled
                         style={{
-                            marginLeft: 'auto',
-                            padding: '4px 14px',
-                            borderRadius: '4px',
-                            border: '1px solid rgba(248,81,73,0.4)',
-                            background: 'rgba(248,81,73,0.1)',
-                            color: '#f85149',
-                            cursor: 'not-allowed',
-                            fontSize: '0.72rem',
-                            fontWeight: 700,
+                            marginLeft: 'auto', padding: '4px 14px', borderRadius: '4px',
+                            border: '1px solid rgba(248,81,73,0.4)', background: 'rgba(248,81,73,0.1)',
+                            color: '#f85149', cursor: 'not-allowed', fontSize: '0.72rem', fontWeight: 700,
                         }}
                         aria-label="New trade button — disabled while integrity check fails"
                         aria-disabled="true"
@@ -5385,10 +5418,10 @@ const Dashboard = ({ brokerStatus, integrityRed = false }: { brokerStatus: Broke
                 </div>
             )}
 
-            {/* Broker status banner — prominent at top when LIVE */}
+            {/* Broker status banner — prominent when LIVE */}
             <BrokerStatusPill brokerStatus={brokerStatus} />
 
-            {/* Zone 1: Portfolio Command Bar */}
+            {/* Portfolio Command Bar — IBKR NAV, cash, realized P&L */}
             <PortfolioBar
                 portfolio={portfolio}
                 account={account}
@@ -5402,10 +5435,10 @@ const Dashboard = ({ brokerStatus, integrityRed = false }: { brokerStatus: Broke
                 lastFetchMs={lastFetchMs}
             />
 
-            {/* Data Provenance Panel — TV vs YF spot comparison */}
+            {/* Data Provenance Panel */}
             <DataProvenancePanel audit={audit} />
 
-            {/* Rejected signals badge — shows count of dropped signals in last 1h */}
+            {/* Rejected signals badge */}
             {rejectionCount > 0 && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '4px 0' }}>
                     <button
@@ -5425,93 +5458,51 @@ const Dashboard = ({ brokerStatus, integrityRed = false }: { brokerStatus: Broke
                 </div>
             )}
 
-            {/* Phase 14.3: Rejection audit event feed — shows [SIGNAL-REJECTED] entries */}
+            {/* Rejection audit feed + panel */}
             <RejectionAuditFeed onOpenPanel={() => setShowRejectionsPanel(true)} />
-
-            {/* Phase 14.3: Rejections panel (full list + drill-down) */}
             {showRejectionsPanel && (
                 <RejectedSignalsPanel onClose={() => setShowRejectionsPanel(false)} />
             )}
 
-            {/* Pre-Market Intelligence Panel */}
-            <CollapsiblePanel
-                storageKey="dashboard_premarket_open"
-                title="📡 PRE-MARKET INTELLIGENCE"
-            >
-                <PreMarketPanel intel={intel} isLoading={intelLoading} />
-            </CollapsiblePanel>
+            {/* ── Zone B: Primary Workspace ────────────────────────────────── */}
+            <div className="primary-workspace" data-testid="primary-workspace">
 
-            {/* ── Phase 16: Intraday Cockpit ───────────────────────────────── */}
-            <CollapsiblePanel
-                storageKey="dashboard_morning_briefing_open"
-                title="🌅 MORNING BRIEFING — REGIME & STRATEGY"
-            >
-                <MorningBriefing />
-            </CollapsiblePanel>
+                {/* Row 1: Trade Queue (7col) + Live P&L (5col) */}
+                <div className="workspace-row-1" data-testid="workspace-row-1">
+                    <div className="workspace-queue" data-testid="workspace-queue">
+                        <TradeApprovalQueue brokerMode={brokerStatus?.mode} />
+                    </div>
+                    <div className="workspace-pnl" data-testid="workspace-pnl">
+                        <LivePnLPanel />
+                    </div>
+                </div>
 
-            <CollapsiblePanel
-                storageKey="dashboard_approval_queue_open"
-                title="⚡ TRADE APPROVAL QUEUE — HUMAN IN THE LOOP"
-            >
-                <TradeApprovalQueue brokerMode={brokerStatus?.mode} />
-            </CollapsiblePanel>
+                {/* Row 2: Merged Positions + Orders Table */}
+                <div ref={positionsRef}>
+                    <MergedPositionsTable />
+                </div>
 
-            <CollapsiblePanel
-                storageKey="dashboard_pnl_open"
-                title="💰 LIVE P&L — TODAY"
-            >
-                <LivePnLPanel />
-            </CollapsiblePanel>
+            </div>
+            {/* ──────────────────────────────────────────────────────────────── */}
 
             {/* Phase 17: Position Manager — ATR stops, trailing, circuit breaker */}
             <CollapsiblePanel
                 storageKey="dashboard_positions_open"
-                title="📍 POSITION MANAGER"
+                title="📍 POSITION MANAGER (ATR Stops)"
             >
                 <PositionManager />
             </CollapsiblePanel>
-            {/* ──────────────────────────────────────────────────────────────── */}
 
-            {/* Zone 2: 4-Column Trading Grid */}
-            <div className="dashboard-grid">
-                <SignalCommand
-                    signals={signals}
-                    newTimestamps={newTimestamps}
-                    onSelectSignal={setSelectedSignal}
-                    systemState={systemState}
-                />
-                <PendingOrdersPanel
-                    orders={pendingOrders}
-                    source={pendingOrders?.source ?? ''}
-                    capEvents={capEvents}
-                    replacementToast={replacementToast}
-                    executionMode={brokerStatus?.mode ?? pendingOrders?.source ?? 'IBKR_PAPER'}
-                    onOrderCancelled={fetchPendingOrders}
-                />
-                <TradingFloor
-                    portfolio={portfolio}
-                    ibkrPositions={ibkrPositions}
-                    brokerStatus={brokerStatus}
-                    executionMode={brokerStatus?.mode ?? pendingOrders?.source ?? 'IBKR_PAPER'}
-                />
-                <ExecutionLog trades={trades} brokerStatus={brokerStatus} lossSummary={lossSummary} simMode={simMode} />
-            </div>
+            {/* ── Zone C: Tabbed Reference Panel ───────────────────────────── */}
+            <TabbedReferencePanel />
 
-            {/* Zone 3: Feedback Inbox (collapsible) */}
-            <CollapsiblePanel
-                storageKey="dashboard_feedback_inbox_open"
-                title="💬 SIGNAL FEEDBACK INBOX"
-            >
-                <FeedbackInbox />
-            </CollapsiblePanel>
-
-            {/* Zone 4: Chart + Monitor Strip */}
+            {/* ── Bottom strip: preserved collapsible panels ───────────────── */}
             <div className="bottom-strip">
                 <CollapsiblePanel
-                    storageKey="dashboard_intel_open"
-                    title="🔭 MARKET INTELLIGENCE"
+                    storageKey="dashboard_execlog_open"
+                    title="📋 EXECUTION LOG"
                 >
-                    <IntelPanel intel={intel} isLoading={intelLoading} />
+                    <ExecutionLog trades={trades} brokerStatus={brokerStatus} lossSummary={lossSummary} simMode={simMode} />
                 </CollapsiblePanel>
                 <CollapsiblePanel
                     storageKey="dashboard_scorecard_open"
@@ -5532,6 +5523,52 @@ const Dashboard = ({ brokerStatus, integrityRed = false }: { brokerStatus: Broke
                     <SystemMonitor />
                 </CollapsiblePanel>
             </div>
+
+            {/* ── Advanced / Legacy panels (collapsed by default) ──────────── */}
+            <CollapsiblePanel
+                storageKey="dashboard_legacy_open"
+                title="🔧 ADVANCED — SIGNAL COMMAND & ORDER DETAIL"
+            >
+                <div className="dashboard-grid">
+                    <SignalCommand
+                        signals={signals}
+                        newTimestamps={newTimestamps}
+                        onSelectSignal={setSelectedSignal}
+                        systemState={systemState}
+                    />
+                    <PendingOrdersPanel
+                        orders={pendingOrders}
+                        source={pendingOrders?.source ?? ''}
+                        capEvents={capEvents}
+                        replacementToast={replacementToast}
+                        executionMode={brokerStatus?.mode ?? pendingOrders?.source ?? 'IBKR_PAPER'}
+                        onOrderCancelled={fetchPendingOrders}
+                    />
+                    <TradingFloor
+                        portfolio={portfolio}
+                        ibkrPositions={ibkrPositions}
+                        brokerStatus={brokerStatus}
+                        executionMode={brokerStatus?.mode ?? pendingOrders?.source ?? 'IBKR_PAPER'}
+                    />
+                </div>
+            </CollapsiblePanel>
+
+            <CollapsiblePanel
+                storageKey="dashboard_legacy_intel_open"
+                title="🔧 ADVANCED — MARKET INTELLIGENCE DETAIL"
+            >
+                <PreMarketPanel intel={intel} isLoading={intelLoading} />
+                <IntelPanel intel={intel} isLoading={intelLoading} />
+            </CollapsiblePanel>
+
+            <CollapsiblePanel
+                storageKey="dashboard_legacy_feedback_open"
+                title="💬 SIGNAL FEEDBACK INBOX"
+            >
+                <FeedbackInbox />
+            </CollapsiblePanel>
+
+            </div>{/* end dashboard-content-pad */}
         </>
     );
 };

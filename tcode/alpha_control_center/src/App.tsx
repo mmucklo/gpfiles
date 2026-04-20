@@ -50,13 +50,12 @@ export class RootErrorBoundary extends Component<{ children: ReactNode }, EBStat
 }
 import IntegrityStatus from './components/IntegrityStatus';
 import HelpPanel from './components/HelpPanel';
-import SystemHealthPanel, { SystemHealthBadge, type HealthSummary } from './components/SystemHealthPanel';
+import SystemHealthPanel, { type HealthSummary } from './components/SystemHealthPanel';
 import PauseOverlay, { PauseCountdown, type PauseStatus } from './components/PauseOverlay';
 import { Shield, Menu, Home, Share2, Map, HelpCircle } from 'lucide-react';
 import Dashboard from './pages/Dashboard';
 import Architecture from './pages/Architecture';
 import Gastown from './pages/Gastown';
-import RegimeMonitor from './components/RegimeMonitor';
 import { useDataFetching } from './hooks';
 
 const API_BASE = '/api/config';
@@ -274,71 +273,53 @@ function App() {
         </section>
       </div>
 
-      <header className="header" role="banner">
-        <div style={{ display: 'flex', alignItems: 'center', gap: '2rem' }}>
-          <h1 aria-label="TSLA Alpha Command Center">TSLA ALPHA COMMAND</h1>
-          <nav aria-label="Portfolio summary" style={{ display: 'flex', gap: '1rem', backgroundColor: '#161b22', padding: '0.5rem 1rem', borderRadius: '8px', border: '1px solid #30363d' }}>
-            <Tooltip text="IBKR Net Asset Value — total portfolio value from broker account. This is NOT used for sizing.">
-              <div aria-label={`IBKR NAV: ${portfolio.nav?.toLocaleString(undefined, {minimumFractionDigits: 2}) ?? '—'}`} role="status">
-                <span style={{color:'#8b949e'}}>IBKR NAV:</span> ${portfolio.nav?.toLocaleString(undefined, {minimumFractionDigits: 2})}
+      {/* Phase 18: Slim nav bar — StatusBar in Dashboard owns P&L + regime + mode */}
+      <header className="header app-nav-bar" role="banner">
+        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+          <h1 aria-label="TSLA Alpha Command Center" style={{ fontSize: '0.95rem' }}>TSLA ALPHA COMMAND</h1>
+          {/* Notional sizing — kept in nav for quick access */}
+          <div style={{display:'flex',alignItems:'center',gap:'0.4rem',borderLeft:'1px solid #30363d',paddingLeft:'0.8rem'}}>
+            <Tooltip text="Position sizing derives from this value. Click to explain.">
+              <div
+                role="button"
+                tabIndex={0}
+                style={{cursor:'pointer',color:'#79c0ff',fontSize:'0.78rem'}}
+                data-testid="notional-display"
+                aria-label={`Sizing for: $${notional.toLocaleString()}`}
+                onClick={() => setShowNotionalDrill(true)}
+                onKeyDown={e => e.key === 'Enter' && setShowNotionalDrill(true)}
+              >
+                <span style={{color:'#8b949e'}}>Sizing:</span>{' '}
+                <span style={{fontWeight:700}}>${notional.toLocaleString()}</span>
               </div>
             </Tooltip>
-            <Tooltip text="Available Cash — spendable balance. See Trading Floor for breakdown.">
-              <div style={{color: '#238636'}} aria-label={`Cash: ${portfolio.cash?.toLocaleString(undefined, {minimumFractionDigits: 2}) ?? '—'}`} role="status">
-                <span style={{color:'#8b949e'}}>CASH:</span> ${portfolio.cash?.toLocaleString(undefined, {minimumFractionDigits: 2})}
-              </div>
-            </Tooltip>
-            <Tooltip text="Realized P&L — locked-in profit/loss from closed trades. See Execution Log for per-trade breakdown.">
-              <div style={{color: portfolio.realized_pnl >= 0 ? '#238636' : '#da3633'}} aria-label={`Realized P&L: ${portfolio.realized_pnl?.toLocaleString(undefined, {minimumFractionDigits: 2}) ?? '—'}`} role="status">
-                <span style={{color:'#8b949e'}}>REALIZED:</span> ${portfolio.realized_pnl?.toLocaleString(undefined, {minimumFractionDigits: 2})}
-              </div>
-            </Tooltip>
-            {/* Notional sizing display — separate from NAV */}
             {(() => {
               const ibkrNav = portfolio.nav ?? 0;
               const diverges = ibkrNav > 0 && (ibkrNav >= notional * 5 || ibkrNav <= notional * 0.5);
-              return (
-                <div style={{display:'flex',alignItems:'center',gap:'0.4rem',borderLeft:'1px solid #30363d',paddingLeft:'0.8rem'}}>
-                  <Tooltip text="Position sizing derives from this value, NOT from IBKR NAV. Paper trading uses $25k notional to practice small-account discipline for live trading. Click to explain.">
-                    <div
-                      role="button"
-                      tabIndex={0}
-                      style={{cursor:'pointer',color:'#79c0ff'}}
-                      data-testid="notional-display"
-                      aria-label={`Sizing for: $${notional.toLocaleString()}`}
-                      onClick={() => setShowNotionalDrill(true)}
-                      onKeyDown={e => e.key === 'Enter' && setShowNotionalDrill(true)}
-                    >
-                      <span style={{color:'#8b949e'}}>Sizing for:</span>{' '}
-                      <span style={{fontWeight:700}}>${notional.toLocaleString()}</span>
-                    </div>
-                  </Tooltip>
-                  {diverges && (
-                    <Tooltip text="Sizing target diverges materially from IBKR account — check NOTIONAL_ACCOUNT_SIZE configuration.">
-                      <span style={{backgroundColor:'#9e6a03',color:'white',fontSize:'10px',padding:'1px 6px',borderRadius:'4px',fontWeight:700}} data-testid="notional-divergence-badge">
-                        ⚠ SIZING DIVERGES
-                      </span>
-                    </Tooltip>
-                  )}
-                  <Tooltip text={isMarketHours && brokerStatus?.mode === 'IBKR_LIVE' ? 'Disabled during live market hours — adjust outside trading window.' : 'Adjust notional account size used for position sizing.'}>
-                    <button
-                      style={{
-                        background:'#21262d',border:'1px solid #30363d',color:'#c9d1d9',
-                        borderRadius:'4px',padding:'1px 6px',cursor: (isMarketHours && brokerStatus?.mode === 'IBKR_LIVE') ? 'not-allowed' : 'pointer',
-                        fontSize:'11px',opacity: (isMarketHours && brokerStatus?.mode === 'IBKR_LIVE') ? 0.5 : 1,
-                      }}
-                      disabled={isMarketHours && brokerStatus?.mode === 'IBKR_LIVE'}
-                      data-testid="notional-adjust-toggle"
-                      aria-label="Adjust notional account size"
-                      onClick={() => setShowNotionalAdjust(v => !v)}
-                    >
-                      ▲▼
-                    </button>
-                  </Tooltip>
-                </div>
-              );
+              return diverges ? (
+                <Tooltip text="Sizing target diverges materially from IBKR account — check NOTIONAL_ACCOUNT_SIZE configuration.">
+                  <span style={{backgroundColor:'#9e6a03',color:'white',fontSize:'10px',padding:'1px 6px',borderRadius:'4px',fontWeight:700}} data-testid="notional-divergence-badge">
+                    ⚠ SIZING DIVERGES
+                  </span>
+                </Tooltip>
+              ) : null;
             })()}
-          </nav>
+            <Tooltip text={isMarketHours && brokerStatus?.mode === 'IBKR_LIVE' ? 'Disabled during live market hours.' : 'Adjust notional account size used for position sizing.'}>
+              <button
+                style={{
+                  background:'#21262d',border:'1px solid #30363d',color:'#c9d1d9',
+                  borderRadius:'4px',padding:'1px 6px',cursor: (isMarketHours && brokerStatus?.mode === 'IBKR_LIVE') ? 'not-allowed' : 'pointer',
+                  fontSize:'11px',opacity: (isMarketHours && brokerStatus?.mode === 'IBKR_LIVE') ? 0.5 : 1,
+                }}
+                disabled={isMarketHours && brokerStatus?.mode === 'IBKR_LIVE'}
+                data-testid="notional-adjust-toggle"
+                aria-label="Adjust notional account size"
+                onClick={() => setShowNotionalAdjust(v => !v)}
+              >
+                ▲▼
+              </button>
+            </Tooltip>
+          </div>
 
           {/* Notional adjust flyout */}
           {showNotionalAdjust && (
@@ -449,95 +430,35 @@ function App() {
           </div>
         )}
 
-        <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
-            {/* Phase 16.1: Polling countdown timer — shown when active */}
+        {/* Nav links + IntegrityStatus (still shown in nav for quick access) */}
+        <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+            {/* Pause countdown — kept in nav for visibility */}
             <PauseCountdown status={pauseStatus} onPause={handlePause} />
-            {/* Phase 16: Regime monitor badge + market state */}
-            <RegimeMonitor compact />
+            {/* Integrity Status — three traffic lights */}
+            <IntegrityStatus onStatusChange={handleIntegrityChange} />
+            {/* Market state badge */}
             {(() => {
               const stateConfig = {
-                open:       { label: 'MARKET OPEN',  color: '#3fb950', bg: 'rgba(63,185,80,0.12)', dot: true },
-                premarket:  { label: 'PRE-MARKET',   color: '#79c0ff', bg: 'rgba(121,192,255,0.12)', dot: false },
-                afterhours: { label: 'AFTER HOURS',  color: '#d29922', bg: 'rgba(210,153,34,0.12)', dot: false },
+                open:       { label: 'OPEN',   color: '#3fb950', bg: 'rgba(63,185,80,0.1)', dot: true },
+                premarket:  { label: 'PRE',    color: '#79c0ff', bg: 'rgba(121,192,255,0.1)', dot: false },
+                afterhours: { label: 'AFTER',  color: '#d29922', bg: 'rgba(210,153,34,0.1)', dot: false },
               }[marketState];
               return (
                 <span
                   data-testid="market-state-badge"
                   style={{
-                    display: 'inline-flex', alignItems: 'center', gap: '0.3rem',
-                    padding: '0.2rem 0.6rem', borderRadius: '5px', fontSize: '0.72rem',
-                    fontWeight: 700, letterSpacing: '0.06em',
-                    color: stateConfig.color, background: stateConfig.bg,
+                    display: 'inline-flex', alignItems: 'center', gap: '0.25rem',
+                    padding: '0.15rem 0.45rem', borderRadius: '4px', fontSize: '0.65rem',
+                    fontWeight: 700, color: stateConfig.color, background: stateConfig.bg,
                     border: `1px solid ${stateConfig.color}30`,
                   }}
                   aria-label={`Market state: ${marketState}`}
                 >
                   {stateConfig.dot && (
-                    <span style={{
-                      width: 6, height: 6, borderRadius: '50%', background: stateConfig.color,
-                      flexShrink: 0, animation: 'market-open-pulse 2s ease-in-out infinite',
-                    }} />
+                    <span style={{ width: 5, height: 5, borderRadius: '50%', background: stateConfig.color, flexShrink: 0 }} />
                   )}
                   {stateConfig.label}
                 </span>
-              );
-            })()}
-
-            {/* Integrity Status — three traffic lights */}
-            <IntegrityStatus onStatusChange={handleIntegrityChange} />
-
-            {/* System health badge — Phase 13.6: always visible, goes red on component outage */}
-            {/* Phase 14.4: onClick opens SystemHealthPanel modal drill-down */}
-            <SystemHealthBadge
-              summary={healthSummary}
-              onClick={() => setShowHealthModal(true)}
-              ariaExpanded={showHealthModal}
-            />
-
-            {/* Execution mode banner — always visible, never hidden.
-                Maps the EXECUTION_MODE enum (IBKR_PAPER / IBKR_LIVE / SIMULATION)
-                to colour-coded labels with a disconnected warning overlay. */}
-            {(() => {
-              const mode = brokerStatus?.mode ?? 'LOADING';
-              const isLive = mode === 'IBKR_LIVE';
-              const isSim = mode === 'SIMULATION';
-              const isLoading = !brokerStatus;
-              const disconnected = brokerStatus && !brokerStatus.connected && !isSim;
-              const bg = isLive ? '#da3633' : isSim ? '#9e6a03' : isLoading ? '#30363d' : '#1a7f37';
-              const border = isLive ? '#f85149' : isSim ? '#d29922' : isLoading ? '#484f58' : '#3fb950';
-              const label = isLive ? '⚠ MODE: IBKR LIVE' : isSim ? 'MODE: SIMULATION' : isLoading ? 'MODE: …' : 'MODE: IBKR PAPER';
-              const tooltip = isLive
-                ? 'LIVE trading mode — real money. All orders execute against your live IBKR account.'
-                : isSim
-                ? 'Simulation mode — internal paper portfolio only. No broker connected.'
-                : isLoading
-                ? 'Loading execution mode…'
-                : 'IBKR paper trading mode — orders route to your IBKR paper account.';
-              return (
-                <Tooltip text={disconnected ? `${tooltip} ⚠ IBKR connection lost — trade submission blocked.` : tooltip}>
-                  <span
-                    data-testid="broker-mode-badge"
-                    aria-label={`Execution mode: ${mode}${disconnected ? ' — IBKR disconnected' : ''}`}
-                    style={{
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: '0.4rem',
-                      padding: '0.3rem 0.9rem',
-                      borderRadius: '6px',
-                      fontSize: '0.8rem',
-                      fontWeight: 800,
-                      letterSpacing: '0.07em',
-                      backgroundColor: bg,
-                      color: 'white',
-                      border: `2px solid ${border}`,
-                      boxShadow: isLive ? `0 0 8px ${border}66` : 'none',
-                      whiteSpace: 'nowrap',
-                    }}
-                  >
-                    {label}
-                    {disconnected && <span style={{ color: '#ffa657', fontWeight: 900, fontSize: '1em' }} aria-hidden="true">⚠</span>}
-                  </span>
-                </Tooltip>
               );
             })()}
             <Link to="/" aria-label="Go to Dashboard">
@@ -582,7 +503,16 @@ function App() {
 
       <main className="main-content" role="main">
         <Routes>
-          <Route path="/" element={<Dashboard brokerStatus={brokerStatus} integrityRed={integrityRed} />} />
+          <Route path="/" element={
+            <Dashboard
+              brokerStatus={brokerStatus}
+              integrityRed={integrityRed}
+              healthSummary={healthSummary}
+              pauseStatus={pauseStatus}
+              onHealthClick={() => setShowHealthModal(true)}
+              onPause={handlePause}
+            />
+          } />
           <Route path="/architecture" element={<Architecture />} />
           <Route path="/gastown" element={<Gastown />} />
         </Routes>

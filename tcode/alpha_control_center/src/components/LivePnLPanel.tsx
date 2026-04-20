@@ -358,7 +358,7 @@ const LivePnLPanel: React.FC = () => {
                     <td className={`td-pnl ${s.net_pnl >= 0 ? 'pos' : 'neg'}`}>
                       {s.net_pnl >= 0 ? '+' : ''}{s.net_pnl.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 })}
                     </td>
-                    <td>{s.win_rate.toFixed(0)}%</td>
+                    <td>{(s.win_rate ?? 0).toFixed(0)}%</td>
                   </tr>
                 ))}
               </tbody>
@@ -383,7 +383,7 @@ const LivePnLPanel: React.FC = () => {
           </div>
           <div className="guardrail-track">
             <div className={`guardrail-fill ${guardrailClass(lossUsedPct)}`}
-              style={{ width: `${lossUsedPct}%` }}
+              style={{ width: `${Math.max(2, lossUsedPct)}%` }}
               data-testid="guardrail-loss-bar" />
           </div>
         </div>

@@ -1,6 +1,56 @@
 /* ============================================================
    TSLA ALPHA TRADING COMMAND CENTER — Dashboard.css
+   Phase 18: 3-zone layout additions at top
    ============================================================ */
+
+/* ── Phase 18: Primary Workspace (Zone B) ────────────────────── */
+.primary-workspace {
+    margin: 0.75rem 0;
+}
+
+/* Row 1: 12-col grid — Trade Queue (7col) + P&L (5col) */
+.workspace-row-1 {
+    display: grid;
+    grid-template-columns: 7fr 5fr;
+    gap: 0.75rem;
+    align-items: start;
+    margin-bottom: 0.75rem;
+}
+
+.workspace-queue,
+.workspace-pnl {
+    min-width: 0; /* prevent overflow */
+}
+
+/* Tablet: stack vertically */
+@media (max-width: 1439px) and (min-width: 768px) {
+    .workspace-row-1 {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* Mobile: single column */
+@media (max-width: 767px) {
+    .workspace-row-1 {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* ── Dashboard content padding ───────────────────────────────── */
+.dashboard-content-pad {
+    padding: 0 1.25rem 1.25rem;
+}
+
+/* ── Portfolio bar stickiness adjusted for slim nav ──────────── */
+/* Status bar (64px) + nav bar (44px) = 108px top offset */
+.portfolio-bar {
+    top: 108px;
+}
+
+/* ── Color conformance: ensure profit/loss use correct colors ── */
+/* Green = profit ONLY (#00C853 modern / #3fb950 legacy both allowed) */
+/* Red = loss ONLY (#FF1744 modern / #f85149 legacy both allowed)    */
+/* Amber (#FFB300 / #d29922) for warnings, blue (#58a6ff) for info  */
 
 /* ---- ZONE 1: PORTFOLIO COMMAND BAR ---- */
 .portfolio-bar {

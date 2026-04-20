@@ -178,10 +178,10 @@ const IntegrityPanel = ({ data, loading, onClose, openSection }: PanelProps) => 
                   </tr>
                   <tr>
                     <td>Divergence</td>
-                    <td className={data.price.divergence_pct > 0.5 ? 'integrity-val-red' : data.price.divergence_pct > 0.2 ? 'integrity-val-amber' : 'integrity-val-green'}>
-                      {data.price.divergence_pct.toFixed(3)}%
+                    <td className={(data.price.divergence_pct ?? 0) > 0.5 ? 'integrity-val-red' : (data.price.divergence_pct ?? 0) > 0.2 ? 'integrity-val-amber' : 'integrity-val-green'}>
+                      {(data.price.divergence_pct ?? 0).toFixed(3)}%
                     </td>
-                    <td>{data.price.divergence_pct > 0.5 ? <span className="integrity-src-badge err">HALT</span> : <span className="integrity-src-badge ok">OK</span>}</td>
+                    <td>{(data.price.divergence_pct ?? 0) > 0.5 ? <span className="integrity-src-badge err">HALT</span> : <span className="integrity-src-badge ok">OK</span>}</td>
                   </tr>
                   {data.price.timestamp && (
                     <tr>
@@ -434,7 +434,7 @@ const IntegrityStatus = ({ onStatusChange }: IntegrityStatusProps) => {
         <Indicator label="PRICE" status={pSt} onClick={() => openPanel('price')}>
           {data && (
             <span className="integrity-detail">
-              {data.price.divergence_pct.toFixed(2)}%
+              {(data.price.divergence_pct ?? 0).toFixed(2)}%
             </span>
           )}
         </Indicator>
