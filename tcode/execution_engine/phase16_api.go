@@ -418,20 +418,39 @@ func executeProposalOrder(p *TradeProposal, qty int, mode string) (map[string]in
 	if v, ok := rawSig["expiration_date"].(string); ok {
 		expiry = v
 	}
-	optType := "CALL"
+	optType := ""
 	if v, ok := rawSig["option_type"].(string); ok {
 		optType = v
 	}
+	// Fall back to "CALL" only if option_type is explicitly absent from raw signal
+	// AND the proposal legs provide a type — otherwise the validation below will reject.
+	if optType == "" {
+		if len(p.Legs) > 2 {
+			// Try to extract from legs JSON
+			var legs []map[string]interface{}
+			if json.Unmarshal(p.Legs, &legs) == nil && len(legs) > 0 {
+				if t, ok := legs[0]["type"].(string); ok && t != "" {
+					optType = t
+				}
+			}
+		}
+	}
 
 	// Validate required fields before invoking ibkr_order.py
-	if strikeVal == 0 {
-		return nil, fmt.Errorf("strike is 0 — proposal missing recommended_strike")
+	if strikeVal <= 0 {
+		return nil, fmt.Errorf("[ORDER-REJECT] strike is %.2f — must be positive", strikeVal)
 	}
 	if expiry == "" {
-		return nil, fmt.Errorf("expiry is empty — proposal missing expiration_date")
+		return nil, fmt.Errorf("[ORDER-REJECT] expiry is empty — proposal missing expiration_date")
 	}
 	if qty <= 0 {
-		return nil, fmt.Errorf("quantity is %d — must be positive", qty)
+		return nil, fmt.Errorf("[ORDER-REJECT] quantity is %d — must be positive", qty)
+	}
+	if optType == "" {
+		return nil, fmt.Errorf("[ORDER-REJECT] option_type is empty")
+	}
+	if _, err := time.Parse("2006-01-02", expiry); err != nil {
+		return nil, fmt.Errorf("[ORDER-REJECT] expiry '%s' is not a valid date: %w", expiry, err)
 	}
 
 	limitPrice := fmt.Sprintf("%.4f", p.EntryPrice)

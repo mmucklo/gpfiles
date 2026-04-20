@@ -32,6 +32,16 @@ NOTIONAL: int = int(os.getenv("NOTIONAL_ACCOUNT_SIZE", "25000"))
 # fraction of notional. Prevents over-allocation during fast-firing periods.
 _GROSS_OUTSTANDING_CAP_PCT = 0.06  # 6% of notional
 
+# ── Phase 19: Per-trade position cost hard cap ────────────────────────────────
+# No single trade may cost more than MAX_KELLY_PCT × NOTIONAL.
+# At $25k notional this is $1,000 max position cost.
+MAX_KELLY_PCT: float = float(os.getenv("MAX_KELLY_PCT", "0.04"))  # 4% of notional
+
+# ── Phase 19: Commission ratio gate ───────────────────────────────────────────
+# Reject signals where expected profit at TP < MIN_PROFIT_COMMISSION_RATIO × commission.
+COMMISSION_PER_CONTRACT: float = float(os.getenv("COMMISSION_PER_CONTRACT", "0.65"))
+MIN_PROFIT_COMMISSION_RATIO: float = float(os.getenv("MIN_PROFIT_COMMISSION_RATIO", "3.0"))
+
 # ── Phase 14: Liquidity floor env vars ───────────────────────────────────────
 # Runtime-configurable — override in .tsla-alpha.env without redeploy.
 # Publisher uses these for Layer-1 gate inside strike_selector.
@@ -200,6 +210,30 @@ def compute_round_trip_commission(qty: int, is_spread: bool = False) -> float:
     legs = _SPREAD_ROUND_TRIP if is_spread else _SINGLE_LEG_ROUND_TRIP
     per_leg = max(IBKR_OPTION_FEE_PER_CONTRACT * qty, IBKR_OPTION_MIN_PER_LEG)
     return per_leg * legs
+
+
+def check_commission_ratio_gate(
+    limit_price: float,
+    take_profit_price: float,
+    qty: int,
+) -> tuple[bool, str]:
+    """Phase 19: Reject if expected profit at TP < MIN_PROFIT_COMMISSION_RATIO × commission.
+
+    expected_profit = abs(take_profit_price - limit_price) * qty * 100
+    commission      = qty * 2 * COMMISSION_PER_CONTRACT  (round-trip)
+
+    Returns (passes, reason).
+    """
+    expected_profit = abs(take_profit_price - limit_price) * qty * 100
+    commission = qty * 2 * COMMISSION_PER_CONTRACT
+    min_required = commission * MIN_PROFIT_COMMISSION_RATIO
+    if expected_profit < min_required:
+        return False, (
+            f"[COMMISSION-REJECT] expected_profit=${expected_profit:.2f} < "
+            f"{MIN_PROFIT_COMMISSION_RATIO}x commission=${min_required:.2f} "
+            f"(qty={qty}, commission_per_contract={COMMISSION_PER_CONTRACT})"
+        )
+    return True, ""
 
 
 def signal_is_commission_viable(
@@ -696,6 +730,7 @@ async def broadcast_loop():
             continue
 
         for model in models:
+            global _rejected_commission_total, _rejected_minedge_total
             direction = None
             confidence = 0.0
             action = "BUY"
@@ -1142,6 +1177,22 @@ async def broadcast_loop():
                 is_spread=is_spread,
             )
 
+            # ── Phase 19: Hard 4% notional position cost clamp ───────────────
+            # KELLY-CLAMP: Ensures no single trade exceeds MAX_KELLY_PCT of notional.
+            # At $25k this is $1,000 max cost. Applied AFTER compute_notional_sizing
+            # so the gross-outstanding cap also benefits from this final guard.
+            if limit_price > 0:
+                _max_cost = NOTIONAL * MAX_KELLY_PCT
+                _position_cost = limit_price * qty * 100
+                if _position_cost > _max_cost:
+                    _clamped_qty = max(1, int(_max_cost / (limit_price * 100)))
+                    print(
+                        f"[KELLY-CLAMP] {model.name} reduced qty {qty}→{_clamped_qty} "
+                        f"(cost ${_position_cost:.0f} > {MAX_KELLY_PCT*100:.0f}% notional "
+                        f"${_max_cost:.0f})"
+                    )
+                    qty = _clamped_qty
+
             # Log sizing decision to fills_audit (non-blocking: fire-and-forget via queue)
             try:
                 import uuid as _uuid, json as _json
@@ -1216,9 +1267,22 @@ async def broadcast_loop():
             # Tag signal with chop regime so logger can persist it for attribution
             scan_sig.chop_label = chop_label
 
+            # ── Phase 19: Commission ratio gate (configurable 3x floor) ─────────
+            if scan_sig.quantity > 0 and scan_sig.take_profit_price > 0:
+                _ratio_ok, _ratio_reason = check_commission_ratio_gate(
+                    scan_sig.target_limit_price,
+                    scan_sig.take_profit_price,
+                    scan_sig.quantity,
+                )
+                if not _ratio_ok:
+                    print(f"[REJECT] {_ratio_reason} ({model.name} {opt_type} ${strike:.0f})")
+                    SIGNAL_REJECTED_COMMISSION.inc()
+                    _rejected_commission_total += 1
+                    _write_publisher_metrics()
+                    continue
+
             # ── Commission viability gate ─────────────────────────────────────
             if scan_sig.quantity > 0 and scan_sig.take_profit_price > 0:
-                global _rejected_commission_total
                 viable, reason = signal_is_commission_viable(
                     scan_sig.target_limit_price,
                     scan_sig.take_profit_price,
@@ -1235,7 +1299,6 @@ async def broadcast_loop():
 
             # ── Minimum-edge floor gate ───────────────────────────────────────
             if scan_sig.quantity > 0 and scan_sig.take_profit_price > 0:
-                global _rejected_minedge_total
                 edge_ok, edge_reason = signal_passes_min_edge(
                     scan_sig.target_limit_price,
                     scan_sig.take_profit_price,

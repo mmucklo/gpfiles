@@ -272,6 +272,9 @@ func main() {
 	mux.HandleFunc("/api/system/pause", configHandler.ServePause)
 	mux.HandleFunc("/api/system/unpause", configHandler.ServeUnpause)
 
+	// Phase 19: Guard circuit breaker reset (market-hours confirmation required)
+	mux.HandleFunc("/api/guard/reset", configHandler.ServeGuardReset)
+
 	// System heartbeats (Phase 13.6)
 	mux.HandleFunc("/api/system/heartbeats", configHandler.ServeSystemHeartbeats)
 	mux.HandleFunc("/api/system/alerts", configHandler.ServeSystemAlerts)
