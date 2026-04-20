@@ -6,7 +6,7 @@
 .status-bar {
   position: sticky;
   top: 44px; /* stacks below the 44px app-nav-bar header */
-  z-index: 100;
+  z-index: 400; /* raised from 100 — ensures strategy dropdown overlays Zone B panels */
   height: 64px;
   box-sizing: border-box;
   display: flex;
@@ -174,7 +174,7 @@ span.sb-chip:hover {
   border: 1px solid #30363d;
   border-radius: 6px;
   padding: 0.3rem;
-  z-index: 200;
+  z-index: 500; /* above header (450) so it fully overlays all Zone B content */
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 0.25rem;

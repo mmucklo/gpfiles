@@ -61,17 +61,18 @@ import { useDataFetching } from './hooks';
 const API_BASE = '/api/config';
 
 // ── Phase 16: Market-hours theme ──────────────────────────────────────────────
-// Returns 'open' | 'premarket' | 'afterhours'
-function getMarketState(): 'open' | 'premarket' | 'afterhours' {
+// Returns 'open' | 'premarket' | 'afterhours' | 'closed'
+function getMarketState(): 'open' | 'premarket' | 'afterhours' | 'closed' {
   const now = new Date();
   const et = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
   const h = et.getHours(), m = et.getMinutes();
   const t = h * 60 + m;
   const wd = et.getDay();
-  if (wd === 0 || wd === 6) return 'afterhours';
-  if (t >= 570 && t < 960) return 'open';       // 9:30–16:00
-  if (t >= 240 && t < 570) return 'premarket';  // 4:00–9:30
-  return 'afterhours';
+  if (wd === 0 || wd === 6) return 'closed';          // weekend
+  if (t >= 570 && t < 960)  return 'open';            // 9:30–16:00
+  if (t >= 240 && t < 570)  return 'premarket';       // 4:00–9:30
+  if (t >= 960 && t < 1200) return 'afterhours';      // 16:00–20:00
+  return 'closed';                                     // midnight–4:00, 20:00–24:00
 }
 
 function App() {
@@ -439,9 +440,10 @@ function App() {
             {/* Market state badge */}
             {(() => {
               const stateConfig = {
-                open:       { label: 'OPEN',   color: '#3fb950', bg: 'rgba(63,185,80,0.1)', dot: true },
-                premarket:  { label: 'PRE',    color: '#79c0ff', bg: 'rgba(121,192,255,0.1)', dot: false },
-                afterhours: { label: 'AFTER',  color: '#d29922', bg: 'rgba(210,153,34,0.1)', dot: false },
+                open:       { label: 'OPEN',   color: '#3fb950', bg: 'rgba(63,185,80,0.1)',    dot: true  },
+                premarket:  { label: 'PRE',    color: '#79c0ff', bg: 'rgba(121,192,255,0.1)',  dot: false },
+                afterhours: { label: 'AFTER',  color: '#d29922', bg: 'rgba(210,153,34,0.1)',   dot: false },
+                closed:     { label: 'CLOSED', color: '#6e7681', bg: 'rgba(110,118,129,0.06)', dot: false },
               }[marketState];
               return (
                 <span
