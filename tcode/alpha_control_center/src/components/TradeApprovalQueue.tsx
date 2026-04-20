@@ -108,9 +108,10 @@ interface CardProps {
   onExecute: (id: string, qty: number) => Promise<void>;
   onSkip: (id: string) => Promise<void>;
   onAdjust: (id: string, qty: number) => Promise<void>;
+  onToast: (msg: string, type: 'success' | 'error') => void;
 }
 
-const ProposalCard: React.FC<CardProps> = ({ proposal: p, isLive, onExecute, onSkip, onAdjust }) => {
+const ProposalCard: React.FC<CardProps> = ({ proposal: p, isLive, onExecute, onSkip, onAdjust, onToast }) => {
   const [showAdjust, setShowAdjust] = useState(false);
   const [adjustQty, setAdjustQty] = useState(p.quantity);
   const [executing, setExecuting] = useState(false);
@@ -155,6 +156,9 @@ const ProposalCard: React.FC<CardProps> = ({ proposal: p, isLive, onExecute, onS
     setExecuting(true);
     try {
       await onExecute(p.id, p.quantity);
+      onToast(`Order submitted — ${p.strategy} ${buildContractLabel(p.legs)}`, 'success');
+    } catch (err) {
+      onToast(`Execute failed: ${String(err)}`, 'error');
     } finally {
       setExecuting(false);
     }
@@ -164,6 +168,9 @@ const ProposalCard: React.FC<CardProps> = ({ proposal: p, isLive, onExecute, onS
     setExecuting(true);
     try {
       await onAdjust(p.id, adjustQty);
+      onToast(`Order submitted (adjusted) — ${p.strategy} ${buildContractLabel(p.legs)}`, 'success');
+    } catch (err) {
+      onToast(`Execute failed: ${String(err)}`, 'error');
     } finally {
       setExecuting(false);
       setShowAdjust(false);
@@ -178,6 +185,7 @@ const ProposalCard: React.FC<CardProps> = ({ proposal: p, isLive, onExecute, onS
   const isPending = p.status === 'pending';
   const isExecuted = p.status === 'executed' || p.status === 'adjusted';
   const isExpired = p.status === 'expired';
+  const isFailed = p.status === 'execute_failed';
 
   const direction = p.direction?.toUpperCase();
   const directionClass = direction === 'BULLISH' ? 'bullish' : direction === 'BEARISH' ? 'bearish' : 'neutral';
@@ -346,6 +354,9 @@ const ProposalCard: React.FC<CardProps> = ({ proposal: p, isLive, onExecute, onS
       {isExpired && (
         <div className="proposal-status-overlay expired">EXPIRED</div>
       )}
+      {isFailed && (
+        <div className="proposal-status-overlay execute_failed">✗ FAILED</div>
+      )}
     </div>
   );
 };
@@ -361,6 +372,8 @@ const TradeApprovalQueue: React.FC<TAQProps> = ({ brokerMode }) => {
   const [newIds, setNewIds] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState<FilterMode>('all');
   const [age, setAge] = useState('');
+  const [toast, setToast] = useState<{ msg: string; type: 'success' | 'error' } | null>(null);
+  const toastTimerRef = useRef<number>(0);
   const prevIds = useRef<Set<string>>(new Set());
 
   const isLive = brokerMode === 'IBKR_LIVE';
@@ -399,13 +412,26 @@ const TradeApprovalQueue: React.FC<TAQProps> = ({ brokerMode }) => {
     return () => clearInterval(t);
   }, [queueData?.updated_at]);
 
+  const showToast = (msg: string, type: 'success' | 'error') => {
+    setToast({ msg, type });
+    clearTimeout(toastTimerRef.current);
+    if (type === 'success') {
+      toastTimerRef.current = window.setTimeout(() => setToast(null), 5000);
+    }
+    // error toasts persist until dismissed
+  };
+
   const handleExecute = async (id: string, qty: number) => {
-    await fetch(`/api/trades/proposed/${id}/execute`, {
+    const resp = await fetch(`/api/trades/proposed/${id}/execute`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ quantity: qty }),
     });
+    const data = await resp.json().catch(() => ({}));
     fetchQueue();
+    if (!resp.ok || !data.ok) {
+      throw new Error(data.error || `HTTP ${resp.status}`);
+    }
   };
 
   const handleSkip = async (id: string) => {
@@ -414,12 +440,16 @@ const TradeApprovalQueue: React.FC<TAQProps> = ({ brokerMode }) => {
   };
 
   const handleAdjust = async (id: string, qty: number) => {
-    await fetch(`/api/trades/proposed/${id}/adjust`, {
+    const resp = await fetch(`/api/trades/proposed/${id}/adjust`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ quantity: qty }),
     });
+    const data = await resp.json().catch(() => ({}));
     fetchQueue();
+    if (!resp.ok || !data.ok) {
+      throw new Error(data.error || `HTTP ${resp.status}`);
+    }
   };
 
   const proposals = queueData?.proposals ?? [];
@@ -493,9 +523,34 @@ const TradeApprovalQueue: React.FC<TAQProps> = ({ brokerMode }) => {
               onExecute={handleExecute}
               onSkip={handleSkip}
               onAdjust={handleAdjust}
+              onToast={showToast}
             />
           </div>
         ))
+      )}
+
+      {/* Execute result toast */}
+      {toast && (
+        <div
+          data-testid="execute-toast"
+          role="alert"
+          style={{
+            position: 'fixed', bottom: '20px', right: '20px', zIndex: 9999,
+            backgroundColor: toast.type === 'success' ? '#1a7f37' : '#8b1a1a',
+            color: '#fff', padding: '0.75rem 1.2rem', borderRadius: '8px',
+            fontSize: '13px', fontWeight: 600, boxShadow: '0 2px 8px rgba(0,0,0,0.5)',
+            display: 'flex', alignItems: 'center', gap: '0.75rem', maxWidth: '360px',
+          }}
+        >
+          <span style={{ flex: 1 }}>{toast.msg}</span>
+          {toast.type === 'error' && (
+            <button
+              onClick={() => setToast(null)}
+              style={{ background: 'none', border: 'none', color: '#fff', cursor: 'pointer', fontSize: '16px', lineHeight: 1 }}
+              aria-label="Dismiss"
+            >✕</button>
+          )}
+        </div>
       )}
     </div>
   );

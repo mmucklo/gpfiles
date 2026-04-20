@@ -365,6 +365,14 @@ func (h *ConfigHandler) ServeTradeProposalAction(w http.ResponseWriter, r *http.
 		if execErr != nil {
 			finalStatus = "execute_failed"
 			log.Printf("[PROPOSALS] execute failed for %s: %v", proposalID, execErr)
+			GlobalProposalStore.SetStatus(proposalID, "execute_failed")
+			// Notify operator via Telegram
+			if h.Guard != nil && h.Guard.AlertBot != nil {
+				contract := fmt.Sprintf("TSLA %s — %s", p.Strategy, p.Direction)
+				h.Guard.AlertBot.SendAlert(fmt.Sprintf(
+					"EXECUTE FAILED\n%s\nError: %s", contract, execErr.Error(),
+				))
+			}
 		} else {
 			GlobalProposalStore.SetStatus(proposalID, finalStatus)
 		}
@@ -414,6 +422,18 @@ func executeProposalOrder(p *TradeProposal, qty int, mode string) (map[string]in
 	if v, ok := rawSig["option_type"].(string); ok {
 		optType = v
 	}
+
+	// Validate required fields before invoking ibkr_order.py
+	if strikeVal == 0 {
+		return nil, fmt.Errorf("strike is 0 — proposal missing recommended_strike")
+	}
+	if expiry == "" {
+		return nil, fmt.Errorf("expiry is empty — proposal missing expiration_date")
+	}
+	if qty <= 0 {
+		return nil, fmt.Errorf("quantity is %d — must be positive", qty)
+	}
+
 	limitPrice := fmt.Sprintf("%.4f", p.EntryPrice)
 	tp := fmt.Sprintf("%.4f", p.TargetPrice)
 	sl := fmt.Sprintf("%.4f", p.StopPrice)
@@ -434,7 +454,10 @@ func executeProposalOrder(p *TradeProposal, qty int, mode string) (map[string]in
 	cmd.Dir = "/home/builder/src/gpfiles/tcode"
 	cmd.Env = os.Environ()
 
+	log.Printf("[PROPOSALS] executing: python %s", strings.Join(args, " "))
+
 	out, err := cmd.Output()
+	log.Printf("[PROPOSALS] ibkr_order output: %s", strings.TrimSpace(string(out)))
 	if err != nil {
 		return nil, fmt.Errorf("ibkr_order.py failed: %w", err)
 	}

@@ -495,6 +495,18 @@ class SignalPublisher:
                     "fill_price": None,
                 })
 
+            # Guard: required execute fields must be present before emitting
+            _missing = []
+            if not payload.get("expiration_date"):
+                _missing.append("expiration_date")
+            if not payload.get("recommended_strike"):
+                _missing.append("recommended_strike")
+            if not payload.get("option_type"):
+                _missing.append("option_type")
+            if _missing:
+                print(f"[WARN] Dropping proposal — missing required fields: {_missing}")
+                return
+
             proposal = {
                 "id": proposal_id,
                 "ts_created": now_iso,

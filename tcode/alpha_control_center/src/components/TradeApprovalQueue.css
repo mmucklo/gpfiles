@@ -395,6 +395,16 @@
   color: #6e7681;
 }
 
+.proposal-status-overlay.execute_failed {
+  background: rgba(139, 26, 26, 0.12);
+  color: #f85149;
+}
+
+.proposal-card.execute_failed {
+  border-color: #8b1a1a;
+  opacity: 0.8;
+}
+
 /* Empty state */
 .taq-empty {
   text-align: center;
