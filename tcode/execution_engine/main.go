@@ -189,7 +189,6 @@ func main() {
 	mux.HandleFunc("/api/signals/all", configHandler.ServeAllSignals)
 	mux.HandleFunc("/api/simulation", configHandler.ServeSimulation)
 	mux.HandleFunc("/api/simulation/toggle", configHandler.ToggleSimulation)
-	mux.HandleFunc("/api/guard/reset", configHandler.ResetGuard)
 	mux.HandleFunc("/api/portfolio", configHandler.ServePortfolio)
 	mux.HandleFunc("/api/trades", configHandler.ServeTrades)
 	mux.HandleFunc("/api/metrics/requests", configHandler.ServeRequestMetrics)
