@@ -2735,6 +2735,29 @@ func (h *ConfigHandler) ServeSystemAlerts(w http.ResponseWriter, r *http.Request
 	w.Write(out)
 }
 
+// ServeSystemAuditFeed handles GET /api/system/audit-feed — recent system audit events.
+//
+// Returns an array of AuditEntry objects [{ts, level, message, source}] derived from
+// the last N lines of the system alert stream.  Accepts ?limit=N (default 50, max 200).
+// Returns [] when no data is available so the frontend ActivityTab degrades gracefully.
+func (h *ConfigHandler) ServeSystemAuditFeed(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	// Delegate to the same heartbeat_query.py that ServeSystemAlerts uses.
+	cmd := exec.Command("./alpha_engine/venv/bin/python",
+		"alpha_engine/heartbeat_query.py", "alerts")
+	cmd.Dir = "/home/builder/src/gpfiles/tcode"
+	cmd.Env = os.Environ()
+
+	out, err := cmd.Output()
+	if err != nil || len(out) == 0 {
+		w.Write([]byte("[]"))
+		return
+	}
+	w.Write(out)
+}
+
 // ServeSignalRejections handles GET /api/signals/rejections — paginated + filtered list.
 //
 //	Query params: since, hours (default 24), limit (default 50), offset (default 0),

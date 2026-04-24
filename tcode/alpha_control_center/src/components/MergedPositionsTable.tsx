@@ -163,7 +163,11 @@ const MergedPositionsTable: React.FC<MergedPositionsTableProps> = ({ onClose }) 
   const handleCancelOrder = async (orderId: number) => {
     setCancelling(prev => new Set([...prev, orderId]));
     try {
-      await fetch(`/api/orders/${orderId}/cancel`, { method: 'POST' });
+      await fetch('/api/orders/cancel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ order_id: orderId }),
+      });
       await fetchOrders();
     } finally {
       setCancelling(prev => { const n = new Set(prev); n.delete(orderId); return n; });

@@ -277,6 +277,8 @@ func main() {
 	// System heartbeats (Phase 13.6)
 	mux.HandleFunc("/api/system/heartbeats", configHandler.ServeSystemHeartbeats)
 	mux.HandleFunc("/api/system/alerts", configHandler.ServeSystemAlerts)
+	// Phase 21: audit activity feed (TabbedReferencePanel ActivityTab)
+	mux.HandleFunc("/api/system/audit-feed", configHandler.ServeSystemAuditFeed)
 	// Prefix-match for /{component}/sparkline and /{component}/restart
 	mux.HandleFunc("/api/system/heartbeats/", func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
@@ -294,10 +296,18 @@ func main() {
 	mux.HandleFunc("/dev/reload", TriggerReloadHandler)
 
 	// Serve Production UI Assets (Task: Unified Port Stability)
-	// SPA fallback: serve index.html for unknown paths (React Router client-side routing)
+	// SPA fallback: serve index.html for unknown paths (React Router client-side routing).
+	// Guard: /api/* paths that reach this handler have no registered handler — return 404 JSON
+	// instead of serving index.html, which would cause the frontend to try to JSON.parse HTML.
 	uiPath := "./alpha_control_center/dist"
 	fileServer := http.FileServer(http.Dir(uiPath))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(`{"error":"api endpoint not found","path":"` + r.URL.Path + `"}`))
+			return
+		}
 		path := uiPath + r.URL.Path
 		if _, err := os.Stat(path); os.IsNotExist(err) {
 			http.ServeFile(w, r, uiPath+"/index.html")
