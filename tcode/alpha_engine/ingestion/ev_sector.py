@@ -7,6 +7,12 @@ import time
 import logging
 from typing import Optional
 
+try:
+    from pause_guard import pause_guard as _pause_guard
+except ImportError:  # pragma: no cover
+    def _pause_guard(fn):  # type: ignore[misc]
+        return fn
+
 logger = logging.getLogger("EVSector")
 
 _ev_cache: Optional[dict] = None
@@ -87,6 +93,7 @@ def _fetch_ev_sector() -> dict:
         return {"competitors": {}, "sector_etf": {}, "sector_direction": "NEUTRAL", "tsla_relative_strength": 0.0}
 
 
+@_pause_guard
 def get_ev_sector_intel() -> dict:
     """Return EV sector intel. Cached 5 minutes."""
     global _ev_cache, _ev_cache_ts

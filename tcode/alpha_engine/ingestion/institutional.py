@@ -7,6 +7,12 @@ import time
 import logging
 from typing import Optional
 
+try:
+    from pause_guard import pause_guard as _pause_guard
+except ImportError:  # pragma: no cover
+    def _pause_guard(fn):  # type: ignore[misc]
+        return fn
+
 logger = logging.getLogger("Institutional")
 
 _inst_cache: Optional[dict] = None
@@ -122,6 +128,7 @@ def _fetch_insider_activity() -> dict:
         return {"recent_transactions": [], "net_insider_sentiment": "NEUTRAL", "buy_count": 0, "sell_count": 0}
 
 
+@_pause_guard
 def get_institutional_intel() -> dict:
     """Return combined institutional holders + insider activity. Cached 1 hour."""
     global _inst_cache, _inst_cache_ts

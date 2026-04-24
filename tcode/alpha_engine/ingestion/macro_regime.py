@@ -24,6 +24,12 @@ try:
 except Exception:
     def _hb(component, status="ok", detail=None, **_kw): pass  # type: ignore
 
+try:
+    from pause_guard import pause_guard as _pause_guard
+except ImportError:  # pragma: no cover
+    def _pause_guard(fn):  # type: ignore[misc]
+        return fn
+
 _macro_cache: Optional[dict] = None
 _macro_cache_ts: float = 0.0
 _MACRO_TTL = 3600  # 1 hour for macro data
@@ -266,6 +272,7 @@ def _fetch_vix_term_structure() -> dict:
         return {"vix_spot": 0.0, "vix_9d": 0.0, "term_structure": "CONTANGO"}
 
 
+@_pause_guard
 def get_macro_regime() -> dict:
     """Return macro regime classification. Macro data cached 1hr, VIX 5min."""
     global _macro_cache, _macro_cache_ts, _vix_cache, _vix_cache_ts

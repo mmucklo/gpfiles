@@ -26,6 +26,12 @@ try:
 except Exception:
     def _hb(component, status="ok", detail=None, **_kw): pass  # type: ignore
 
+try:
+    from pause_guard import pause_guard as _pause_guard
+except ImportError:  # pragma: no cover
+    def _pause_guard(fn):  # type: ignore[misc]
+        return fn
+
 _premarket_cache: Optional[dict] = None
 _premarket_cache_ts: float = 0.0
 _PREMARKET_TTL = 60  # 1 minute — needs freshness during pre-market window
@@ -80,6 +86,7 @@ def _bias_label(score: float) -> str:
     return "MIXED"
 
 
+@_pause_guard
 def _fetch_premarket() -> dict:
     """
     Fetch US futures, European/Asian indices, FX, and TSLA pre-market data.

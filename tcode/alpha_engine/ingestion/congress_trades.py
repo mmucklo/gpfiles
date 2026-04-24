@@ -49,6 +49,12 @@ try:
 except Exception:
     def _hb(component, status="ok", detail=None, **_kw): pass  # type: ignore
 
+try:
+    from pause_guard import pause_guard as _pause_guard
+except ImportError:  # pragma: no cover
+    def _pause_guard(fn):  # type: ignore[misc]
+        return fn
+
 _CACHE: Optional[dict] = None
 _CACHE_TS: float = 0.0
 _CACHE_TTL = 3600  # 1 hour — disclosures trickle in; no need to hammer gov servers
@@ -191,6 +197,7 @@ def _is_within_48h(date_str: str) -> bool:
     return False
 
 
+@_pause_guard
 def _fetch_senate_ptrs() -> list[dict]:
     """
     Query Senate Electronic Financial Disclosures (eFTS) for recent TSLA PTR filings.
@@ -299,6 +306,7 @@ def _fetch_senate_ptrs() -> list[dict]:
     return trades
 
 
+@_pause_guard
 def _fetch_house_ptrs() -> list[dict]:
     """
     Fetch House Periodic Transaction Reports.

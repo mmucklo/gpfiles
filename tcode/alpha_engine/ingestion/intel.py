@@ -18,6 +18,12 @@ try:
 except Exception:
     def _hb(component, status="ok", detail=None, **_kw): pass  # type: ignore
 
+try:
+    from pause_guard import pause_guard as _pause_guard
+except ImportError:  # pragma: no cover
+    def _pause_guard(fn):  # type: ignore[misc]
+        return fn
+
 # Module-level cache: {"data": ..., "ts": float}
 _cache: dict[str, Any] = {}
 _CACHE_TTL = 300  # 5 minutes
@@ -187,6 +193,7 @@ def _fetch_options_flow() -> dict:
         }
 
 
+@_pause_guard
 def get_intel() -> dict:
     """
     Fetch all intel sources. Results are cached for 5 minutes.

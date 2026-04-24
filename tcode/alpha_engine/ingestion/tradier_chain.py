@@ -22,6 +22,12 @@ import logging
 
 import requests
 
+try:
+    from pause_guard import pause_guard as _pause_guard
+except ImportError:  # pragma: no cover
+    def _pause_guard(fn):  # type: ignore[misc]
+        return fn
+
 logger = logging.getLogger("TradierChain")
 
 TRADIER_BASE_URL = os.getenv("TRADIER_BASE_URL", "https://api.tradier.com/v1")
@@ -86,6 +92,7 @@ def _request(method: str, path: str, params: dict | None = None) -> dict:
     raise RuntimeError(f"Tradier request failed after {_RETRY_ATTEMPTS} attempts: {last_exc}") from last_exc
 
 
+@_pause_guard
 def get_expirations(symbol: str = "TSLA") -> list[str]:
     """
     GET /markets/options/expirations?symbol=TSLA
@@ -112,6 +119,7 @@ def get_expirations(symbol: str = "TSLA") -> list[str]:
     return list(dates)
 
 
+@_pause_guard
 def get_chain(symbol: str, expiration: str) -> list[dict]:
     """
     GET /markets/options/chains?symbol=TSLA&expiration=2026-04-17&greeks=true
@@ -154,6 +162,7 @@ def get_chain(symbol: str, expiration: str) -> list[dict]:
     return list(option_list)
 
 
+@_pause_guard
 def get_quotes(symbol: str) -> dict:
     """
     GET /markets/quotes?symbols=TSLA

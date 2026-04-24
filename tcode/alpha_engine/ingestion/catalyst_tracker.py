@@ -7,6 +7,12 @@ import time
 import logging
 from typing import Optional
 
+try:
+    from pause_guard import pause_guard as _pause_guard
+except ImportError:  # pragma: no cover — fallback when imported outside normal path
+    def _pause_guard(fn):  # type: ignore[misc]
+        return fn
+
 logger = logging.getLogger("CatalystTracker")
 
 # Module-level cache
@@ -121,6 +127,7 @@ def _fetch_analyst_consensus() -> dict:
         return {"analyst_consensus": "N/A", "recent_changes": [], "strong_buy_count": 0, "sell_count": 0}
 
 
+@_pause_guard
 def get_catalyst_intel() -> dict:
     """Return combined Musk sentiment + analyst consensus. Cached with separate TTLs."""
     global _catalyst_cache, _catalyst_cache_ts, _analyst_cache, _analyst_cache_ts

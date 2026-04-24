@@ -270,6 +270,8 @@ func main() {
 	mux.HandleFunc("/api/system/pause-status", configHandler.ServePauseStatus)
 	mux.HandleFunc("/api/system/pause", configHandler.ServePause)
 	mux.HandleFunc("/api/system/unpause", configHandler.ServeUnpause)
+	// Phase 21: pause leak watchdog status (pause_leak_detector.py daemon output)
+	mux.HandleFunc("/api/pause/watchdog-status", configHandler.ServeWatchdogStatus)
 
 	// Phase 19: Guard circuit breaker reset (market-hours confirmation required)
 	mux.HandleFunc("/api/guard/reset", configHandler.ServeGuardReset)

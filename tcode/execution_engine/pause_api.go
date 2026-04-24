@@ -140,3 +140,27 @@ func (ch *ConfigHandler) ServeUnpause(w http.ResponseWriter, r *http.Request) {
 	resp := pauseStatusResponse{Paused: false, UnpauseUntil: &untilStr, RemainingSec: rem}
 	_ = json.NewEncoder(w).Encode(resp)
 }
+
+// watchdogStatusFile is where pause_leak_detector.py writes its status JSON.
+const watchdogStatusFile = "/tmp/pause_watchdog_status.json"
+
+// ServeWatchdogStatus handles GET /api/pause/watchdog-status.
+//
+// Reads /tmp/pause_watchdog_status.json written by the pause_leak_detector.py
+// daemon and returns it verbatim. Returns a safe default {"ok":true,"leak_count":0}
+// when the daemon hasn't written the file yet (e.g. right after startup).
+func (ch *ConfigHandler) ServeWatchdogStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	data, err := os.ReadFile(watchdogStatusFile)
+	if err != nil {
+		// Daemon not yet running or file not written — safe default
+		w.Write([]byte(`{"ok":true,"paused":false,"leak_count":0,"leaks":[],"last_checked":0}`))
+		return
+	}
+	w.Write(data)
+}

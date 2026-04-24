@@ -52,6 +52,7 @@ import IntegrityStatus from './components/IntegrityStatus';
 import HelpPanel from './components/HelpPanel';
 import SystemHealthPanel, { type HealthSummary } from './components/SystemHealthPanel';
 import PauseOverlay, { PauseCountdown, type PauseStatus } from './components/PauseOverlay';
+import PauseWatchdogBadge from './components/PauseWatchdogBadge';
 import { Shield, Menu, Home, Share2, Map, HelpCircle } from 'lucide-react';
 import Dashboard from './pages/Dashboard';
 import Architecture from './pages/Architecture';
@@ -435,6 +436,8 @@ function App() {
         <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
             {/* Pause countdown — kept in nav for visibility */}
             <PauseCountdown status={pauseStatus} onPause={handlePause} />
+            {/* Phase 21: pause leak watchdog badge */}
+            <PauseWatchdogBadge />
             {/* Integrity Status — three traffic lights */}
             <IntegrityStatus onStatusChange={handleIntegrityChange} />
             {/* Market state badge */}
